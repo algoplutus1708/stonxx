@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
-import numpy as np
 import pandas as pd
 import pandas_market_calendars as mcal
 import pytz
@@ -1625,45 +1624,44 @@ def append_missing_markers(
 
     if df_all is None or len(df_all) == 0:
         df_all = pd.DataFrame(columns=base_columns + ["missing"])
-        df_all.index = pd.DatetimeIndex([], name="datetime")
+        df_all.index = pd.DatetimeIndex([], name="datetime", tz="UTC")
 
     df_all = ensure_missing_column(df_all)
 
-    rows = []
-    for d in missing_dates:
-        dt = _market_close_utc_for_date(d)
-        row = {col: pd.NA for col in df_all.columns if col != "missing"}
-        row["datetime"] = dt
-        row["missing"] = True
-        rows.append(row)
+    placeholder_index = pd.DatetimeIndex(
+        [_market_close_utc_for_date(d) for d in missing_dates],
+        name="datetime",
+    )
 
-    if rows:
-        CONNECTION_DIAGNOSTICS["placeholder_writes"] = CONNECTION_DIAGNOSTICS.get("placeholder_writes", 0) + len(rows)
+    if len(placeholder_index):
+        CONNECTION_DIAGNOSTICS["placeholder_writes"] = CONNECTION_DIAGNOSTICS.get("placeholder_writes", 0) + len(placeholder_index)
 
         # DEBUG-LOG: Placeholder injection
         logger.debug(
             "[THETA][DEBUG][PLACEHOLDER][INJECT] count=%d dates=%s",
-            len(rows),
+            len(placeholder_index),
             ", ".join(sorted({d.isoformat() for d in missing_dates}))
         )
 
-        placeholder_df = pd.DataFrame(rows).set_index("datetime")
-        for col in df_all.columns:
-            if col not in placeholder_df.columns:
-                if col == "missing":
-                    placeholder_df[col] = True
-                else:
-                    # Use np.nan instead of pd.NA to avoid FutureWarning about concat with all-NA columns
-                    placeholder_df[col] = np.nan
-        placeholder_df = placeholder_df[df_all.columns]
-        if len(df_all) == 0:
-            df_all = placeholder_df
-        else:
-            df_all = pd.concat([df_all, placeholder_df]).sort_index()
+        # PERF: Avoid pandas FutureWarning spam from concatenating all-NA placeholder frames.
+        # Reindex onto the union of existing + placeholder timestamps instead.
+        try:
+            df_all_index = df_all.index
+            if not isinstance(df_all_index, pd.DatetimeIndex):
+                df_all = df_all.copy()
+                df_all.index = pd.to_datetime(df_all.index, utc=True)
+            elif getattr(df_all_index, "tz", None) is None:
+                df_all = df_all.copy()
+                df_all.index = pd.to_datetime(df_all.index, utc=True)
+        except Exception:
+            pass
+
+        df_all = df_all.reindex(df_all.index.union(placeholder_index)).sort_index()
+        df_all.loc[placeholder_index, "missing"] = True
         df_all = df_all[~df_all.index.duplicated(keep="last")]
         logger.debug(
             "[THETA][DEBUG][THETADATA-CACHE] recorded %d placeholder day(s): %s",
-            len(rows),
+            len(placeholder_index),
             ", ".join(sorted({d.isoformat() for d in missing_dates})),
         )
 
@@ -1819,6 +1817,21 @@ def get_price_data(
     # Preserve original bounds for final filtering
     requested_start = start
     requested_end = end
+
+    # Defensive: callers should never request an inverted window, but it can occur when clamping
+    # to option expiration or applying offsets. Return an empty frame rather than crashing deep
+    # inside calendar scheduling.
+    try:
+        if start is not None and end is not None and start > end:
+            logger.warning(
+                "[THETA][WARN][REQUEST] Ignoring inverted request window for %s: start=%s end=%s",
+                getattr(asset, "symbol", asset),
+                start,
+                end,
+            )
+            return pd.DataFrame()
+    except Exception:
+        pass
 
     # Check if we already have data for this asset in the cache file
     df_all = None
@@ -2755,6 +2768,18 @@ def get_trading_dates(asset: Asset, start: datetime, end: datetime):
     """
     start_date = start.date() if hasattr(start, 'date') else start
     end_date = end.date() if hasattr(end, 'date') else end
+    try:
+        if start_date > end_date:
+            logger.debug(
+                "[THETA][DEBUG][TRADING_DATES] start_date=%s after end_date=%s for asset=%s; returning empty list",
+                start_date,
+                end_date,
+                getattr(asset, "symbol", asset),
+            )
+            return []
+    except Exception:
+        # If dates are not comparable, fall through and let the calendar path raise.
+        pass
     return list(_cached_trading_dates(asset.asset_type, start_date, end_date))
 
 

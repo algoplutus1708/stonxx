@@ -1,4 +1,5 @@
 import datetime
+import warnings
 
 import pandas as pd
 import pytz
@@ -42,3 +43,18 @@ def test_append_missing_markers_uses_market_close_time():
     ts_ny = df.index[0].tz_convert(ny)
     assert ts_ny.date() == datetime.date(2025, 10, 1)
     assert ts_ny.hour == 16 and ts_ny.minute == 0
+
+
+def test_append_missing_markers_does_not_emit_concat_futurewarning():
+    df_all = pd.DataFrame(
+        {"open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0], "volume": [1], "missing": [False]},
+        index=pd.DatetimeIndex([pd.Timestamp("2025-10-02", tz="UTC")], name="datetime"),
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", FutureWarning)
+        result = thetadata_helper.append_missing_markers(df_all, [datetime.date(2025, 10, 1)])
+
+    assert result is not None
+    assert len(result) == 2
+    assert not any(issubclass(w.category, FutureWarning) for w in caught)

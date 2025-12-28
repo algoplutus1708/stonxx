@@ -1522,6 +1522,23 @@ class BacktestingBroker(Broker):
 
             # Get the OHLCV data for the asset if we're using the PANDAS data source
             elif self.data_source.SOURCE == "PANDAS":
+                # ThetaData option market orders: prefer NBBO quote fills to avoid forcing
+                # minute OHLC downloads (trades can be sparse and fetching OHLC is expensive).
+                if (
+                    self._is_thetadata_source()
+                    and self._is_option_asset(getattr(order, "asset", None))
+                    and order.order_type == Order.OrderType.MARKET
+                ):
+                    quote_fill_price = self._try_fill_with_quote(order, strategy, None, None, None)
+                    if quote_fill_price is not None:
+                        self._execute_filled_order(
+                            order=order,
+                            price=quote_fill_price,
+                            filled_quantity=filled_quantity,
+                            strategy=strategy,
+                        )
+                        continue
+
                 # This is a hack to get around the fact that we need to get the previous day's data to prevent lookahead bias.
                 ohlc = self.data_source.get_historical_prices(
                     asset=asset,

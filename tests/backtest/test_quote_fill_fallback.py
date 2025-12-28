@@ -74,3 +74,64 @@ def test_try_fill_with_quote_respects_limit_price():
 
     assert price is None
     assert not hasattr(order, "_price_source")
+
+
+def test_thetadata_option_market_order_prefers_quote_fill_without_ohlc(monkeypatch):
+    """ThetaData option market orders should fill from NBBO without forcing OHLC downloads."""
+    quote = Quote(
+        asset=Asset("SPXW", asset_type=Asset.AssetType.OPTION, expiration=None, strike=None, right="CALL"),
+        bid=10.0,
+        ask=11.0,
+        timestamp=datetime.datetime.now(datetime.timezone.utc),
+    )
+
+    broker = BacktestingBroker.__new__(BacktestingBroker)
+    broker.logger = get_logger("thetadata_quote_fill_market_test")
+    broker.hybrid_prefetcher = None
+    broker.prefetcher = None
+
+    class _OrderList:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def get_list(self):
+            return list(self._items)
+
+    class _DummyDataSource:
+        SOURCE = "PANDAS"
+        _timestep = "minute"
+
+        def get_datetime(self):
+            return datetime.datetime(2024, 1, 2, 9, 30, tzinfo=datetime.timezone.utc)
+
+        def get_historical_prices(self, *args, **kwargs):
+            raise AssertionError("OHLC should not be fetched when quote fill succeeds")
+
+    broker.data_source = _DummyDataSource()
+    broker.get_quote = MagicMock(return_value=quote)
+    broker._is_thetadata_source = MagicMock(return_value=True)
+    broker._trade_event_log_df = None
+    broker.process_expired_option_contracts = MagicMock()
+
+    order = Order(
+        strategy="TestStrategy",
+        asset=quote.asset,
+        quantity=Decimal("1"),
+        side=Order.OrderSide.SELL,
+        order_type=Order.OrderType.MARKET,
+    )
+    order.quote = Asset("USD", asset_type=Asset.AssetType.FOREX)
+
+    broker._unprocessed_orders = _OrderList([])
+    broker._new_orders = _OrderList([order])
+    broker._execute_filled_order = MagicMock()
+    broker.cancel_order = MagicMock()
+
+    strategy = DummyStrategy(parameters={"max_spread_pct": 1.0})
+    strategy.name = "TestStrategy"
+
+    broker.process_pending_orders(strategy)
+
+    broker._execute_filled_order.assert_called_once()
+    fill_kwargs = broker._execute_filled_order.call_args.kwargs
+    assert fill_kwargs["price"] == pytest.approx(10.0)
