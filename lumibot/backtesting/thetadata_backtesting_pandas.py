@@ -181,15 +181,17 @@ class ThetaDataBacktestingPandas(PandasData):
                 if ts_unit == "day":
                     start_date = dt_index.min().date()
                     end_date = dt_index.max().date()
-                    base_tz = getattr(dt_index, "tz", None)
                     start_dt = datetime.combine(start_date, datetime.min.time())
                     end_dt = datetime.combine(end_date, datetime.max.time())
-                    if base_tz is not None:
+                    base_tz = getattr(dt_index, "tz", None) or pytz.UTC
+                    # IMPORTANT: for pytz timezones, use `localize()` (not `replace(tzinfo=...)`)
+                    # to avoid "LMT" offsets like -04:56 which break coverage comparisons.
+                    if hasattr(base_tz, "localize"):
+                        start_dt = base_tz.localize(start_dt)
+                        end_dt = base_tz.localize(end_dt)
+                    else:
                         start_dt = start_dt.replace(tzinfo=base_tz)
                         end_dt = end_dt.replace(tzinfo=base_tz)
-                    else:
-                        start_dt = start_dt.replace(tzinfo=pytz.UTC)
-                        end_dt = end_dt.replace(tzinfo=pytz.UTC)
                     start = start_dt
                     end = end_dt
                 else:
@@ -232,6 +234,12 @@ class ThetaDataBacktestingPandas(PandasData):
             metadata["tail_placeholder"] = False
             if not metadata["empty_fetch"]:
                 metadata["empty_fetch"] = False
+
+        # Preserve runtime cache flags that should not be reset by metadata refreshes
+        # (e.g., day-mode metadata rebuilds during _update_pandas_data).
+        for flag_key in ("prefetch_complete", "ffilled", "sidecar_loaded"):
+            if flag_key in previous_meta:
+                metadata[flag_key] = previous_meta.get(flag_key)
 
         if getattr(asset, "asset_type", None) == Asset.AssetType.OPTION:
             metadata["expiration"] = asset.expiration
@@ -1073,6 +1081,12 @@ class ThetaDataBacktestingPandas(PandasData):
             )
 
             if cache_covers:
+                # Mark as forward-filled/complete for reuse semantics. Tests and downstream cache
+                # logic expect these flags to stay truthy once a dataset is considered usable.
+                if existing_meta is not None:
+                    if not existing_meta.get("ffilled"):
+                        existing_meta["ffilled"] = True
+                    existing_meta["prefetch_complete"] = True
                 if (
                     expiration_dt is not None
                     and end_requirement is not None
