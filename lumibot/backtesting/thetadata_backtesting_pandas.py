@@ -2532,18 +2532,6 @@ class ThetaDataBacktestingPandas(PandasData):
             should_refresh = True
 
         if should_refresh:
-            require_ohlc = True
-            try:
-                _, ts_unit = self.convert_timestep_str_to_timedelta(timestep)
-                base_asset = asset[0] if isinstance(asset, tuple) else asset
-                if (
-                    getattr(base_asset, "asset_type", None) == Asset.AssetType.OPTION
-                    and ts_unit in {"minute", "hour", "second"}
-                ):
-                    require_ohlc = False
-            except Exception:
-                require_ohlc = True
-
             self._update_pandas_data(
                 asset,
                 quote,
@@ -2551,7 +2539,7 @@ class ThetaDataBacktestingPandas(PandasData):
                 timestep,
                 dt,
                 require_quote_data=True,
-                require_ohlc_data=require_ohlc,
+                require_ohlc_data=True,
             )
 
         quote_obj = None
@@ -2637,6 +2625,10 @@ class ThetaDataBacktestingPandas(PandasData):
 
                 if bid is not None and ask is not None and bid > 0 and ask > 0:
                     quote_obj.price = (bid + ask) / 2.0
+                elif bid is not None and bid > 0:
+                    quote_obj.price = bid
+                elif ask is not None and ask > 0:
+                    quote_obj.price = ask
                 else:
                     last_trade = self.get_last_price(asset, timestep=timestep, quote=quote, exchange=exchange)
                     if last_trade is not None:

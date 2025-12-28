@@ -674,6 +674,10 @@ class Data:
         """
         if not getattr(self, "_quote_required_cols_present", True):
             # Log once per Data instance; avoid per-call warning spam in tight loops.
+            #
+            # IMPORTANT: Quote history datasets (e.g., ThetaData option NBBO) may not contain OHLCV
+            # columns, but we still want to surface bid/ask. Missing price columns simply return
+            # None for those fields.
             if not getattr(self, "_quote_presence_logged", False):
                 missing_price_cols = [col for col in _DATA_REQUIRED_PRICE_COLS if col not in self.datalines]
                 logger.warning(
@@ -682,7 +686,6 @@ class Data:
                     missing_price_cols,
                 )
                 self._quote_presence_logged = True
-            return {}
 
         missing_quote_cols = getattr(self, "_quote_missing_cols", None)
         if missing_quote_cols and not getattr(self, "_quote_presence_logged", False):
