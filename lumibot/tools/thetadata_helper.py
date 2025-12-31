@@ -299,7 +299,7 @@ OPTION_LIST_ENDPOINTS = {
 
 # Bump this to invalidate old chain cache files when the chain schema/normalization changes.
 # v3 (2025-12-21): SPX index options need SPXW expirations for 0DTE strategies.
-THETADATA_CHAIN_CACHE_VERSION = 3
+THETADATA_CHAIN_CACHE_VERSION = 4
 
 DEFAULT_SESSION_HOURS = {
     True: ("04:00:00", "20:00:00"),   # include extended hours
@@ -4863,7 +4863,7 @@ def build_historical_chain(
                     for option_type in ["CALL", "PUT"]:
                         for expiry_date, strikes in chains[option_type].items():
                             normalized = {
-                                round(_select_normalized_strike(float(strike)), 2)
+                                round(_select_normalized_strike(float(strike)), 5)
                                 for strike in strikes
                                 if strike is not None
                             }

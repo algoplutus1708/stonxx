@@ -34,8 +34,14 @@ logger = logging.getLogger(__name__)
 
 # Configuration from environment
 # Queue mode is ALWAYS enabled - it's the only way to connect to ThetaData
-QUEUE_POLL_INTERVAL = float(os.environ.get("THETADATA_QUEUE_POLL_INTERVAL", "0.01"))  # 10ms default - fast polling
-QUEUE_TIMEOUT = float(os.environ.get("THETADATA_QUEUE_TIMEOUT", "0"))  # 0 = wait forever (never fail)
+# NOTE: Extremely fast polling can overwhelm the downloader (and CloudWatch) when many requests
+# are in flight. A 200ms default keeps progress responsive without creating a status-poll storm.
+QUEUE_POLL_INTERVAL = float(os.environ.get("THETADATA_QUEUE_POLL_INTERVAL", "0.2"))
+
+# NOTE: Never timing out can cause production backtests to appear "stuck forever" when a single
+# downloader request is lost or wedged. Default to a bounded wait; callers can override per-call
+# or via env var if they truly want infinite waits.
+QUEUE_TIMEOUT = float(os.environ.get("THETADATA_QUEUE_TIMEOUT", "600"))
 MAX_CONCURRENT_REQUESTS = int(os.environ.get("THETADATA_MAX_CONCURRENT", "8"))  # Max requests in flight
 QUEUE_SUBMIT_HTTP_TIMEOUT = float(os.environ.get("THETADATA_QUEUE_SUBMIT_HTTP_TIMEOUT", "120"))
 QUEUE_STATUS_HTTP_TIMEOUT = float(os.environ.get("THETADATA_QUEUE_STATUS_HTTP_TIMEOUT", "10"))
@@ -552,13 +558,37 @@ class QueueClient:
         start_time = time.time()
         last_log_time = 0
         last_position = None
+        last_status = None
 
         while True:
             elapsed = time.time() - start_time
 
             # Check timeout (0 = wait forever)
             if timeout > 0 and elapsed > timeout:
-                raise TimeoutError(f"Timed out waiting for {request_id} after {elapsed:.1f}s")
+                info = self._refresh_status(request_id)
+                if info:
+                    last_status = info.status
+                    last_position = info.queue_position
+                    last_error = info.error
+                    last_attempts = info.attempts
+                    last_estimated_wait = info.estimated_wait
+                else:
+                    last_error = None
+                    last_attempts = None
+                    last_estimated_wait = None
+
+                raise TimeoutError(
+                    "Timed out waiting for %s after %.1fs (status=%s position=%s attempts=%s est_wait=%s error=%s)"
+                    % (
+                        request_id,
+                        elapsed,
+                        last_status,
+                        last_position,
+                        last_attempts,
+                        last_estimated_wait,
+                        last_error,
+                    )
+                )
 
             # Refresh status
             info = self._refresh_status(request_id)
@@ -566,6 +596,7 @@ class QueueClient:
             if info:
                 status = info.status
                 position = info.queue_position
+                last_status = status
 
                 # Log position changes or periodic updates
                 if position != last_position or time.time() - last_log_time > 10:

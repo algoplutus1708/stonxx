@@ -24,6 +24,7 @@ os.environ["DATADOWNLOADER_API_KEY"] = "test-api-key"
 
 from lumibot.tools.thetadata_queue_client import (
     QUEUE_POLL_INTERVAL,
+    QUEUE_TIMEOUT,
     QueueClient,
     QueuedRequestInfo,
     get_queue_client,
@@ -45,7 +46,7 @@ class TestQueueClientInit:
         assert client.api_key == "test-key"
         assert client.api_key_header == "X-Downloader-Key"
         assert client.poll_interval == QUEUE_POLL_INTERVAL
-        assert client.timeout == 0  # 0 = wait forever
+        assert client.timeout == QUEUE_TIMEOUT
 
     def test_init_with_custom_values(self):
         """Test client initializes with custom values."""

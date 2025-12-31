@@ -62,7 +62,28 @@ class OptionsHelper:
         self.last_call_sell_strike: Optional[float] = None
         self.last_put_sell_strike: Optional[float] = None
         self._liquidity_deprecation_warned = False
+
+        # PERF: Option-heavy strategies often call quote/greeks helpers multiple times per bar.
+        # In backtesting, quotes are immutable within a bar, so cache derived values keyed by the
+        # current strategy datetime to avoid repeated get_quote()/get_greeks() work.
+        self._per_bar_cache_dt: Optional[datetime] = None
+        self._per_bar_option_mark_cache: Dict[Asset, Tuple[Optional[float], Optional[float], Optional[float]]] = {}
+        self._per_bar_delta_cache: Dict[Tuple[Asset, Optional[float]], Optional[float]] = {}
+        self._per_bar_greeks_cache: Dict[Tuple[Asset, Optional[float], Optional[float]], Optional[Dict[str, Any]]] = {}
         self.strategy.log_message("OptionsHelper initialized.", color="blue")
+
+    def _reset_per_bar_caches_if_needed(self) -> None:
+        """Reset per-bar caches when the strategy datetime advances."""
+        try:
+            current_dt = self.strategy.get_datetime()
+        except Exception:
+            return
+
+        if self._per_bar_cache_dt != current_dt:
+            self._per_bar_cache_dt = current_dt
+            self._per_bar_option_mark_cache = {}
+            self._per_bar_delta_cache = {}
+            self._per_bar_greeks_cache = {}
 
     @staticmethod
     def _coerce_price(value: Any, field_name: str, flags: List[str], notes: List[str]) -> Optional[float]:
@@ -127,6 +148,12 @@ class OptionsHelper:
         option_asset: Asset,
     ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         """Return (mark_price, bid, ask) derived from quotes; never calls get_last_price()."""
+        self._reset_per_bar_caches_if_needed()
+
+        cached = self._per_bar_option_mark_cache.get(option_asset)
+        if cached is not None:
+            return cached
+
         try:
             quote = self.strategy.get_quote(option_asset)
         except Exception:
@@ -136,14 +163,22 @@ class OptionsHelper:
         ask = self._float_positive(getattr(quote, "ask", None))
 
         if bid is not None and ask is not None:
-            return (bid + ask) / 2.0, bid, ask
+            result = ((bid + ask) / 2.0, bid, ask)
+            self._per_bar_option_mark_cache[option_asset] = result
+            return result
         if bid is not None:
-            return bid, bid, None
+            result = (bid, bid, None)
+            self._per_bar_option_mark_cache[option_asset] = result
+            return result
         if ask is not None:
-            return ask, None, ask
+            result = (ask, None, ask)
+            self._per_bar_option_mark_cache[option_asset] = result
+            return result
 
         price = self._float_positive(getattr(quote, "price", None))
-        return price, bid, ask
+        result = (price, bid, ask)
+        self._per_bar_option_mark_cache[option_asset] = result
+        return result
 
     # ============================================================
     # Basic Utility Functions
@@ -431,7 +466,15 @@ class OptionsHelper:
                 continue
             delta = greeks.get("delta")
             strike_deltas[strike] = delta
-            self.strategy.log_message(f"Strike {strike}: delta = {delta}", color="blue")
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[OptionsHelper] strike delta symbol=%s expiry=%s right=%s strike=%s delta=%s",
+                    getattr(underlying_asset, "symbol", None),
+                    expiry,
+                    right,
+                    strike,
+                    delta,
+                )
             if stop_greater_than is not None and delta is not None and delta >= stop_greater_than:
                 break
             if stop_less_than is not None and delta is not None and delta <= stop_less_than:
@@ -461,7 +504,8 @@ class OptionsHelper:
         Optional[float]
             The computed delta or None if unavailable.
         """
-        self.strategy.log_message(f"Getting delta for {underlying_asset.symbol} at strike {strike}, expiry {expiry}", color="blue")
+        self._reset_per_bar_caches_if_needed()
+
         option = Asset(
             underlying_asset.symbol,
             asset_type="option",
@@ -470,6 +514,16 @@ class OptionsHelper:
             right=right,
             underlying_asset=underlying_asset,
         )
+
+        cache_underlying: Optional[float]
+        try:
+            cache_underlying = float(underlying_price) if underlying_price is not None else None
+        except Exception:
+            cache_underlying = None
+
+        delta_cache_key = (option, cache_underlying)
+        if delta_cache_key in self._per_bar_delta_cache:
+            return self._per_bar_delta_cache[delta_cache_key]
 
         def _coerce_price(value: Any) -> Optional[float]:
             try:
@@ -488,23 +542,48 @@ class OptionsHelper:
                 option_price = None
 
         if option_price is None:
-            self.strategy.log_message(f"No price for option {option.symbol} at strike {strike}", color="yellow")
+            self._per_bar_delta_cache[delta_cache_key] = None
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[OptionsHelper] delta unavailable (missing price) option=%s expiry=%s strike=%s right=%s",
+                    option.symbol,
+                    option.expiration,
+                    option.strike,
+                    option.right,
+                )
             return None
 
-        try:
-            greeks = self.strategy.get_greeks(option, underlying_price=underlying_price, asset_price=option_price)
-        except TypeError:
-            # Some unit tests (and custom strategy stubs) mock get_greeks without the asset_price kwarg.
-            greeks = self.strategy.get_greeks(option, underlying_price=underlying_price)
+        greeks_cache_key = (option, cache_underlying, option_price)
+        greeks = self._per_bar_greeks_cache.get(greeks_cache_key)
+        if greeks is None and greeks_cache_key not in self._per_bar_greeks_cache:
+            try:
+                greeks = self.strategy.get_greeks(option, underlying_price=underlying_price, asset_price=option_price)
+            except TypeError:
+                # Some unit tests (and custom strategy stubs) mock get_greeks without the asset_price kwarg.
+                greeks = self.strategy.get_greeks(option, underlying_price=underlying_price)
+            self._per_bar_greeks_cache[greeks_cache_key] = greeks
         # Handle None from get_greeks - can happen when option price or underlying price unavailable
         if greeks is None:
+            self._per_bar_delta_cache[delta_cache_key] = None
             self.strategy.log_message(
                 f"Could not calculate Greeks for {option.symbol} at strike {strike} (greeks returned None)",
-                color="yellow"
+                color="yellow",
             )
             return None
         delta = greeks.get("delta")
-        self.strategy.log_message(f"Delta for strike {strike} is {delta}", color="blue")
+        self._per_bar_delta_cache[delta_cache_key] = delta
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "[OptionsHelper] delta option=%s expiry=%s strike=%s right=%s underlying_price=%s option_price=%s delta=%s",
+                option.symbol,
+                option.expiration,
+                option.strike,
+                option.right,
+                underlying_price,
+                option_price,
+                delta,
+            )
         return delta
 
     def find_strike_for_delta(self, underlying_asset: Asset, underlying_price: float,
@@ -606,22 +685,76 @@ class OptionsHelper:
             color="blue",
         )
 
-        closest_strike: Optional[float] = None
-        closest_delta: Optional[float] = None
+        # Delta is monotonic in strike:
+        # - Calls: delta decreases as strike increases.
+        # - Puts: delta increases (toward 0) as strike increases.
+        is_call = option_type == "CALL"
 
-        for strike in candidate_strikes:
+        best_strike: Optional[float] = None
+        best_delta: Optional[float] = None
+
+        lo = 0
+        hi = len(candidate_strikes) - 1
+        max_iters = int(math.ceil(math.log2(len(candidate_strikes) + 1))) + 8
+        visited: set[int] = set()
+
+        for _ in range(max_iters):
+            if lo > hi:
+                break
+
+            mid = (lo + hi) // 2
+            if mid in visited:
+                break
+            visited.add(mid)
+
+            strike = candidate_strikes[mid]
             self.strategy.log_message(
-                f"🔎 Trying strike {strike:g} (range: {strike_min:.2f}-{strike_max:.2f})",
+                f"🔍 Trying strike {strike:g} (range: {strike_min:.2f}-{strike_max:.2f})",
                 color="blue",
             )
             mid_delta = self.get_delta_for_strike(underlying_asset, underlying_price, strike, expiry, right)
-            if mid_delta is None:
-                continue
 
-            self.strategy.log_message(
-                f"📈 Strike {strike:g} has delta {mid_delta:.4f} (target: {target_delta})",
-                color="blue",
-            )
+            if mid_delta is None:
+                # Try nearby strikes when the midpoint has no actionable prices.
+                resolved = False
+                for offset in range(1, 6):
+                    for idx in (mid - offset, mid + offset):
+                        if idx < lo or idx > hi or idx in visited:
+                            continue
+                        visited.add(idx)
+                        strike_candidate = candidate_strikes[idx]
+                        delta_candidate = self.get_delta_for_strike(
+                            underlying_asset, underlying_price, strike_candidate, expiry, right
+                        )
+                        if delta_candidate is None:
+                            continue
+                        strike = strike_candidate
+                        mid_delta = delta_candidate
+                        mid = idx
+                        resolved = True
+                        break
+                    if resolved:
+                        break
+
+                if mid_delta is None:
+                    break
+
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[OptionsHelper] strike search step symbol=%s right=%s expiry=%s strike=%s delta=%s target=%s lo=%s hi=%s",
+                    getattr(underlying_asset, "symbol", None),
+                    option_type,
+                    expiry,
+                    strike,
+                    mid_delta,
+                    target_delta,
+                    lo,
+                    hi,
+                )
+
+            if best_delta is None or abs(mid_delta - target_delta) < abs(best_delta - target_delta):
+                best_delta = mid_delta
+                best_strike = float(strike)
 
             if abs(mid_delta - target_delta) < 0.001:
                 self.strategy.log_message(
@@ -630,26 +763,35 @@ class OptionsHelper:
                 )
                 return float(strike)
 
-            if closest_delta is None or abs(mid_delta - target_delta) < abs(closest_delta - target_delta):
-                closest_delta = mid_delta
-                closest_strike = float(strike)
+            if is_call:
+                # Call delta decreases with strike.
+                if mid_delta > target_delta:
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
+            else:
+                # Put delta increases with strike.
+                if mid_delta < target_delta:
+                    lo = mid + 1
+                else:
+                    hi = mid - 1
 
-        if closest_strike is None:
+        if best_strike is None:
             self.strategy.log_message(f"❌ No valid strike found for target delta {target_delta}", color="red")
             return None
 
         self.strategy.log_message(
-            f"✅ RESULT: Closest strike {closest_strike:g} with delta {closest_delta:.4f} (target was {target_delta})",
+            f"✅ RESULT: Closest strike {best_strike:g} with delta {best_delta:.4f} (target was {target_delta})",
             color="green",
         )
-        if underlying_price > 50 and closest_strike < 10:
+        if underlying_price > 50 and best_strike < 10:
             self.strategy.log_message(
-                f"⚠️  WARNING: Strike {closest_strike:g} seems too low for underlying price ${underlying_price}. "
+                f"⚠️  WARNING: Strike {best_strike:g} seems too low for underlying price ${underlying_price}. "
                 f"This might indicate a data issue.",
                 color="red",
             )
 
-        return closest_strike
+        return best_strike
 
     def calculate_multileg_limit_price(self, orders: List[Order], limit_type: str) -> Optional[float]:
         """

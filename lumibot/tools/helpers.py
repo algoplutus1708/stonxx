@@ -2,6 +2,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 from decimal import Decimal, ROUND_HALF_EVEN
 
 import pytz
@@ -20,6 +21,11 @@ from ..constants import LUMIBOT_DEFAULT_PYTZ, LUMIBOT_DEFAULT_TIMEZONE
 # Trading calendar cache: saves ~0.8s on repeated calendar.schedule() calls
 # Key: (market, start_date_str, end_date_str, tz_str)
 _TRADING_CALENDAR_CACHE = {}
+
+# Progress bar throttling: when BACKTESTING_QUIET_LOGS=false we print progress as newline-separated
+# lines. For fast simulations this can spam thousands of lines in a single second and drown out
+# strategy logs. Throttle to at most ~1 line/second per (output, prefix) when not in quiet mode.
+_PROGRESS_LAST_PRINT: dict[tuple[int, str], tuple[float, str]] = {}
 
 
 def get_chunks(l, chunk_size):
@@ -368,6 +374,23 @@ def print_progress_bar(
     percent_str = ("  {:.%df}" % decimals).format(percent)
     percent_str = percent_str[-decimals - 4 :]
 
+    # Check if quiet logs mode is enabled.
+    # When quiet_logs=true: no newline, progress bar overwrites itself in place
+    # When quiet_logs=false: add newline so log messages appear on their own lines
+    quiet_logs = os.environ.get("BACKTESTING_QUIET_LOGS", "true").lower() == "true"
+
+    if not quiet_logs:
+        key = (id(file), str(prefix))
+        now_mono = time.monotonic()
+        last = _PROGRESS_LAST_PRINT.get(key)
+        if last is not None:
+            last_time, _ = last
+            # In newline-progress mode, cap output to ~1 line/sec regardless of how fast the
+            # simulation advances. Always allow the final 100% line through.
+            if (now_mono - last_time) < 1.0 and percent < 100:
+                return
+        _PROGRESS_LAST_PRINT[key] = (now_mono, percent_str)
+
     now = dt.datetime.now()
     elapsed = now - backtesting_started
 
@@ -408,10 +431,6 @@ def print_progress_bar(
     # Clear rest of line with ANSI escape code
     line += "\033[K"
 
-    # Check if quiet logs mode is enabled
-    # When quiet_logs=true: no newline, progress bar overwrites itself in place
-    # When quiet_logs=false: add newline so log messages appear on their own lines
-    quiet_logs = os.environ.get("BACKTESTING_QUIET_LOGS", "true").lower() == "true"
     if not quiet_logs:
         line += "\n"
 
@@ -582,5 +601,3 @@ def get_timezone_from_datetime(dtm: dt.datetime) -> pytz.timezone:
         return pytz.timezone(timezone_name)
     except (AttributeError, pytz.exceptions.UnknownTimeZoneError):
         return LUMIBOT_DEFAULT_PYTZ
-
-

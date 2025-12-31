@@ -674,8 +674,9 @@ class ThetaDataBacktestingPandas(PandasData):
         # Get the start datetime and timestep unit.
         #
         # PERFORMANCE: For point-in-time option quote/price checks (length≈1–5 bars) a 5-day buffer is
-        # overkill and causes the downloader to fetch multiple prior trading days unnecessarily. Keep
-        # the larger buffer for broader historical pulls, daily cadence, and non-option assets.
+        # overkill and can force the downloader to include prior trading days. For intraday option
+        # quotes/prices we only need the current trading day for mark/greeks calculations; broader
+        # history pulls can still request a larger `length` (or provide an explicit start_dt).
         effective_start_buffer = START_BUFFER
         try:
             _, ts_unit_preview = self.convert_timestep_str_to_timedelta(timestep)
@@ -688,7 +689,7 @@ class ThetaDataBacktestingPandas(PandasData):
             and length <= 5
             and ts_unit_preview in {"minute", "hour"}
         ):
-            effective_start_buffer = timedelta(days=1)
+            effective_start_buffer = timedelta(0)
 
         start_datetime, ts_unit = self.get_start_datetime_and_ts_unit(
             length, timestep, start_dt, start_buffer=effective_start_buffer
@@ -2329,7 +2330,6 @@ class ThetaDataBacktestingPandas(PandasData):
         return AssetsMapping(result)
 
     def get_last_price(self, asset, timestep="minute", quote=None, exchange=None, **kwargs) -> Union[float, Decimal, None]:
-        sample_length = 5
         dt = self.get_datetime()
         # In day mode, use day data for price lookups instead of defaulting to minute.
         # This prevents unnecessary minute data downloads at end of day-mode backtests.
@@ -2350,6 +2350,14 @@ class ThetaDataBacktestingPandas(PandasData):
                 "[THETA][DEBUG][TIMESTEP_ALIGN] get_last_price aligned from minute to day for asset=%s",
                 asset,
             )
+
+        # PERFORMANCE: `get_last_price()` is "last trade" semantics, not a historical-series API.
+        # For daily option last-price checks, fetching a 5-day window can cause unnecessary placeholder
+        # churn (Theta 472 / empty) during contract selection. Use a minimal window and rely on the
+        # existing progressive lookback (30/252 days) only when the current day has no trades.
+        sample_length = 5
+        if timestep == "day" and getattr(asset, "asset_type", None) == Asset.AssetType.OPTION:
+            sample_length = 1
 
         # PERF: cache last trade results within the same backtest datetime.
         # Backtest internals and user strategies may ask for the same asset's last price multiple
