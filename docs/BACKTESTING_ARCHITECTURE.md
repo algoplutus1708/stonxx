@@ -4,6 +4,14 @@
 
 LumiBot is a trading and backtesting framework. This document focuses on the **backtesting architecture**, specifically how data flows from external sources (Yahoo, ThetaData, Polygon) into the backtesting engine.
 
+**CORE PRINCIPLE: Backtesting must mimic live broker behavior.**
+
+If the backtest execution model (data semantics, fill model, order handling, fees, pricing) diverges meaningfully from how real brokers behave, the backtest is not trustworthy.
+
+We optimize for:
+1) **Accuracy / realism first** (broker-like behavior; no hidden optimism or lookahead leaks)
+2) **Speed second** (make it fast *without changing semantics*)
+
 ## Related Docs
 
 - Handoffs: `docs/handoffs/`
@@ -183,6 +191,12 @@ LumiBot intentionally separates *trade-based* pricing from *quote/mark* pricing:
     - quote-based fills in illiquid markets (ThetaData backtests only).
 
 This is essential to ensure ThetaData backtests behave like live brokers: brokers return stale last trades, and only quote endpoints provide NBBO/mark.
+
+### SMART_LIMIT Backtest Fills
+
+- SMART_LIMIT fills use **mid ± slippage** when bid/ask is available (mid + slippage for buys, mid - slippage for sells).
+- If bid/ask is missing, SMART_LIMIT **downgrades to market** (next-bar open) and logs a warning.
+- Inside-spread fills are allowed because they occur regularly in live markets.
 
 ## Backtesting Portfolio Valuation (Mark-to-Market)
 
