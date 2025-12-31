@@ -1417,7 +1417,7 @@ class StrategyExecutor(Thread):
 
     def _is_pandas_daily_data_source(self):
         """Check if the broker has a pandas daily data source"""
-        has_data_source = hasattr(self.broker, "_data_source")
+        has_data_source = getattr(self.broker, "data_source", None) is not None
         return (
             has_data_source
             and self.broker.data_source.SOURCE == "PANDAS"
@@ -1636,7 +1636,7 @@ class StrategyExecutor(Thread):
         minutes, hours.
         """
 
-        has_data_source = hasattr(self.broker, "_data_source")
+        has_data_source = getattr(self.broker, "data_source", None) is not None
         market_name = getattr(self.broker, "market", None)
         is_continuous_market = market_name and self._is_continuous_market(market_name)
 
