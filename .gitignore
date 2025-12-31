@@ -56,3 +56,6 @@ schwab_token.json
 # AI assistant instruction files (contain local paths)
 CLAUDE.md
 AGENTS.md
+
+# Allow scoped agent instructions for the test suite.
+!tests/AGENTS.md
