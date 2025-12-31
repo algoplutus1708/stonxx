@@ -22,11 +22,13 @@ class StrEnum(str, Enum):
     3. Can be used in string comparisons without explicit conversion
     """
     def __str__(self):
-        return self.value
+        # Avoid Enum.value property lookups in hot paths; StrEnum members are already `str`.
+        return str.__str__(self)
 
     def __eq__(self, other):
         if isinstance(other, str):
-            return self.value == other
+            # Avoid Enum.value property lookups; compare as plain strings.
+            return str.__eq__(self, other)
         return super().__eq__(other)
 
     def __hash__(self):
@@ -259,6 +261,10 @@ class Asset:
 
         self.asset_type = self.asset_type_must_be_one_of(asset_type)
         self.right = self.right_must_be_one_of(right)
+        # Cache the hash: Asset objects are used heavily as dict keys during backtests (quotes, bars,
+        # chains, positions). Recomputing tuple hashes millions of times dominates CPU in option-heavy
+        # strategies; caching preserves correctness as long as identity fields remain unchanged.
+        self._cached_hash = hash((self.symbol, self.asset_type, self.expiration, self.strike, self.right))
 
     @classmethod
     def symbol2asset(cls, symbol: str):
@@ -297,10 +303,6 @@ class Asset:
             return Asset(symbol=symbol, asset_type="crypto")
         else:
             return Asset(symbol=None)
-
-    def __hash__(self):
-        # Original hash implementation - keep this unchanged
-        return hash((self.symbol, self.asset_type, self.expiration, self.strike, self.right))
 
     def __repr__(self):
         if self.asset_type == "future":
@@ -342,7 +344,7 @@ class Asset:
 
     def __hash__(self):
         """Make Asset hashable for use in sets and dicts."""
-        return hash((self.symbol, self.asset_type, self.expiration, self.strike, self.right))
+        return self._cached_hash
 
     def asset_type_must_be_one_of(self, v):
         # TODO: check if this works!

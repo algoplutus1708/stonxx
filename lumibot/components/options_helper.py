@@ -718,6 +718,33 @@ class OptionsHelper:
             source allows it).
         """
 
+        # PERF: Option strategies often evaluate the same contract multiple times within a single
+        # strategy datetime (MTM, liquidity checks, multi-leg pricing). In backtesting, quotes are
+        # immutable per bar, so cache evaluations for the current datetime.
+        current_dt = None
+        try:
+            current_dt = self.strategy.get_datetime()
+        except Exception:
+            current_dt = None
+
+        cache_dt = getattr(self, "_option_market_eval_cache_dt", None)
+        if cache_dt != current_dt:
+            self._option_market_eval_cache_dt = current_dt
+            self._option_market_eval_cache = {}
+
+        cache_key = (option_asset, max_spread_pct)
+        cache = getattr(self, "_option_market_eval_cache", {})
+        if cache_key in cache:
+            return cache[cache_key]
+
+        # PERF: `log_message()` respects BACKTESTING_QUIET_LOGS, but callers still pay the cost
+        # of building large f-strings. Gate string construction in this hot path.
+        should_log_info = False
+        try:
+            should_log_info = bool(getattr(self.strategy, "logger", None) and self.strategy.logger.isEnabledFor(logging.INFO))
+        except Exception:
+            should_log_info = False
+
         data_source = getattr(getattr(self.strategy, "broker", None), "data_source", None)
         allow_fallback = bool(getattr(data_source, "option_quote_fallback_allowed", False))
 
@@ -741,10 +768,11 @@ class OptionsHelper:
         try:
             quote = self.strategy.get_quote(option_asset)
         except Exception as exc:
-            self.strategy.log_message(
-                f"Error fetching quote for {option_asset}: {exc}",
-                color="red",
-            )
+            if should_log_info:
+                self.strategy.log_message(
+                    f"Error fetching quote for {option_asset}: {exc}",
+                    color="red",
+                )
 
         if quote is not None:
             if getattr(quote, "bid", None) is not None:
@@ -777,30 +805,41 @@ class OptionsHelper:
         # PERFORMANCE: Do not fetch trade-derived OHLC/last when bid/ask is already actionable.
         # ThetaData can provide NBBO without trades, and calling get_last_price() can trigger
         # expensive historical OHLC downloads (especially in backtests).
-        if allow_fallback and buy_price is None and sell_price is None:
-            try:
-                last_price = self.strategy.get_last_price(option_asset)
-            except Exception as exc:
-                self.strategy.log_message(
-                    f"Error fetching last price for {option_asset}: {exc}",
-                    color="red",
-                )
+        if buy_price is None and sell_price is None:
+            # First try to use the quote's price field. This is free (no extra downloader calls)
+            # and is often populated even when bid/ask is absent (e.g., daily OHLC-based quotes).
+            quote_price = None
+            if quote is not None:
+                quote_price = getattr(quote, "price", None)
+            if quote_price is not None:
+                last_price = self._coerce_price(quote_price, "quote_price", data_quality_flags, sanitization_notes)
+
+            # As a last resort, allow data-source-specific fallback to trade-only last price.
+            if last_price is None and allow_fallback:
+                try:
+                    last_price = self.strategy.get_last_price(option_asset)
+                except Exception as exc:
+                    if should_log_info:
+                        self.strategy.log_message(
+                            f"Error fetching last price for {option_asset}: {exc}",
+                            color="red",
+                        )
+
+                if last_price is not None:
+                    last_price = self._coerce_price(last_price, "last_price", data_quality_flags, sanitization_notes)
 
             if last_price is None:
                 missing_last_price = True
-            else:
-                last_price = self._coerce_price(last_price, "last_price", data_quality_flags, sanitization_notes)
-                if last_price is None:
-                    missing_last_price = True
 
-        if allow_fallback and last_price is not None and buy_price is None and sell_price is None:
+        if last_price is not None and buy_price is None and sell_price is None:
             buy_price = last_price
             sell_price = last_price
             used_last_price_fallback = True
-            self.strategy.log_message(
-                f"Using last-price fallback for {option_asset} due to missing bid/ask quotes.",
-                color="yellow",
-            )
+            if should_log_info:
+                self.strategy.log_message(
+                    f"Using last-price fallback for {option_asset} due to missing bid/ask quotes.",
+                    color="yellow",
+                )
         elif not has_bid_ask and allow_fallback and last_price is None:
             data_quality_flags.append("last_price_unusable")
 
@@ -810,32 +849,32 @@ class OptionsHelper:
             buy_price = None
             sell_price = None
 
-        # Compose log message
-        spread_str = f"{spread_pct:.2%}" if spread_pct is not None else "None"
-        max_spread_str = f"{max_spread_pct:.2%}" if max_spread_pct is not None else "None"
-        log_color = "red" if spread_too_wide else (
-            "yellow" if (missing_bid_ask or missing_last_price or used_last_price_fallback) else "blue"
-        )
-        if sanitization_notes:
-            note_summary = "; ".join(sanitization_notes)
-            self.strategy.log_message(
-                f"Option data sanitization for {option_asset}: {note_summary}",
-                color="yellow",
+        if should_log_info:
+            spread_str = f"{spread_pct:.2%}" if spread_pct is not None else "None"
+            max_spread_str = f"{max_spread_pct:.2%}" if max_spread_pct is not None else "None"
+            log_color = "red" if spread_too_wide else (
+                "yellow" if (missing_bid_ask or missing_last_price or used_last_price_fallback) else "blue"
             )
-        self.strategy.log_message(
-            (
-                f"Option market evaluation for {option_asset}: "
-                f"bid={bid}, ask={ask}, last={last_price}, spread={spread_str}, "
-                f"max_spread={max_spread_str}, missing_bid_ask={missing_bid_ask}, "
-                f"missing_last_price={missing_last_price}, spread_too_wide={spread_too_wide}, "
-                f"used_last_price_fallback={used_last_price_fallback}, "
-                f"buy_price={buy_price}, sell_price={sell_price}, "
-                f"data_quality_flags={data_quality_flags}"
-            ),
-            color=log_color,
-        )
+            if sanitization_notes:
+                note_summary = "; ".join(sanitization_notes)
+                self.strategy.log_message(
+                    f"Option data sanitization for {option_asset}: {note_summary}",
+                    color="yellow",
+                )
+            self.strategy.log_message(
+                (
+                    f"Option market evaluation for {option_asset}: "
+                    f"bid={bid}, ask={ask}, last={last_price}, spread={spread_str}, "
+                    f"max_spread={max_spread_str}, missing_bid_ask={missing_bid_ask}, "
+                    f"missing_last_price={missing_last_price}, spread_too_wide={spread_too_wide}, "
+                    f"used_last_price_fallback={used_last_price_fallback}, "
+                    f"buy_price={buy_price}, sell_price={sell_price}, "
+                    f"data_quality_flags={data_quality_flags}"
+                ),
+                color=log_color,
+            )
 
-        return OptionMarketEvaluation(
+        evaluation = OptionMarketEvaluation(
             bid=bid,
             ask=ask,
             last_price=last_price,
@@ -850,6 +889,13 @@ class OptionsHelper:
             max_spread_pct=max_spread_pct,
             data_quality_flags=data_quality_flags,
         )
+
+        try:
+            self._option_market_eval_cache[cache_key] = evaluation
+        except Exception:
+            pass
+
+        return evaluation
 
     def check_option_liquidity(self, option_asset: Asset, max_spread_pct: float) -> bool:
         """
@@ -1023,6 +1069,25 @@ class OptionsHelper:
         elif 'UnderlyingSymbol' in chains_map:
             underlying_symbol = chains_map['UnderlyingSymbol']
 
+        # PERF: Intraday strategies often request the "next valid expiration" on every bar, even
+        # though the answer is stable for the trading day. Cache per (underlying, date, side, chain
+        # fingerprint) so repeated calls avoid re-validating strikes/quotes.
+        cache_dt = getattr(self, "_expiration_cache_dt", None)
+        if cache_dt != dt:
+            self._expiration_cache_dt = dt
+            self._expiration_cache = {}
+
+        try:
+            chain_fingerprint = (len(specific_chain), min(specific_chain.keys()), max(specific_chain.keys()))
+        except Exception:
+            chain_fingerprint = (len(specific_chain) if isinstance(specific_chain, dict) else 0, None, None)
+
+        cache_underlying = underlying_symbol or getattr(underlying_asset, "symbol", None) or "<unknown>"
+        expiration_cache_key = (cache_underlying, dt, call_or_put_caps, bool(allow_prior), chain_fingerprint)
+        expiration_cache = getattr(self, "_expiration_cache", {})
+        if expiration_cache_key in expiration_cache:
+            return expiration_cache[expiration_cache_key]
+
         # Convert string expiries to dates for comparison
         expiration_dates: List[Tuple[str, date]] = _try_resolve_expiration(specific_chain)
         future_candidates = [(s, d) for s, d in expiration_dates if d >= dt]
@@ -1151,14 +1216,12 @@ class OptionsHelper:
                     # Fallback: Check for last traded price data
                     try:
                         mark_price, _, _ = self._get_option_mark_from_quote(test_option)
-                        if mark_price is None:
-                            price = self.strategy.get_last_price(test_option)
-                            if price is not None:
-                                self.strategy.log_message(
-                                    f"Found valid expiry {exp_date} with price data for {call_or_put_caps}",
-                                    color="blue",
-                                )
-                                return exp_date
+                        if mark_price is not None:
+                            self.strategy.log_message(
+                                f"Found valid expiry {exp_date} with quote-derived price data for {call_or_put_caps}",
+                                color="blue",
+                            )
+                            return exp_date
                     except Exception:
                         pass
                 else:
@@ -1174,6 +1237,10 @@ class OptionsHelper:
 
         resolved = _validate_candidates(future_candidates)
         if resolved is not None:
+            try:
+                self._expiration_cache[expiration_cache_key] = resolved
+            except Exception:
+                pass
             return resolved
 
         broker = getattr(self.strategy, "broker", None)
@@ -1192,10 +1259,18 @@ class OptionsHelper:
                     f"Falling back to prior valid expiry {resolved} (< {dt}) for {call_or_put_caps}.",
                     color="yellow",
                 )
+                try:
+                    self._expiration_cache[expiration_cache_key] = resolved
+                except Exception:
+                    pass
                 return resolved
 
         msg = f"No valid expirations on or after {dt} with tradeable data for {call_or_put_caps}; skipping."
         self.strategy.log_message(msg, color="yellow")
+        try:
+            self._expiration_cache[expiration_cache_key] = None
+        except Exception:
+            pass
         return None
 
     # ============================================================

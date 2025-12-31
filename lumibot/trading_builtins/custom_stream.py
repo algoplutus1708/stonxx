@@ -16,17 +16,23 @@ class CustomStream:
         if self._stop_event.is_set():
             return
 
+        # Backtesting frequently requests synchronous dispatch to ensure broker state is updated
+        # before advancing the simulation clock. Processing inline avoids queue/join overhead and
+        # is safe because only the BacktestingBroker uses `wait_until_complete=True`.
+        if wait_until_complete:
+            try:
+                self._process_queue_event(event, payload)
+            except Exception as e:
+                logging.error(f"Error processing queue event: {e}")
+            return
+
         try:
             self._queue.put((event, payload), block=False)
         except queue.Full:
             logging.warning(f"Queue full, dropping event {event}")
             return
 
-        # Primarily used for backtesting. If wait_until_complete is True, the function will block until the queue is
-        # empty. This is useful for ensuring that all events have been processed before moving on to the next step.
-        if wait_until_complete:
-            # Wait for the queue to be processed
-            self._queue.join()
+        # If wait_until_complete is True, we handled the inline path above.
 
     def add_action(self, event_name):
         def add_event_action(f):

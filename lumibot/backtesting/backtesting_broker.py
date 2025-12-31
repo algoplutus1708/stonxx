@@ -2,7 +2,7 @@ import math
 import traceback
 import threading
 from collections import OrderedDict, defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Optional, Union
 
@@ -12,7 +12,8 @@ import pytz
 
 from lumibot.brokers import Broker
 from lumibot.data_sources import DataSourceBacktesting
-from lumibot.entities import Asset, Order, Position, TradingFee
+from lumibot.entities import Asset, Order, Position, SmartLimitConfig, TradingFee
+from lumibot.tools.smart_limit_utils import build_price_ladder, compute_final_price, compute_mid, expected_fill_price, infer_tick_size, round_to_tick
 from lumibot.tools.lumibot_logger import get_logger
 from lumibot.trading_builtins import CustomStream
 
@@ -147,6 +148,23 @@ class BacktestingBroker(Broker):
         self._market_open_cache = {}
         # Track per-strategy futures lots for accurate margin/P&L when flipping
         self._futures_lot_ledgers = defaultdict(list)
+        # Track end-of-data to prevent infinite loops when end date is in the future
+        self._end_of_trading_days_reached = False
+
+    def _mark_end_of_trading_days(self, now):
+        if self._end_of_trading_days_reached:
+            return
+
+        self._end_of_trading_days_reached = True
+        logger.warning(
+            "Backtesting reached end of available trading days data; stopping at %s",
+            now,
+        )
+        if self.data_source.datetime_end > now:
+            self.data_source.datetime_end = now
+        if self.option_source and hasattr(self.option_source, "datetime_end"):
+            if self.option_source.datetime_end > now:
+                self.option_source.datetime_end = now
     def initialize_market_calendars(self, trading_days_df):
         """Initialize trading calendar and eagerly build caches for backtesting."""
         super().initialize_market_calendars(trading_days_df)
@@ -255,6 +273,35 @@ class BacktestingBroker(Broker):
     def get_historical_account_value(self):
         pass
 
+    def get_active_tracked_orders(self, strategy: str) -> list[Order]:
+        """Return active (open/submitted/new) orders for the given strategy.
+
+        Backtests can accumulate tens of thousands of filled orders over long windows.
+        Scanning all tracked orders and calling ``Order.is_active()`` each bar is a major
+        performance bottleneck, so this method sources active orders directly from the
+        broker's active-order buckets.
+        """
+        active_orders: list[Order] = []
+        try:
+            buckets = (
+                self._unprocessed_orders.get_list(),
+                self._new_orders.get_list(),
+                self._partially_filled_orders.get_list(),
+            )
+        except Exception:
+            # Fallback to the slower path if internal buckets are unavailable.
+            orders = self.get_tracked_orders(strategy=strategy)
+            return [o for o in orders if o.is_active()] if orders else []
+
+        for bucket in buckets:
+            for order in bucket:
+                if getattr(order, "strategy", None) != strategy:
+                    continue
+                # Buckets should already contain only active orders, but keep a defensive check.
+                if order.is_active():
+                    active_orders.append(order)
+        return active_orders
+
     # =========Internal functions==================
 
     def _update_datetime(self, update_dt, cash=None, portfolio_value=None, positions=None, initial_budget=None, orders=None):
@@ -315,6 +362,9 @@ class BacktestingBroker(Broker):
         Needs to be overloaded for backtesting to
         check if the limit datetime was reached"""
 
+        if self._end_of_trading_days_reached:
+            return False
+
         # If we are at the end of the data source, we should stop
         if self.datetime >= self.data_source.datetime_end:
             return False
@@ -352,7 +402,7 @@ class BacktestingBroker(Broker):
         now = self.datetime
         search = self._trading_days[now < self._trading_days.market_open]
         if search.empty:
-            logger.critical("Cannot predict future")
+            self._mark_end_of_trading_days(now)
             return None
 
         return search.market_open[0].to_pydatetime()
@@ -363,7 +413,7 @@ class BacktestingBroker(Broker):
 
         search = self._trading_days[now < self._trading_days.index]
         if search.empty:
-            logger.info("Cannot predict future")
+            self._mark_end_of_trading_days(now)
             return None
 
         trading_day = search.iloc[0]
@@ -451,7 +501,6 @@ class BacktestingBroker(Broker):
 
         # If None is returned, it means we've reached the end of available trading days
         if time_to_open is None:
-            logger.info("Backtesting reached end of available trading days data")
             logger.debug(f"[BROKER DEBUG] time_to_open is None, returning early")
             return
 
@@ -699,15 +748,16 @@ class BacktestingBroker(Broker):
             for child in order.child_orders:
                 _cancel_inline(child)
 
-        open_orders = self.get_tracked_orders(strategy=strategy_name)
+        # PERF: Only active orders can be canceled; scanning full order history is
+        # extremely expensive in long intraday option strategies.
+        open_orders = self.get_active_tracked_orders(strategy=strategy_name)
 
         # Build a set of all child order identifiers to skip them in the main loop
         # (they will be handled by their parent orders)
         child_order_identifiers = set()
         for tracked_order in open_orders:
-            if tracked_order.child_orders:
-                for child in tracked_order.child_orders:
-                    child_order_identifiers.add(child.identifier)
+            for child in getattr(tracked_order, "child_orders", []) or []:
+                child_order_identifiers.add(child.identifier)
 
         for tracked_order in open_orders:
             if tracked_order.identifier in exclude_identifiers:
@@ -718,8 +768,6 @@ class BacktestingBroker(Broker):
             if tracked_order.identifier in child_order_identifiers:
                 continue
             if tracked_order.asset != asset:
-                continue
-            if not tracked_order.is_active():
                 continue
             if in_stream_thread:
                 _cancel_inline(tracked_order)
@@ -743,8 +791,7 @@ class BacktestingBroker(Broker):
             self._unprocessed_orders.remove(order.identifier, key="identifier")
             self._partially_filled_orders.remove(order.identifier, key="identifier")
 
-            if order not in self._filled_orders:
-                self._filled_orders.append(order)
+            self._track_filled_order(order)
 
             return None
 
@@ -768,6 +815,25 @@ class BacktestingBroker(Broker):
             parent_order = self.get_tracked_order(order.parent_identifier, use_placeholders=True)
             self._update_parent_order_status(parent_order)
         return position
+
+    def _track_filled_order(self, order: Order) -> None:
+        """Record a filled order without incurring O(n) SafeList membership scans."""
+        if order is None:
+            return
+        identifier = getattr(order, "identifier", None)
+        if identifier is None:
+            self._filled_orders.append(order)
+            return
+
+        filled_ids = getattr(self, "_filled_order_identifiers", None)
+        if filled_ids is None:
+            filled_ids = set()
+            setattr(self, "_filled_order_identifiers", filled_ids)
+
+        if identifier in filled_ids:
+            return
+        filled_ids.add(identifier)
+        self._filled_orders.append(order)
 
     def _process_partially_filled_order(self, order, price, quantity):
         """
@@ -841,8 +907,7 @@ class BacktestingBroker(Broker):
             self._unprocessed_orders.remove(order.identifier, key="identifier")
             self._partially_filled_orders.remove(order.identifier, key="identifier")
 
-            if order not in self._filled_orders:
-                self._filled_orders.append(order)
+            self._track_filled_order(order)
 
     def _submit_order(self, order):
         """Submit an order for an asset"""
@@ -909,16 +974,48 @@ class BacktestingBroker(Broker):
             # Each leg uses a different option asset, just use the base symbol.
             symbol = orders[0].asset.symbol
             parent_asset = Asset(symbol=symbol)
+            parent_order_type = kwargs.get("order_type", orders[0].order_type)
+            parent_smart_limit = None
+
+            if str(parent_order_type) == str(Order.OrderType.SMART_LIMIT):
+                # Package SMART_LIMIT: treat the multileg parent as the smart order and fill the
+                # child legs atomically when the parent becomes executable.
+                parent_order_type = Order.OrderType.SMART_LIMIT
+                parent_smart_limit = (
+                    kwargs.get("smart_limit")
+                    or getattr(orders[0], "smart_limit", None)
+                    or SmartLimitConfig()
+                )
+                for child in orders:
+                    setattr(child, "_smart_limit_managed_by_parent", True)
+
+            # Tradier multileg orders pass broker-specific order types like "credit"/"debit"/"even"
+            # which are not executable order types in LumiBot. The multileg parent is a placeholder,
+            # so normalize to a standard type to avoid raising.
+            if parent_smart_limit is None:
+                if isinstance(parent_order_type, str) and parent_order_type.lower() in {"credit", "debit", "even"}:
+                    parent_order_type = Order.OrderType.LIMIT
+                else:
+                    try:
+                        parent_order_type = (
+                            parent_order_type
+                            if isinstance(parent_order_type, Order.OrderType) or parent_order_type is None
+                            else Order.OrderType(parent_order_type)
+                        )
+                    except ValueError:
+                        parent_order_type = Order.OrderType.MARKET
             parent_order = Order(
                 asset=parent_asset,
                 strategy=orders[0].strategy,
                 order_class=Order.OrderClass.MULTILEG,
                 side=orders[0].side,
                 quantity=orders[0].quantity,
-                order_type=orders[0].order_type,
+                order_type=parent_order_type,
                 tag=orders[0].tag,
                 status=Order.OrderStatus.SUBMITTED
             )
+            if parent_smart_limit is not None:
+                parent_order.smart_limit = parent_smart_limit
 
             for o in orders:
                 o.parent_identifier = parent_order.identifier
@@ -938,7 +1035,12 @@ class BacktestingBroker(Broker):
             order=order,
         )
         # Cancel all child orders as well
-        for child in order.child_orders:
+        for child in order.child_orders or []:
+            if child is None:
+                continue
+            # Never overwrite already-closed child orders (e.g., OCO winners).
+            if not child.is_active():
+                continue
             self.cancel_order(child)
 
     def _modify_order(self, order: Order, limit_price: Union[float, None] = None,
@@ -1122,6 +1224,8 @@ class BacktestingBroker(Broker):
         filled_quantity: Decimal,
         strategy,
     ) -> None:
+        parent_identifier = getattr(order, "parent_identifier", None)
+
         if order.dependent_order:
             order.dependent_order.dependent_order_filled = True
             strategy.broker.cancel_order(order.dependent_order)
@@ -1192,6 +1296,20 @@ class BacktestingBroker(Broker):
             and not (asset_type == Asset.AssetType.CRYPTO and quote_asset_type == Asset.AssetType.FOREX)
         ):
             self._apply_trade_cost(strategy, trade_cost)
+
+        # If this was an OCO child fill, mark the OCO parent filled after the child
+        # fill is recorded so legacy ordering expectations remain stable.
+        if parent_identifier:
+            parent_order = self.get_tracked_order(parent_identifier, use_placeholders=True)
+            if parent_order is not None and parent_order.order_class == Order.OrderClass.OCO and not parent_order.is_filled():
+                try:
+                    self._placeholder_orders.remove(parent_order.identifier, key="identifier")
+                except Exception:
+                    pass
+                parent_order.status = self.FILLED_ORDER
+                parent_order.set_filled()
+                if parent_order not in self._filled_orders:
+                    self._filled_orders.append(parent_order)
 
     def _process_crypto_quote(self, order, quantity, price):
         """Override to skip quote processing for assets that use direct cash updates or margin-based trading."""
@@ -1300,7 +1418,7 @@ class BacktestingBroker(Broker):
             if trading_fee.taker is True and order_type_value in {"market", "stop"}:
                 trade_cost += trading_fee.flat_fee
                 trade_cost += Decimal(str(price)) * Decimal(str(order.quantity)) * trading_fee.percent_fee
-            elif trading_fee.maker is True and order_type_value in {"limit", "stop_limit"}:
+            elif trading_fee.maker is True and order_type_value in {"limit", "stop_limit", "smart_limit"}:
                 trade_cost += trading_fee.flat_fee
                 trade_cost += Decimal(str(price)) * Decimal(str(order.quantity)) * trading_fee.percent_fee
 
@@ -1419,8 +1537,13 @@ class BacktestingBroker(Broker):
             if order.order_class == Order.OrderClass.OCO:
                 continue
 
-            # Multileg parent orders will wait for child orders to fill before processing
-            if order.order_class == Order.OrderClass.MULTILEG:
+            # SMART_LIMIT multileg children should be filled atomically by their parent order.
+            if getattr(order, "_smart_limit_managed_by_parent", False):
+                continue
+
+            # Multileg parent orders are placeholders unless they are explicitly
+            # configured as a package SMART_LIMIT (i.e. have a SmartLimitConfig).
+            if order.order_class == Order.OrderClass.MULTILEG and getattr(order, "smart_limit", None) is None:
                 # If this is the final fill for a multileg order, mark the parent order as filled
                 if all([o.is_filled() for o in order.child_orders]):
                     parent_qty = sum([abs(o.quantity) for o in order.child_orders])
@@ -1451,6 +1574,84 @@ class BacktestingBroker(Broker):
             timeshift = None
             dt = None
             open = high = low = close = volume = None
+
+            # PERFORMANCE: Prefer quote-based fills when bid/ask are present so we avoid
+            # fetching trade-only OHLC bars (which can be sparse/missing, especially for
+            # options). When bid/ask are unavailable we fall back to the OHLC-based model.
+            if order.order_type in (Order.OrderType.MARKET, Order.OrderType.LIMIT) and (order.is_buy_order() or order.is_sell_order()):
+                try:
+                    quote = self.get_quote(order.asset, quote=order.quote)
+                except Exception:
+                    quote = None
+
+                bid = self._coerce_price(getattr(quote, "bid", None)) if quote is not None else None
+                ask = self._coerce_price(getattr(quote, "ask", None)) if quote is not None else None
+                if bid is not None and self._is_invalid_price(bid):
+                    bid = None
+                if ask is not None and self._is_invalid_price(ask):
+                    ask = None
+
+                is_buy = order.is_buy_order()
+
+                if order.order_type == Order.OrderType.MARKET:
+                    required_price = ask if is_buy else bid
+                    if required_price is not None and not self._is_invalid_price(required_price):
+                        setattr(order, "_price_source", "quote")
+                        self._execute_filled_order(
+                            order=order,
+                            price=required_price,
+                            filled_quantity=filled_quantity,
+                            strategy=strategy,
+                        )
+                        continue
+
+                elif bid is not None and ask is not None:
+                    fill_price: Optional[float] = None
+                    limit_price = self._coerce_price(order.limit_price)
+                    crossed = False
+                    if limit_price is not None:
+                        if is_buy:
+                            if limit_price >= ask:
+                                fill_price = ask
+                                crossed = True
+                            elif limit_price >= bid:
+                                fill_price = limit_price
+                        else:
+                            if limit_price <= bid:
+                                fill_price = bid
+                                crossed = True
+                            elif limit_price <= ask:
+                                fill_price = limit_price
+
+                    if fill_price is not None and not self._is_invalid_price(fill_price):
+                        spread_key = "max_spread_buy_pct" if is_buy else "max_spread_sell_pct"
+                        spread_limit = self._get_spread_limit(strategy, spread_key)
+                        if spread_limit is None:
+                            spread_limit = self._get_spread_limit(strategy, "max_spread_pct")
+                        # Only apply spread gating to *inside-spread* limit fills.
+                        # Marketable limits (>=ask for buys, <=bid for sells) should fill regardless
+                        # of spread width, otherwise strategies can get stuck with uncloseable legs.
+                        if spread_limit is not None and not crossed and fill_price == limit_price:
+                            mid = (ask + bid) / 2
+                            if mid > 0:
+                                spread_pct = (ask - bid) / mid
+                                if spread_pct > spread_limit:
+                                    fill_price = None
+
+                    if fill_price is not None and not self._is_invalid_price(fill_price):
+                        setattr(order, "_price_source", "quote")
+                        self._execute_filled_order(
+                            order=order,
+                            price=fill_price,
+                            filled_quantity=filled_quantity,
+                            strategy=strategy,
+                        )
+                        continue
+
+                    # Quote was available but did not satisfy fill conditions; keep the order open
+                    # and retry on the next bar without forcing an OHLC download.
+                    if bid is not None and ask is not None:
+                        continue
 
             #############################
             # Get OHLCV data for the asset
@@ -1522,13 +1723,9 @@ class BacktestingBroker(Broker):
 
             # Get the OHLCV data for the asset if we're using the PANDAS data source
             elif self.data_source.SOURCE == "PANDAS":
-                # ThetaData option market orders: prefer NBBO quote fills to avoid forcing
-                # minute OHLC downloads (trades can be sparse and fetching OHLC is expensive).
-                if (
-                    self._is_thetadata_source()
-                    and self._is_option_asset(getattr(order, "asset", None))
-                    and order.order_type == Order.OrderType.MARKET
-                ):
+                # Market orders: prefer quote-based fills when bid/ask are available to avoid
+                # expensive OHLC downloads and reflect real-world execution more closely.
+                if order.order_type == Order.OrderType.MARKET:
                     quote_fill_price = self._try_fill_with_quote(order, strategy, None, None, None)
                     if quote_fill_price is not None:
                         self._execute_filled_order(
@@ -1538,6 +1735,41 @@ class BacktestingBroker(Broker):
                             strategy=strategy,
                         )
                         continue
+
+                # LIMIT orders: if the limit is immediately marketable against the current NBBO,
+                # fill from quotes and skip the OHLC fetch. This is especially important for options,
+                # where OHLC bars can be sparse/missing and would otherwise trigger a slow downloader call.
+                if order.order_type == Order.OrderType.LIMIT:
+                    try:
+                        quote = self.get_quote(order.asset, quote=order.quote)
+                    except Exception:
+                        quote = None
+
+                    bid = self._coerce_price(getattr(quote, "bid", None)) if quote is not None else None
+                    ask = self._coerce_price(getattr(quote, "ask", None)) if quote is not None else None
+                    limit_price = self._coerce_price(getattr(order, "limit_price", None))
+
+                    if limit_price is not None:
+                        if order.is_buy_order():
+                            if ask is not None and not self._is_invalid_price(ask) and limit_price >= ask:
+                                setattr(order, "_price_source", "quote")
+                                self._execute_filled_order(
+                                    order=order,
+                                    price=ask,
+                                    filled_quantity=filled_quantity,
+                                    strategy=strategy,
+                                )
+                                continue
+                        elif order.is_sell_order():
+                            if bid is not None and not self._is_invalid_price(bid) and limit_price <= bid:
+                                setattr(order, "_price_source", "quote")
+                                self._execute_filled_order(
+                                    order=order,
+                                    price=bid,
+                                    filled_quantity=filled_quantity,
+                                    strategy=strategy,
+                                )
+                                continue
 
                 # This is a hack to get around the fact that we need to get the previous day's data to prevent lookahead bias.
                 ohlc = self.data_source.get_historical_prices(
@@ -1549,24 +1781,71 @@ class BacktestingBroker(Broker):
                 )
                 # Check if we got any ohlc data
                 if ohlc is None or ohlc.empty:
-                    # ThetaData option minute OHLC can be sparse/empty even when NBBO quotes exist.
-                    #
-                    # If we immediately cancel here, the order never reaches the quote-fill fallback path
-                    # (`_try_fill_with_quote`) and we can wind up with determinism issues:
-                    # - BUY_TO_CLOSE orders get canceled at 15:55
-                    # - contracts then cash-settle at expiry (large intrinsic losses)
-                    #
-                    # For ThetaData options only, attempt a quote-based fill when OHLC is missing.
-                    if self._is_thetadata_source() and self._is_option_asset(getattr(order, "asset", None)):
-                        quote_fill_price = self._try_fill_with_quote(order, strategy, None, None, None)
-                        if quote_fill_price is not None:
+                    # SmartLimit should attempt quote-based fills regardless of asset type or data source.
+                    if str(order.order_type) == str(Order.OrderType.SMART_LIMIT):
+                        smart_price, smart_timed_out = self._smart_limit_backtest_price(
+                            order, strategy, None, None, None
+                        )
+                        if smart_timed_out:
+                            self.cancel_order(order)
+                            continue
+
+                        # Package SMART_LIMIT orders (multileg parents) must never fill on their own.
+                        # When OHLC is missing (common for placeholder multileg assets), use quotes to
+                        # fill the child legs atomically and then mark the parent filled for logging.
+                        if (
+                            order.order_class == Order.OrderClass.MULTILEG
+                            and order.child_orders
+                            and getattr(order, "smart_limit", None) is not None
+                        ):
+                            if smart_price is None or self._is_invalid_price(smart_price):
+                                # Not executable yet; keep the order open.
+                                continue
+
+                            filled = self._fill_multileg_smart_limit_children(order, strategy, float(smart_price))
+                            if not filled:
+                                filled = self._fill_multileg_children_at_market_open(order, strategy)
+
+                            if filled:
+                                parent_qty = sum(abs(o.quantity) for o in order.child_orders)
+                                child_prices = [
+                                    o.get_fill_price() if o.is_buy_order() else -o.get_fill_price()
+                                    for o in order.child_orders
+                                ]
+                                parent_price = sum(child_prices)
+                                parent_multiplier = getattr(getattr(order, "asset", None), "multiplier", 1) or 1
+
+                                self.stream.dispatch(
+                                    self.FILLED_ORDER,
+                                    wait_until_complete=True,
+                                    order=order,
+                                    price=parent_price,
+                                    filled_quantity=parent_qty,
+                                    multiplier=parent_multiplier,
+                                )
+                            continue
+
+                        if smart_price is not None and not self._is_invalid_price(smart_price):
                             self._execute_filled_order(
                                 order=order,
-                                price=quote_fill_price,
+                                price=smart_price,
                                 filled_quantity=filled_quantity,
                                 strategy=strategy,
                             )
-                            continue
+                        # Keep the order open and retry on the next bar if no fill.
+                        continue
+
+                    # OHLC can be sparse/empty even when quotes exist. Attempt a quote-based fill
+                    # before canceling so orders can still execute when bid/ask is actionable.
+                    quote_fill_price = self._try_fill_with_quote(order, strategy, None, None, None)
+                    if quote_fill_price is not None:
+                        self._execute_filled_order(
+                            order=order,
+                            price=quote_fill_price,
+                            filled_quantity=filled_quantity,
+                            strategy=strategy,
+                        )
+                        continue
 
                     if strategy is not None:
                         display_symbol = getattr(order.asset, "symbol", order.asset)
@@ -1584,6 +1863,7 @@ class BacktestingBroker(Broker):
                 df_original = ohlc.df
 
                 # Handle both pandas and polars DataFrames
+                prefer_future_bar = getattr(getattr(self, "data_source", None), "_timestep", None) == "day"
                 if hasattr(df_original, 'select'):  # Polars DataFrame
                     # Find datetime column
                     dt_col = None
@@ -1594,8 +1874,10 @@ class BacktestingBroker(Broker):
                     if dt_col is None:
                         dt_col = 'datetime'  # fallback
 
-                    # Filter for current time or future
-                    df = df_original.filter(pl.col(dt_col) >= self.datetime)
+                    # For day-cadence backtests, fills should be based on the *next* bar to avoid
+                    # lookahead (orders created on a day bar execute on the next day bar).
+                    comparator = pl.col(dt_col) > self.datetime if prefer_future_bar else pl.col(dt_col) >= self.datetime
+                    df = df_original.filter(comparator)
 
                     # If the dataframe is empty, get the last row
                     if len(df) == 0:
@@ -1609,8 +1891,12 @@ class BacktestingBroker(Broker):
                     close = df["close"][0]
                     volume = df["volume"][0]
                 else:  # Pandas DataFrame
-                    # Make sure that we are only getting the prices for the current time exactly or in the future
-                    df = df_original[df_original.index >= self.datetime]
+                    # For day-cadence backtests, fills should be based on the *next* bar to avoid
+                    # lookahead (orders created on a day bar execute on the next day bar).
+                    if prefer_future_bar:
+                        df = df_original[df_original.index > self.datetime]
+                    else:
+                        df = df_original[df_original.index >= self.datetime]
 
                     # If the dataframe is empty, then we should get the last row of the original dataframe
                     # because it is the best data we have
@@ -1645,6 +1931,54 @@ class BacktestingBroker(Broker):
                         order.price_triggered = True
                 elif order.price_triggered:
                     price = self.limit_order(order.limit_price, simple_side, open, high, low)
+
+            elif str(order.order_type) == str(Order.OrderType.SMART_LIMIT):
+                price, cancel_order = self._smart_limit_backtest_price(order, strategy, open, high, low)
+                if cancel_order:
+                    self.cancel_order(order)
+                    continue
+
+                # Package SMART_LIMIT orders (multileg parent) are *scheduling containers*.
+                #
+                # They must never fill on their own because that produces misleading trade logs
+                # (parent filled, legs not filled) and prevents the strategy from seeing the
+                # actual leg fills in `on_filled_order()`.
+                if (
+                    order.order_class == Order.OrderClass.MULTILEG
+                    and order.child_orders
+                    and getattr(order, "smart_limit", None) is not None
+                ):
+                    if price is None or self._is_invalid_price(price):
+                        # Not executable yet; keep waiting.
+                        continue
+
+                    filled = self._fill_multileg_smart_limit_children(order, strategy, float(price))
+                    if not filled:
+                        # Quotes missing (or invalid). SMART_LIMIT should downgrade to a market-style
+                        # fill. For multileg orders that means filling each leg from its own OHLC open.
+                        filled = self._fill_multileg_children_at_market_open(order, strategy)
+
+                    if filled:
+                        parent_qty = sum(abs(o.quantity) for o in order.child_orders)
+                        child_prices = [
+                            o.get_fill_price() if o.is_buy_order() else -o.get_fill_price()
+                            for o in order.child_orders
+                        ]
+                        parent_price = sum(child_prices)
+                        parent_multiplier = getattr(getattr(order, "asset", None), "multiplier", 1) or 1
+
+                        self.stream.dispatch(
+                            self.FILLED_ORDER,
+                            wait_until_complete=True,
+                            order=order,
+                            price=parent_price,
+                            filled_quantity=parent_qty,
+                            multiplier=parent_multiplier,
+                        )
+
+                    # Always continue: either legs were filled (and we dispatched a parent fill for logging),
+                    # or we could not fill and need to retry later. Never fill the parent directly.
+                    continue
 
             elif order.order_type == Order.OrderType.TRAIL:
                 current_trail_stop_price = order.get_current_trail_stop_price()
@@ -1694,8 +2028,18 @@ class BacktestingBroker(Broker):
                     )
                 continue
 
-        # After handling all pending orders, cash settle any residual expired contracts.
-        self.process_expired_option_contracts(strategy)
+        # Expired contracts settlement is only meaningful at (or after) the end of a session.
+        #
+        # Calling `process_expired_option_contracts()` on every bar is extremely expensive in long
+        # intraday backtests (it scans positions + active orders) and does not change behavior
+        # because the function intentionally skips settlement until after the close.
+        #
+        # - Intraday backtests: settlement is handled once per day by `StrategyExecutor._strategy_sleep()`
+        #   when it advances the clock to the close.
+        # - Daily backtests: `process_pending_orders()` runs once per day, so it is safe to settle here.
+        timestep = getattr(getattr(self, "data_source", None), "_timestep", None)
+        if timestep == "day":
+            self.process_expired_option_contracts(strategy)
 
     def _coerce_price(self, value):
         """Convert numeric inputs to float when possible for safe comparisons."""
@@ -1740,18 +2084,11 @@ class BacktestingBroker(Broker):
     def _should_attempt_quote_fallback(self, order, open_, high_, low_) -> bool:
         """Determine whether to attempt quote-based fills.
 
-        We primarily use quote fills for ThetaData when OHLC bars are missing. Additionally, for ThetaData
-        option day-bars, trade prints can be sparse (limits may not cross a trade even when NBBO is actionable),
-        so we allow quote fills for option limit orders in daily cadence when a quote is available.
+        Quotes can provide actionable fills even when OHLC bars are missing or trade prints
+        are sparse. We rely on bid/ask availability rather than asset type or data source.
         """
-        if not self._is_thetadata_source():
-            return False
         if self._bar_has_missing_prices(open_, high_, low_):
             return True
-
-        asset = getattr(order, "asset", None) if order is not None else None
-        if not self._is_option_asset(asset):
-            return False
 
         timestep = getattr(self.data_source, "_timestep", None)
         return timestep == "day"
@@ -1777,12 +2114,31 @@ class BacktestingBroker(Broker):
                 return None
         return None
 
+    def _get_strategy_slippage_amount(self, strategy, order: Order) -> float:
+        if strategy is None or order is None:
+            return 0.0
+
+        slippages = []
+        if order.is_buy_order():
+            slippages = getattr(strategy, "buy_trading_slippages", [])
+        else:
+            slippages = getattr(strategy, "sell_trading_slippages", [])
+
+        total = 0.0
+        for slippage in slippages or []:
+            if hasattr(slippage, "amount"):
+                total += float(slippage.amount)
+            else:
+                try:
+                    total += float(slippage)
+                except (TypeError, ValueError):
+                    continue
+        return total
+
     def _try_fill_with_quote(self, order, strategy, open_=None, high_=None, low_=None) -> Optional[float]:
-        """Attempt to fill an order using ThetaData quotes when OHLC bars are missing."""
-        if not self._is_thetadata_source():
-            return None
-        is_option = self._is_option_asset(getattr(order, "asset", None))
-        if not (self._bar_has_missing_prices(open_, high_, low_) or is_option):
+        """Attempt to fill an order using quotes when OHLC bars are missing."""
+        timestep = getattr(self.data_source, "_timestep", None)
+        if not (self._bar_has_missing_prices(open_, high_, low_) or timestep == "day"):
             return None
         if order.order_type not in (Order.OrderType.LIMIT, Order.OrderType.STOP_LIMIT, Order.OrderType.MARKET):
             return None
@@ -1792,7 +2148,7 @@ class BacktestingBroker(Broker):
         try:
             quote = self.get_quote(order.asset, quote=order.quote)
         except Exception as exc:  # pragma: no cover - defensive log for unexpected broker states
-            self.logger.debug("ThetaData quote lookup failed for %s: %s", getattr(order.asset, "symbol", order.asset), exc)
+            self.logger.debug("Quote lookup failed for %s: %s", getattr(order.asset, "symbol", order.asset), exc)
             return None
 
         if quote is None:
@@ -1808,14 +2164,17 @@ class BacktestingBroker(Broker):
             fill_price = ask if is_buy else bid
         else:
             limit_price = self._coerce_price(order.limit_price)
+            crossed = False
             if is_buy:
                 if ask is not None and limit_price is not None and limit_price >= ask:
                     fill_price = ask
+                    crossed = True
                 elif bid is not None and limit_price is not None and limit_price >= bid:
                     fill_price = limit_price
             else:
                 if bid is not None and limit_price is not None and limit_price <= bid:
                     fill_price = bid
+                    crossed = True
                 elif ask is not None and limit_price is not None and limit_price <= ask:
                     fill_price = limit_price
 
@@ -1826,6 +2185,12 @@ class BacktestingBroker(Broker):
         spread_limit = self._get_spread_limit(strategy, spread_key)
         if spread_limit is None:
             spread_limit = self._get_spread_limit(strategy, "max_spread_pct")
+        if spread_limit is not None and bid is not None and ask is not None and order.order_type != Order.OrderType.MARKET:
+            # Only gate inside-spread fills. Marketable limits should fill regardless.
+            limit_price = self._coerce_price(order.limit_price)
+            if crossed or (limit_price is None) or (fill_price != limit_price):
+                spread_limit = None
+
         if spread_limit is not None and bid is not None and ask is not None:
             mid = (ask + bid) / 2
             if mid > 0:
@@ -1833,7 +2198,7 @@ class BacktestingBroker(Broker):
                 if spread_pct > spread_limit:
                     if strategy is not None:
                         strategy.log_message(
-                            f"Skipped ThetaData quote fill for {order.identifier} "
+                            f"Skipped quote fill for {order.identifier} "
                             f"(spread {spread_pct:.2%} exceeds {spread_limit:.2%}).",
                             color="yellow",
                         )
@@ -1841,12 +2206,260 @@ class BacktestingBroker(Broker):
 
         if strategy is not None:
             strategy.log_message(
-                f"Filled {order.identifier} via ThetaData quote @ {fill_price:.2f}.",
+                f"Filled {order.identifier} via quote @ {fill_price:.2f}.",
                 color="yellow",
             )
 
         setattr(order, "_price_source", "quote")
         return fill_price
+
+    def _smart_limit_backtest_price(self, order, strategy, open_, high_, low_) -> tuple[Optional[float], bool]:
+        smart_limit = getattr(order, "smart_limit", None)
+        if smart_limit is None:
+            return None, False
+
+        state = getattr(order, "_smart_limit_state", None)
+        if state is None:
+            created_at = getattr(order, "_date_created", None) or self.datetime
+            state = {"created_at": created_at, "missing_quote_warned": False}
+            order._smart_limit_state = state
+
+        created_at = state.get("created_at")
+        elapsed_seconds = None
+        if isinstance(created_at, datetime):
+            elapsed_seconds = (self.datetime - created_at).total_seconds()
+        elif isinstance(created_at, (int, float)):
+            # Primarily used for live SMART_LIMIT orders (monotonic clock). Backtests should
+            # typically use timezone-aware datetimes, but handle floats defensively.
+            elapsed_seconds = time.monotonic() - float(created_at)
+
+        if elapsed_seconds is not None:
+            # Mirror the live SMART_LIMIT timeout model (Option Alpha style):
+            # - steps-1 reprices at step_seconds cadence
+            # - final step holds for final_hold_seconds, then cancels
+            max_total_seconds = smart_limit.get_step_seconds() * (smart_limit.get_step_count() - 1)
+            max_total_seconds += smart_limit.get_final_hold_seconds()
+            if elapsed_seconds >= max_total_seconds:
+                if strategy is not None and not state.get("timed_out_warned", False):
+                    strategy.log_message(
+                        f"[SMART_LIMIT] Timed out after {elapsed_seconds:.0f}s; canceling order {order.identifier}.",
+                        color="yellow",
+                    )
+                    state["timed_out_warned"] = True
+                return None, True
+
+        bid = ask = None
+        if order.order_class == Order.OrderClass.MULTILEG and order.child_orders:
+            net_bid = 0.0
+            net_ask = 0.0
+            order_side = "buy" if order.is_buy_order() else "sell"
+            for leg in order.child_orders:
+                try:
+                    quote = self.get_quote(leg.asset, quote=leg.quote)
+                except Exception:
+                    quote = None
+                leg_bid = self._coerce_price(getattr(quote, "bid", None)) if quote is not None else None
+                leg_ask = self._coerce_price(getattr(quote, "ask", None)) if quote is not None else None
+                if leg_bid is None or leg_ask is None:
+                    net_bid = net_ask = None
+                    break
+                if order_side == "buy":
+                    if leg.is_buy_order():
+                        net_bid += leg_bid
+                        net_ask += leg_ask
+                    else:
+                        net_bid -= leg_ask
+                        net_ask -= leg_bid
+                else:
+                    if leg.is_buy_order():
+                        net_bid -= leg_ask
+                        net_ask -= leg_bid
+                    else:
+                        net_bid += leg_bid
+                        net_ask += leg_ask
+            bid = net_bid
+            ask = net_ask
+            if bid is not None and ask is not None:
+                # Avoid float accumulation artifacts (e.g. 0.799999999999) which can break
+                # tick-size inference for net multileg prices.
+                bid = round(float(bid), 6)
+                ask = round(float(ask), 6)
+        else:
+            try:
+                quote = self.get_quote(order.asset, quote=order.quote)
+            except Exception:
+                quote = None
+
+            bid = self._coerce_price(getattr(quote, "bid", None)) if quote is not None else None
+            ask = self._coerce_price(getattr(quote, "ask", None)) if quote is not None else None
+
+        if bid is None or ask is None or self._is_invalid_price(bid) or self._is_invalid_price(ask):
+            if not state.get("missing_quote_warned", False):
+                if strategy is not None:
+                    strategy.log_message(
+                        f"[SMART_LIMIT] Missing bid/ask for {order.asset}; downgrading to market.",
+                        color="yellow",
+                    )
+                state["missing_quote_warned"] = True
+            order.trade_slippage = 0.0
+            return open_, False
+
+        side = "buy" if order.is_buy_order() else "sell"
+        tick = infer_tick_size(bid, ask)
+        mid = compute_mid(bid, ask)
+        final_price = compute_final_price(bid, ask, side, smart_limit.final_price_pct)
+        slippage_amount = smart_limit.get_slippage_amount()
+        if smart_limit.slippage is None:
+            slippage_amount = self._get_strategy_slippage_amount(strategy, order)
+
+        # Backtesting model: fill at mid +/- slippage (inside the spread) whenever bid/ask are available.
+        #
+        # We intentionally do not simulate the live cancel/replace timing ladder here because most
+        # backtests run on minute bars (no sub-minute quote path). This keeps backtests fast, stable,
+        # and aligned with the common "mid fill" assumption used by competitors.
+        fill_price = expected_fill_price(mid, slippage_amount, side)
+        if side == "buy":
+            fill_price = min(fill_price, ask)
+        else:
+            fill_price = max(fill_price, bid)
+        fill_price = round_to_tick(fill_price, tick, side=side)
+
+        if side == "buy" and fill_price > final_price:
+            return None, False
+        if side == "sell" and fill_price < final_price:
+            return None, False
+
+        multiplier = (
+            getattr(order.child_orders[0].asset, "multiplier", 1)
+            if order.order_class == Order.OrderClass.MULTILEG and order.child_orders
+            else getattr(order.asset, "multiplier", 1)
+        ) or 1
+        order.trade_slippage = abs(fill_price - mid) * float(order.quantity) * multiplier
+        setattr(order, "_price_source", "smart_limit")
+        return fill_price, False
+
+    def _fill_multileg_smart_limit_children(self, order: Order, strategy, net_fill_price: float) -> bool:
+        """Fill SMART_LIMIT multileg child orders atomically using mid+slippage semantics.
+
+        The parent order is a scheduling container. Once it becomes executable, we fill each
+        leg at a price inside its own NBBO such that the net package price matches the parent
+        SMART_LIMIT fill model (mid +/- slippage).
+        """
+        if not order.child_orders:
+            return False
+
+        side = "buy" if order.is_buy_order() else "sell"
+
+        legs = []
+        total_slack = 0.0
+        net_mid = 0.0
+
+        for leg in order.child_orders:
+            try:
+                quote = self.get_quote(leg.asset, quote=leg.quote)
+            except Exception:
+                quote = None
+            bid = self._coerce_price(getattr(quote, "bid", None)) if quote is not None else None
+            ask = self._coerce_price(getattr(quote, "ask", None)) if quote is not None else None
+            if bid is None or ask is None or self._is_invalid_price(bid) or self._is_invalid_price(ask):
+                return False
+
+            leg_mid = round(compute_mid(bid, ask), 6)
+            slack = max(0.0, (ask - bid) / 2.0)
+            total_slack += slack
+
+            sign = 1.0 if (leg.is_buy_order() if side == "buy" else leg.is_sell_order()) else -1.0
+            net_mid += sign * leg_mid
+
+            legs.append({"order": leg, "bid": bid, "ask": ask, "mid": leg_mid, "slack": slack})
+
+        # Use configured slippage directly to avoid float cancellation issues when deriving
+        # slippage from net_fill_price - net_mid.
+        smart_limit = getattr(order, "smart_limit", None)
+        slippage_amount = smart_limit.get_slippage_amount() if smart_limit is not None else 0.0
+        if smart_limit is not None and smart_limit.slippage is None:
+            slippage_amount = self._get_strategy_slippage_amount(strategy, order)
+
+        delta = abs(float(slippage_amount))
+        ratio = (delta / total_slack) if total_slack > 0 else 0.0
+
+        for leg_info in legs:
+            leg = leg_info["order"]
+            leg_mid = leg_info["mid"]
+            adj = leg_info["slack"] * ratio
+
+            raw_fill = leg_mid + adj if leg.is_buy_order() else leg_mid - adj
+            raw_fill = round(raw_fill, 6)
+            tick = infer_tick_size(leg_info["bid"], leg_info["ask"])
+            fill_price = round_to_tick(raw_fill, tick, side="buy" if leg.is_buy_order() else "sell")
+
+            multiplier = getattr(leg.asset, "multiplier", 1) or 1
+            try:
+                qty = float(abs(float(leg.quantity)))
+            except Exception:
+                qty = float(abs(leg.quantity))
+
+            leg.trade_slippage = abs(fill_price - leg_mid) * qty * multiplier
+            setattr(leg, "_price_source", "smart_limit")
+
+            self._execute_filled_order(
+                order=leg,
+                price=float(fill_price),
+                filled_quantity=leg.quantity,
+                strategy=strategy,
+            )
+
+        return True
+
+    def _fill_multileg_children_at_market_open(self, order: Order, strategy) -> bool:
+        """Fallback for multileg SMART_LIMIT when quotes are missing.
+
+        Fill each child order at its own OHLC open (market-style) so the backtest
+        doesn't stall or fill only the parent placeholder.
+        """
+        if not order.child_orders:
+            return False
+
+        for leg in order.child_orders:
+            asset = leg.asset if getattr(leg.asset, "asset_type", None) != "crypto" else (leg.asset, leg.quote)
+            try:
+                ohlc = self.data_source.get_historical_prices(
+                    asset=asset,
+                    length=2,
+                    quote=leg.quote,
+                    timeshift=-2,
+                    timestep=getattr(self.data_source, "_timestep", "minute"),
+                )
+            except Exception:
+                ohlc = None
+
+            if ohlc is None or getattr(ohlc, "df", None) is None:
+                return False
+
+            open_price = None
+            df = ohlc.df
+            try:
+                if hasattr(df, "index"):
+                    open_price = df["open"].iloc[-1]
+                else:
+                    open_price = df["open"][-1]
+            except Exception:
+                open_price = None
+
+            open_price = self._coerce_price(open_price)
+            if open_price is None or self._is_invalid_price(open_price):
+                return False
+
+            leg.trade_slippage = 0.0
+            setattr(leg, "_price_source", "market")
+            self._execute_filled_order(
+                order=leg,
+                price=float(open_price),
+                filled_quantity=leg.quantity,
+                strategy=strategy,
+            )
+
+        return True
 
     def limit_order(self, limit_price, side, open_, high, low):
         """Limit order logic."""

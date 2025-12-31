@@ -80,6 +80,14 @@ def _build_trade_marker_tooltip(row: pd.Series):
     if trade_cost_dec is None:
         trade_cost_dec = amount_transacted_dec
 
+    slippage_value = row.get("trade_slippage")
+    slippage_dec = None
+    if not (pd.isna(slippage_value) or slippage_value == ""):
+        try:
+            slippage_dec = Decimal(str(slippage_value))
+        except (InvalidOperation, TypeError, ValueError):
+            slippage_dec = None
+
     if row.get("asset.asset_type") == "option":
         try:
             return (
@@ -118,6 +126,13 @@ def _build_trade_marker_tooltip(row: pd.Series):
                 + "Trade Cost: "
                 + str(trade_cost_dec.quantize(Decimal("0.01")).__format__(",f"))
                 + "<br>"
+                + "Slippage: "
+                + (
+                    str(slippage_dec.quantize(Decimal("0.01")).__format__(",f"))
+                    if slippage_dec is not None
+                    else "0.00"
+                )
+                + "<br>"
             )
         except (InvalidOperation, TypeError, ValueError):
             return None
@@ -130,6 +145,11 @@ def _build_trade_marker_tooltip(row: pd.Series):
         price_text = str(price_dec.quantize(Decimal("0.0001")).__format__(",f"))
         filled_qty_text = str(filled_quantity_dec.quantize(Decimal("0.01")).__format__(",f"))
         trade_cost_text = str(trade_cost_dec.quantize(Decimal("0.01")).__format__(",f"))
+        slippage_text = (
+            str(slippage_dec.quantize(Decimal("0.01")).__format__(",f"))
+            if slippage_dec is not None
+            else "0.00"
+        )
     except (InvalidOperation, TypeError, ValueError):
         return None
 
@@ -151,6 +171,9 @@ def _build_trade_marker_tooltip(row: pd.Series):
         + "<br>"
         + "Trade Cost: "
         + trade_cost_text
+        + "<br>"
+        + "Slippage: "
+        + slippage_text
         + "<br>"
     )
 
@@ -658,7 +681,7 @@ def plot_returns(
     standard_trade_columns = [
         "time", "side", "status", "filled_quantity", "symbol", "asset.asset_type",
         "asset.right", "asset.strike", "asset.expiration", "price", "type",
-        "asset.multiplier", "trade_cost"
+        "asset.multiplier", "trade_cost", "trade_slippage"
     ]
 
     if trades_df is None or trades_df.empty:

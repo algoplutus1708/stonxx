@@ -210,6 +210,9 @@ class Data:
 
         self.df = self.set_date_format(self.df)
         self.df = self.df.sort_index()
+        # PERF: many hot paths (quotes/bars) assume the underlying index is unique. Cache this once.
+        # When the index is unique and we're not resampling, we can return bars without expensive resample/agg work.
+        self._index_is_unique = bool(getattr(self.df.index, "is_unique", False))
 
         self.trading_hours_start, self.trading_hours_end = self.set_times(trading_hours_start, trading_hours_end)
         self.date_start, self.date_end = self.set_dates(date_start, date_end)
@@ -852,6 +855,51 @@ class Data:
 
         if data is None:
             return None
+
+        # Fast-path: requesting native bars (1 minute or 1 day) from a Data object that is already in
+        # that native timestep can avoid a full resample/agg per call.
+        #
+        # This is critical for intraday strategies that call `get_historical_prices()` tens of thousands
+        # of times (e.g., RSI computations every bar). Resample is orders-of-magnitude slower than
+        # slicing when quantity==1 and the index is unique.
+        if (
+            quantity == 1
+            and self._index_is_unique
+            and (
+                (timestep == "minute" and self.timestep == "minute")
+                or (timestep == "day" and self.timestep == "day")
+            )
+        ):
+            dt_values = data.get("datetime")
+            if dt_values is None:
+                return None
+            # Only apply the fast-path when this is true OHLCV data. Quote-like data (bid/ask/etc)
+            # historically flows through different APIs and may not have the required OHLC columns.
+            if all(key in data for key in ("open", "high", "low", "close")):
+                df = pd.DataFrame({k: v for k, v in data.items() if k != "datetime"})
+                df.index = pd.to_datetime(dt_values)
+                df.index.name = "datetime"
+
+                # Match legacy resample behaviour: the resample/agg path only returns OHLCV
+                # (+ dividend when present) and does not drop rows just because some *other*
+                # column is NaN. Keep the output schema stable and avoid over-dropping.
+                cols = list(agg_column_map.keys())
+                if "dividend" in df.columns:
+                    cols.append("dividend")
+                cols = [c for c in cols if c in df.columns]
+                df = df[cols]
+
+                # In the resample path, `sum` turns NaN volume/dividend into 0. Mirror that
+                # so we don't accidentally drop valid bars (common for index bars).
+                if "volume" in df.columns:
+                    df["volume"] = df["volume"].fillna(0)
+                if "dividend" in df.columns:
+                    df["dividend"] = df["dividend"].fillna(0)
+
+                required = [c for c in ("open", "high", "low", "close") if c in df.columns]
+                if required:
+                    df = df.dropna(subset=required)
+                return df.tail(n=int(num_periods))
 
         df = pd.DataFrame(data).assign(datetime=lambda df: pd.to_datetime(df['datetime'])).set_index('datetime')
         if "dividend" in df.columns:

@@ -1,4 +1,6 @@
+import json
 import logging
+import os
 import subprocess
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -36,7 +38,8 @@ class ThetaDataBacktestingPandas(PandasData):
 
     IS_BACKTESTING_BROKER = True
 
-    # Do not fall back to last_price when bid/ask quotes are unavailable for options
+    # Do not fall back to trade-derived OHLC when bid/ask quotes are unavailable for options.
+    # Backtests should not trigger expensive option OHLC downloads as an implicit quote fallback.
     option_quote_fallback_allowed = False
 
     def __init__(
@@ -49,12 +52,17 @@ class ThetaDataBacktestingPandas(PandasData):
         use_quote_data=True,
         **kwargs,
     ):
-        # Pass allow_option_quote_fallback to parent to enable fallback mechanism
+        # Do not enable option quote fallback to trade-derived OHLC in ThetaData backtests.
+        # ThetaData option NBBO is the preferred source for pricing; when bid/ask is missing we
+        # treat the contract as unpriceable at that moment rather than downloading sparse trades.
         super().__init__(datetime_start=datetime_start, datetime_end=datetime_end, pandas_data=pandas_data,
-                         allow_option_quote_fallback=True, **kwargs)
+                         allow_option_quote_fallback=False, **kwargs)
 
         # Default to minute; broker can flip to day for daily strategies.
         self._timestep = self.MIN_TIMESTEP
+        # PERF: Avoid scanning the entire pandas_data store on every quote/snapshot call to infer day-mode.
+        # This flag is set eagerly when day data is loaded.
+        self._effective_day_mode = None
 
         if username is None:
             username = THETADATA_CONFIG.get("THETADATA_USERNAME")
@@ -69,6 +77,7 @@ class ThetaDataBacktestingPandas(PandasData):
 
         self._dataset_metadata: Dict[tuple, Dict[str, object]] = {}
         self._chain_constraints = None
+        self._negative_option_cache = set()
 
         # Set data_source to self since this class acts as both broker and data source
         self.data_source = self
@@ -223,21 +232,43 @@ class ThetaDataBacktestingPandas(PandasData):
         metadata["has_quotes"] = bool(has_quotes)
         metadata["has_ohlc"] = self._frame_has_ohlc_columns(frame)
 
+        last_real_ts = None
         if frame is not None and not frame.empty and "missing" in frame.columns:
             placeholder_flags = frame["missing"].fillna(False).astype(bool)
             metadata["placeholders"] = int(placeholder_flags.sum())
             metadata["tail_placeholder"] = bool(placeholder_flags.iloc[-1])
             if placeholder_flags.shape[0] and bool(placeholder_flags.all()):
                 metadata["empty_fetch"] = True
+            try:
+                real_rows = frame.loc[~placeholder_flags]
+                if not real_rows.empty:
+                    last_real_ts = pd.to_datetime(real_rows.index).max()
+            except Exception:
+                last_real_ts = None
         else:
             metadata["placeholders"] = 0
             metadata["tail_placeholder"] = False
             if not metadata["empty_fetch"]:
                 metadata["empty_fetch"] = False
 
+        if last_real_ts is not None:
+            metadata["last_real_ts"] = self._normalize_default_timezone(last_real_ts.to_pydatetime())
+        else:
+            metadata["last_real_ts"] = None
+
+        if metadata.get("empty_fetch") and getattr(asset, "asset_type", None) == Asset.AssetType.OPTION:
+            metadata["negative_cache"] = True
+
         # Preserve runtime cache flags that should not be reset by metadata refreshes
         # (e.g., day-mode metadata rebuilds during _update_pandas_data).
-        for flag_key in ("prefetch_complete", "ffilled", "sidecar_loaded"):
+        for flag_key in (
+            "prefetch_complete",
+            "ffilled",
+            "sidecar_loaded",
+            "negative_cache",
+            "quotes_missing_permanent",
+            "tail_missing_permanent",
+        ):
             if flag_key in previous_meta:
                 metadata[flag_key] = previous_meta.get(flag_key)
 
@@ -306,26 +337,30 @@ class ThetaDataBacktestingPandas(PandasData):
         timeshift: Optional[timedelta],
         asset: Optional[Asset] = None,  # DEBUG-LOG: Added for logging
     ) -> Optional[pd.DataFrame]:
+        debug_enabled = logger.isEnabledFor(logging.DEBUG)
+
         # DEBUG-LOG: Method entry with full parameter context
-        logger.debug(
-            "[THETA][DEBUG][PANDAS][FINALIZE][ENTRY] asset=%s current_dt=%s requested_length=%s timeshift=%s input_shape=%s input_columns=%s input_index_type=%s input_has_tz=%s input_index_sample=%s",
-            getattr(asset, 'symbol', asset) if asset else 'UNKNOWN',
-            current_dt.isoformat() if hasattr(current_dt, 'isoformat') else current_dt,
-            requested_length,
-            timeshift,
-            pandas_df.shape if pandas_df is not None else 'NONE',
-            list(pandas_df.columns) if pandas_df is not None else 'NONE',
-            type(pandas_df.index).__name__ if pandas_df is not None else 'NONE',
-            getattr(pandas_df.index, 'tz', None) if pandas_df is not None else 'NONE',
-            list(pandas_df.index[:5]) if pandas_df is not None and len(pandas_df) > 0 else 'EMPTY'
-        )
+        if debug_enabled:
+            logger.debug(
+                "[THETA][DEBUG][PANDAS][FINALIZE][ENTRY] asset=%s current_dt=%s requested_length=%s timeshift=%s input_shape=%s input_columns=%s input_index_type=%s input_has_tz=%s input_index_sample=%s",
+                getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                current_dt,
+                requested_length,
+                timeshift,
+                pandas_df.shape if pandas_df is not None else "NONE",
+                list(pandas_df.columns) if pandas_df is not None else "NONE",
+                type(pandas_df.index).__name__ if pandas_df is not None else "NONE",
+                getattr(pandas_df.index, "tz", None) if pandas_df is not None else "NONE",
+                list(pandas_df.index[:5]) if pandas_df is not None and len(pandas_df) > 0 else "EMPTY",
+            )
 
         if pandas_df is None or pandas_df.empty:
             # DEBUG-LOG: Early return for empty input
-            logger.debug(
-                "[THETA][DEBUG][PANDAS][FINALIZE][EMPTY_INPUT] asset=%s returning_none_or_empty=True",
-                getattr(asset, 'symbol', asset) if asset else 'UNKNOWN'
-            )
+            if debug_enabled:
+                logger.debug(
+                    "[THETA][DEBUG][PANDAS][FINALIZE][EMPTY_INPUT] asset=%s returning_none_or_empty=True",
+                    getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                )
             return pandas_df
 
         frame = pandas_df.copy()
@@ -335,14 +370,15 @@ class ThetaDataBacktestingPandas(PandasData):
         frame.index = pd.to_datetime(frame.index)
 
         # DEBUG-LOG: Timezone state before localization
-        logger.debug(
-            "[THETA][DEBUG][PANDAS][FINALIZE][TZ_CHECK] asset=%s frame_index_tz=%s target_tz=%s needs_localization=%s frame_shape=%s",
-            getattr(asset, 'symbol', asset) if asset else 'UNKNOWN',
-            frame.index.tz,
-            self.tzinfo,
-            frame.index.tz is None,
-            frame.shape
-        )
+        if debug_enabled:
+            logger.debug(
+                "[THETA][DEBUG][PANDAS][FINALIZE][TZ_CHECK] asset=%s frame_index_tz=%s target_tz=%s needs_localization=%s frame_shape=%s",
+                getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                frame.index.tz,
+                self.tzinfo,
+                frame.index.tz is None,
+                frame.shape,
+            )
 
         if frame.index.tz is None:
             frame.index = frame.index.tz_localize(pytz.UTC)
@@ -350,47 +386,51 @@ class ThetaDataBacktestingPandas(PandasData):
         normalized_for_cutoff = localized_index.normalize()
 
         # DEBUG-LOG: After localization
-        logger.debug(
-            "[THETA][DEBUG][PANDAS][FINALIZE][LOCALIZED] asset=%s localized_index_tz=%s localized_sample=%s",
-            getattr(asset, 'symbol', asset) if asset else 'UNKNOWN',
-            localized_index.tz,
-            list(localized_index[:3]) if len(localized_index) > 0 else 'EMPTY'
-        )
+        if debug_enabled:
+            logger.debug(
+                "[THETA][DEBUG][PANDAS][FINALIZE][LOCALIZED] asset=%s localized_index_tz=%s localized_sample=%s",
+                getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                localized_index.tz,
+                list(localized_index[:3]) if len(localized_index) > 0 else "EMPTY",
+            )
 
         cutoff = self.to_default_timezone(current_dt).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
         cutoff_mask = normalized_for_cutoff <= cutoff
 
         # DEBUG-LOG: Cutoff filtering state
-        logger.debug(
-            "[THETA][DEBUG][PANDAS][FINALIZE][CUTOFF] asset=%s cutoff=%s cutoff_mask_true=%s cutoff_mask_false=%s",
-            getattr(asset, 'symbol', asset) if asset else 'UNKNOWN',
-            cutoff,
-            int(cutoff_mask.sum()) if hasattr(cutoff_mask, 'sum') else 'N/A',
-            int((~cutoff_mask).sum()) if hasattr(cutoff_mask, 'sum') else 'N/A'
-        )
+        if debug_enabled:
+            logger.debug(
+                "[THETA][DEBUG][PANDAS][FINALIZE][CUTOFF] asset=%s cutoff=%s cutoff_mask_true=%s cutoff_mask_false=%s",
+                getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                cutoff,
+                int(cutoff_mask.sum()) if hasattr(cutoff_mask, "sum") else "N/A",
+                int((~cutoff_mask).sum()) if hasattr(cutoff_mask, "sum") else "N/A",
+            )
 
         if timeshift and not isinstance(timeshift, int):
             cutoff_mask &= normalized_for_cutoff <= (cutoff - timeshift)
             # DEBUG-LOG: After timeshift adjustment
-            logger.debug(
-                "[THETA][DEBUG][PANDAS][FINALIZE][TIMESHIFT_ADJUSTED] asset=%s timeshift=%s new_cutoff=%s cutoff_mask_true=%s",
-                getattr(asset, 'symbol', asset) if asset else 'UNKNOWN',
-                timeshift,
-                cutoff - timeshift,
-                int(cutoff_mask.sum()) if hasattr(cutoff_mask, 'sum') else 'N/A'
-            )
+            if debug_enabled:
+                logger.debug(
+                    "[THETA][DEBUG][PANDAS][FINALIZE][TIMESHIFT_ADJUSTED] asset=%s timeshift=%s new_cutoff=%s cutoff_mask_true=%s",
+                    getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                    timeshift,
+                    cutoff - timeshift,
+                    int(cutoff_mask.sum()) if hasattr(cutoff_mask, "sum") else "N/A",
+                )
 
         frame = frame.loc[cutoff_mask]
         localized_index = localized_index[cutoff_mask]
         normalized_for_cutoff = normalized_for_cutoff[cutoff_mask]
 
         # DEBUG-LOG: After cutoff filtering
-        logger.debug(
-            "[THETA][DEBUG][PANDAS][FINALIZE][AFTER_CUTOFF] asset=%s shape=%s index_range=%s",
-            getattr(asset, 'symbol', asset) if asset else 'UNKNOWN',
-            frame.shape,
-            (localized_index[0], localized_index[-1]) if len(localized_index) > 0 else ('EMPTY', 'EMPTY')
-        )
+        if debug_enabled:
+            logger.debug(
+                "[THETA][DEBUG][PANDAS][FINALIZE][AFTER_CUTOFF] asset=%s shape=%s index_range=%s",
+                getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                frame.shape,
+                (localized_index[0], localized_index[-1]) if len(localized_index) > 0 else ("EMPTY", "EMPTY"),
+            )
 
         if timeshift and isinstance(timeshift, int):
             if timeshift > 0:
@@ -403,24 +443,26 @@ class ThetaDataBacktestingPandas(PandasData):
         raw_frame = frame.copy()
 
         # DEBUG-LOG: After normalization
-        logger.debug(
-            "[THETA][DEBUG][PANDAS][FINALIZE][NORMALIZED_INDEX] asset=%s shape=%s index_sample=%s",
-            getattr(asset, 'symbol', asset) if asset else 'UNKNOWN',
-            frame.shape,
-            list(normalized_index[:3]) if len(normalized_index) > 0 else 'EMPTY'
-        )
+        if debug_enabled:
+            logger.debug(
+                "[THETA][DEBUG][PANDAS][FINALIZE][NORMALIZED_INDEX] asset=%s shape=%s index_sample=%s",
+                getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                frame.shape,
+                list(normalized_index[:3]) if len(normalized_index) > 0 else "EMPTY",
+            )
 
         expected_last_dt = self.to_default_timezone(current_dt).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
         expected_last_dt_utc = expected_last_dt.astimezone(pytz.UTC)
         target_index = pd.date_range(end=expected_last_dt_utc, periods=requested_length, freq="D", tz=pytz.UTC).tz_convert(self.tzinfo)
 
         # DEBUG-LOG: Target index details
-        logger.debug(
-            "[THETA][DEBUG][PANDAS][FINALIZE][TARGET_INDEX] asset=%s target_length=%s target_range=%s",
-            getattr(asset, 'symbol', asset) if asset else 'UNKNOWN',
-            len(target_index),
-            (target_index[0], target_index[-1]) if len(target_index) > 0 else ('EMPTY', 'EMPTY')
-        )
+        if debug_enabled:
+            logger.debug(
+                "[THETA][DEBUG][PANDAS][FINALIZE][TARGET_INDEX] asset=%s target_length=%s target_range=%s",
+                getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                len(target_index),
+                (target_index[0], target_index[-1]) if len(target_index) > 0 else ("EMPTY", "EMPTY"),
+            )
 
         if "missing" not in frame.columns:
             frame["missing"] = False
@@ -442,13 +484,14 @@ class ThetaDataBacktestingPandas(PandasData):
             placeholder_mask = frame.isna().all(axis=1)
 
         # DEBUG-LOG: Placeholder mask computation
-        logger.debug(
-            "[THETA][DEBUG][PANDAS][FINALIZE][PLACEHOLDER_MASK] asset=%s placeholder_true=%s placeholder_false=%s value_columns=%s",
-            getattr(asset, 'symbol', asset) if asset else 'UNKNOWN',
-            int(placeholder_mask.sum()) if hasattr(placeholder_mask, 'sum') else 'N/A',
-            int((~placeholder_mask).sum()) if hasattr(placeholder_mask, 'sum') else 'N/A',
-            value_columns
-        )
+        if debug_enabled:
+            logger.debug(
+                "[THETA][DEBUG][PANDAS][FINALIZE][PLACEHOLDER_MASK] asset=%s placeholder_true=%s placeholder_false=%s value_columns=%s",
+                getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                int(placeholder_mask.sum()) if hasattr(placeholder_mask, "sum") else "N/A",
+                int((~placeholder_mask).sum()) if hasattr(placeholder_mask, "sum") else "N/A",
+                value_columns,
+            )
 
         frame.loc[placeholder_mask, "missing"] = True
         frame["missing"] = frame["missing"].fillna(False)
@@ -481,30 +524,32 @@ class ThetaDataBacktestingPandas(PandasData):
             frame["missing"] = False
 
         # DEBUG-LOG: Final missing flag state
-        try:
-            missing_count = int(frame["missing"].sum())
-            logger.debug(
-                "[THETA][DEBUG][PANDAS][FINALIZE][MISSING_FINAL] asset=%s missing_true=%s missing_false=%s total_rows=%s",
-                getattr(asset, 'symbol', asset) if asset else 'UNKNOWN',
-                missing_count,
-                len(frame) - missing_count,
-                len(frame)
-            )
-        except Exception as e:
-            logger.debug(
-                "[THETA][DEBUG][PANDAS][FINALIZE][MISSING_FINAL] asset=%s error=%s",
-                getattr(asset, 'symbol', asset) if asset else 'UNKNOWN',
-                str(e)
-            )
+        if debug_enabled:
+            try:
+                missing_count = int(frame["missing"].sum())
+                logger.debug(
+                    "[THETA][DEBUG][PANDAS][FINALIZE][MISSING_FINAL] asset=%s missing_true=%s missing_false=%s total_rows=%s",
+                    getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                    missing_count,
+                    len(frame) - missing_count,
+                    len(frame),
+                )
+            except Exception as e:
+                logger.debug(
+                    "[THETA][DEBUG][PANDAS][FINALIZE][MISSING_FINAL] asset=%s error=%s",
+                    getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                    str(e),
+                )
 
         # DEBUG-LOG: Return value
-        logger.debug(
-            "[THETA][DEBUG][PANDAS][FINALIZE][RETURN] asset=%s shape=%s columns=%s index_range=%s",
-            getattr(asset, 'symbol', asset) if asset else 'UNKNOWN',
-            frame.shape,
-            list(frame.columns),
-            (frame.index[0], frame.index[-1]) if len(frame) > 0 else ('EMPTY', 'EMPTY')
-        )
+        if debug_enabled:
+            logger.debug(
+                "[THETA][DEBUG][PANDAS][FINALIZE][RETURN] asset=%s shape=%s columns=%s index_range=%s",
+                getattr(asset, "symbol", asset) if asset else "UNKNOWN",
+                frame.shape,
+                list(frame.columns),
+                (frame.index[0], frame.index[-1]) if len(frame) > 0 else ("EMPTY", "EMPTY"),
+            )
 
         return frame
 
@@ -596,11 +641,35 @@ class ThetaDataBacktestingPandas(PandasData):
         if isinstance(asset_separated, tuple):
             asset_separated, quote_asset = asset_separated
 
+        asset_type_value = str(getattr(asset_separated, "asset_type", "")).lower()
+        symbol_upper = str(getattr(asset_separated, "symbol", "") or "").upper()
+        index_symbols = {
+            "SPX", "SPXW",
+            "RUT", "RUTW",
+            "VIX", "VIXW",
+            "NDX", "NDXP",
+            "XSP", "DJX", "OEX", "XEO",
+        }
+        is_option_asset = asset_type_value == "option"
+        # Index symbols are represented as plain Assets (asset_type="stock") in many strategies,
+        # so we key off the symbol list. Do NOT treat option contracts on an index (e.g., SPX 0DTE)
+        # as "index assets" for cache/coverage logic.
+        is_index_asset = asset_type_value == "index" or (not is_option_asset and symbol_upper in index_symbols)
+
         if asset_separated.asset_type == "option":
             expiry = asset_separated.expiration
             if self.is_weekend(expiry):
                 logger.info(f"\nSKIP: Expiry {expiry} date is a weekend, no contract exists: {asset_separated}")
                 return None
+
+        if is_option_asset and asset_separated in self._negative_option_cache:
+            logger.info(
+                "[THETA][CACHE][NEGATIVE] asset=%s/%s (%s) marked permanently missing; skipping refetch.",
+                asset_separated,
+                quote_asset,
+                timestep,
+            )
+            return None
 
         # Get the start datetime and timestep unit.
         #
@@ -624,6 +693,8 @@ class ThetaDataBacktestingPandas(PandasData):
         start_datetime, ts_unit = self.get_start_datetime_and_ts_unit(
             length, timestep, start_dt, start_buffer=effective_start_buffer
         )
+        if ts_unit == "day":
+            self._effective_day_mode = True
         current_dt = self.get_datetime()
 
         requested_length = max(length, 1)
@@ -668,6 +739,52 @@ class ThetaDataBacktestingPandas(PandasData):
                 )
             else:
                 end_requirement = end_anchor
+                # PERFORMANCE + RELIABILITY: For point-in-time intraday option quote/price checks,
+                # fetching only up to the current simulation timestamp can cause repeated "stale/refetch"
+                # loops (especially pre-market when no bars exist yet). Prefetch through the session close
+                # for the current trading day so the same contract doesn't refetch every minute.
+                if (
+                    getattr(asset_separated, "asset_type", None) == "option"
+                    and start_dt is not None
+                    and isinstance(length, int)
+                    and length <= 5
+                    and ts_unit in {"minute", "hour"}
+                ):
+                    try:
+                        # PERF: `get_trading_days()` is expensive (calendar lookup + schedule build).
+                        # Point-in-time option quote/price checks can call `_update_pandas_data()` tens
+                        # of thousands of times in a single backtest, so cache the per-session close
+                        # datetime by (market, date).
+                        from lumibot.tools.helpers import get_trading_days
+
+                        market = os.environ.get("BACKTESTING_MARKET", "NYSE")
+                        close_cache = getattr(self, "_session_close_cache", None)
+                        if close_cache is None:
+                            close_cache = {}
+                            self._session_close_cache = close_cache
+
+                        cache_date = end_requirement.date() if hasattr(end_requirement, "date") else end_requirement
+                        cache_key = (market, cache_date)
+                        cached_close = close_cache.get(cache_key)
+                        if cached_close is None and cache_key not in close_cache:
+                            schedule = get_trading_days(
+                                market=market,
+                                start_date=end_requirement,
+                                end_date=end_requirement + timedelta(days=2),
+                                tzinfo=self.tzinfo,
+                            )
+                            cached_close = None
+                            if not schedule.empty:
+                                cached_close = schedule.iloc[0]["market_close"]
+                            close_cache[cache_key] = cached_close
+
+                        if cached_close is not None and cached_close > end_requirement:
+                            end_requirement = cached_close
+                    except Exception:
+                        logger.debug(
+                            "[THETA][DEBUG][END_REQUIREMENT] failed to align intraday option end_requirement",
+                            exc_info=True,
+                        )
         else:
             end_requirement = (
                 end_anchor
@@ -939,6 +1056,7 @@ class ThetaDataBacktestingPandas(PandasData):
         existing_start = None
         existing_end = None
         existing_has_quotes = bool(existing_meta.get("has_quotes")) if existing_meta else False
+        existing_quotes_missing = bool(existing_meta.get("quotes_missing_permanent")) if existing_meta else False
         existing_has_ohlc = bool(existing_meta.get("has_ohlc", True)) if existing_meta else True
 
         if existing_data is not None and existing_meta and existing_meta.get("timestep") == ts_unit:
@@ -954,20 +1072,21 @@ class ThetaDataBacktestingPandas(PandasData):
                     existing_end = self._normalize_default_timezone(existing_data.df.index[-1])
 
             # DEBUG-LOG: Cache validation entry
-            logger.debug(
-                "[DEBUG][BACKTEST][THETA][DEBUG][PANDAS][CACHE_VALIDATION][ENTRY] asset=%s timestep=%s | "
-                "REQUESTED: start=%s start_threshold=%s end_requirement=%s length=%d | "
-                "EXISTING: start=%s end=%s rows=%d",
-                asset_separated.symbol if hasattr(asset_separated, 'symbol') else str(asset_separated),
-                ts_unit,
-                requested_start.isoformat() if requested_start else None,
-                start_threshold.isoformat() if start_threshold else None,
-                end_requirement.isoformat() if end_requirement else None,
-                requested_length,
-                existing_start.isoformat() if existing_start else None,
-                existing_end.isoformat() if existing_end else None,
-                existing_rows
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[DEBUG][BACKTEST][THETA][DEBUG][PANDAS][CACHE_VALIDATION][ENTRY] asset=%s timestep=%s | "
+                    "REQUESTED: start=%s start_threshold=%s end_requirement=%s length=%d | "
+                    "EXISTING: start=%s end=%s rows=%d",
+                    asset_separated.symbol if hasattr(asset_separated, "symbol") else str(asset_separated),
+                    ts_unit,
+                    requested_start,
+                    start_threshold,
+                    end_requirement,
+                    requested_length,
+                    existing_start,
+                    existing_end,
+                    existing_rows,
+                )
 
             # NOTE: Removed "existing_start <= start_threshold" check (2025-12-06)
             # This check invalidated cache for assets like TQQQ where the requested start date
@@ -980,39 +1099,42 @@ class ThetaDataBacktestingPandas(PandasData):
             start_ok = existing_start is not None
 
             # DEBUG-LOG: Start validation result
-            logger.debug(
-                "[DEBUG][BACKTEST][THETA][DEBUG][PANDAS][START_VALIDATION] asset=%s | "
-                "start_ok=%s | "
-                "existing_start=%s start_threshold=%s | "
-                "reasoning=%s",
-                asset_separated.symbol if hasattr(asset_separated, 'symbol') else str(asset_separated),
-                start_ok,
-                existing_start.isoformat() if existing_start else None,
-                start_threshold.isoformat() if start_threshold else None,
-                "existing_start is not None (threshold check removed - see NOTE above)" if start_ok else "existing_start is None"
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[DEBUG][BACKTEST][THETA][DEBUG][PANDAS][START_VALIDATION] asset=%s | "
+                    "start_ok=%s | "
+                    "existing_start=%s start_threshold=%s | "
+                    "reasoning=%s",
+                    asset_separated.symbol if hasattr(asset_separated, "symbol") else str(asset_separated),
+                    start_ok,
+                    existing_start,
+                    start_threshold,
+                    "existing_start is not None (threshold check removed - see NOTE above)" if start_ok else "existing_start is None",
+                )
 
             tail_placeholder = existing_meta.get("tail_placeholder", False)
             end_ok = True
 
             # DEBUG-LOG: End validation entry
-            logger.debug(
-                "[DEBUG][BACKTEST][THETA][DEBUG][PANDAS][END_VALIDATION][ENTRY] asset=%s | "
-                "end_requirement=%s existing_end=%s tail_placeholder=%s",
-                asset_separated.symbol if hasattr(asset_separated, 'symbol') else str(asset_separated),
-                end_requirement.isoformat() if end_requirement else None,
-                existing_end.isoformat() if existing_end else None,
-                tail_placeholder
-            )
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[DEBUG][BACKTEST][THETA][DEBUG][PANDAS][END_VALIDATION][ENTRY] asset=%s | "
+                    "end_requirement=%s existing_end=%s tail_placeholder=%s",
+                    asset_separated.symbol if hasattr(asset_separated, "symbol") else str(asset_separated),
+                    end_requirement,
+                    existing_end,
+                    tail_placeholder,
+                )
 
             if end_requirement is not None:
                 if existing_end is None:
                     end_ok = False
-                    logger.debug(
-                        "[DEBUG][BACKTEST][THETA][DEBUG][PANDAS][END_VALIDATION][RESULT] asset=%s | "
-                        "end_ok=FALSE | reason=existing_end_is_None",
-                        asset_separated.symbol if hasattr(asset_separated, 'symbol') else str(asset_separated)
-                    )
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "[DEBUG][BACKTEST][THETA][DEBUG][PANDAS][END_VALIDATION][RESULT] asset=%s | "
+                            "end_ok=FALSE | reason=existing_end_is_None",
+                            asset_separated.symbol if hasattr(asset_separated, "symbol") else str(asset_separated),
+                        )
                 else:
                     # FIX: For both day and minute data, use date-only comparison
                     # For day data: prevents false negatives when existing_end is midnight and end_requirement is later
@@ -1035,34 +1157,60 @@ class ThetaDataBacktestingPandas(PandasData):
 
                     if existing_end_cmp >= end_requirement_cmp - end_tolerance:
                         end_ok = True
-                        logger.debug(
-                            "[DEBUG][BACKTEST][THETA][DEBUG][PANDAS][END_VALIDATION][RESULT] asset=%s | "
-                            "end_ok=TRUE | reason=existing_end_meets_requirement | "
-                            "existing_end=%s end_requirement=%s tolerance=%s ts_unit=%s",
-                            asset_separated.symbol if hasattr(asset_separated, 'symbol') else str(asset_separated),
-                            existing_end.isoformat(),
-                            end_requirement.isoformat(),
-                            end_tolerance,
-                            ts_unit
-                        )
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(
+                                "[DEBUG][BACKTEST][THETA][DEBUG][PANDAS][END_VALIDATION][RESULT] asset=%s | "
+                                "end_ok=TRUE | reason=existing_end_meets_requirement | "
+                                "existing_end=%s end_requirement=%s tolerance=%s ts_unit=%s",
+                                asset_separated.symbol if hasattr(asset_separated, "symbol") else str(asset_separated),
+                                existing_end,
+                                end_requirement,
+                                end_tolerance,
+                                ts_unit,
+                            )
                     else:
                         # existing_end is still behind the required window
                         end_ok = False
-                        logger.debug(
-                            "[DEBUG][BACKTEST][THETA][DEBUG][PANDAS][END_VALIDATION][RESULT] asset=%s | "
-                            "end_ok=FALSE | reason=existing_end_less_than_requirement | "
-                            "existing_end=%s end_requirement=%s ts_unit=%s",
-                            asset_separated.symbol if hasattr(asset_separated, 'symbol') else str(asset_separated),
-                            existing_end.isoformat(),
-                            end_requirement.isoformat(),
-                            ts_unit
-                        )
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.debug(
+                                "[DEBUG][BACKTEST][THETA][DEBUG][PANDAS][END_VALIDATION][RESULT] asset=%s | "
+                                "end_ok=FALSE | reason=existing_end_less_than_requirement | "
+                                "existing_end=%s end_requirement=%s ts_unit=%s",
+                                asset_separated.symbol if hasattr(asset_separated, "symbol") else str(asset_separated),
+                                existing_end,
+                                end_requirement,
+                                ts_unit,
+                            )
+
+            if (
+                require_quote_data
+                and existing_meta
+                and existing_meta.get("prefetch_complete")
+                and not existing_has_quotes
+            ):
+                if not existing_quotes_missing:
+                    existing_meta["quotes_missing_permanent"] = True
+                    self._dataset_metadata[canonical_key] = existing_meta
+                    existing_quotes_missing = True
+                    logger.info(
+                        "[THETA][CACHE][QUOTES_MISSING] asset=%s/%s (%s) no quote columns after fetch; "
+                        "treating as permanent for this run.",
+                        asset_separated,
+                        quote_asset,
+                        ts_unit,
+                    )
+
+            quotes_ok = (
+                (not require_quote_data)
+                or existing_has_quotes
+                or existing_quotes_missing
+            )
 
             cache_covers = (
                 start_ok
                 and existing_rows >= requested_length
                 and end_ok
-                and (not require_quote_data or existing_has_quotes)
+                and quotes_ok
                 and (not require_ohlc_data or existing_has_ohlc)
             )
 
@@ -1121,6 +1269,8 @@ class ThetaDataBacktestingPandas(PandasData):
                 reasons.append("rows")
             if not end_ok:
                 reasons.append("end")
+            if require_quote_data and not existing_has_quotes and not existing_quotes_missing:
+                reasons.append("quotes")
             logger.debug(
                 "[THETA][DEBUG][THETADATA-PANDAS] refreshing cache for %s/%s (%s); reasons=%s "
                 "(existing_start=%s requested_start=%s existing_end=%s end_requirement=%s existing_rows=%s needed_rows=%s)",
@@ -1136,6 +1286,26 @@ class ThetaDataBacktestingPandas(PandasData):
                 requested_length,
             )
             if existing_meta is not None and existing_meta.get("prefetch_complete"):
+                if is_option_asset and (existing_meta.get("empty_fetch") or existing_meta.get("negative_cache")):
+                    logger.info(
+                        "[THETA][CACHE][NEGATIVE] asset=%s/%s (%s) placeholder-only cache; skipping refetch. existing_end=%s target_end=%s",
+                        asset_separated,
+                        quote_asset,
+                        ts_unit,
+                        existing_end,
+                        end_requirement,
+                    )
+                    return None
+                if is_index_asset and end_ok and existing_rows >= requested_length:
+                    logger.info(
+                        "[THETA][CACHE][REUSE] asset=%s/%s (%s) coverage meets requirement; skipping refetch. existing_end=%s target_end=%s",
+                        asset_separated,
+                        quote_asset,
+                        ts_unit,
+                        existing_end,
+                        end_requirement,
+                    )
+                    return None
                 # The cache was marked complete but doesn't cover our required end date.
                 # This can happen if the cache is stale or backtest dates changed.
                 # Clear the prefetch_complete flag and try to fetch more data.
@@ -1743,6 +1913,29 @@ class ThetaDataBacktestingPandas(PandasData):
         if legacy_meta is not None:
             legacy_meta.update(meta)
             self._dataset_metadata[legacy_key] = legacy_meta
+
+        if require_quote_data and is_option_asset and not meta.get("has_quotes") and meta.get("data_rows"):
+            if not meta.get("quotes_missing_permanent"):
+                meta["quotes_missing_permanent"] = True
+                self._dataset_metadata[canonical_key] = meta
+                if legacy_meta is not None:
+                    legacy_meta.update(meta)
+                    self._dataset_metadata[legacy_key] = legacy_meta
+                logger.info(
+                    "[THETA][CACHE][QUOTES_MISSING] asset=%s/%s (%s) fetched without quotes; "
+                    "treating missing quotes as permanent for this run.",
+                    asset_separated,
+                    quote_asset,
+                    ts_unit,
+                )
+
+        if is_option_asset and meta.get("empty_fetch"):
+            self._negative_option_cache.add(asset_separated)
+            meta["negative_cache"] = True
+            self._dataset_metadata[canonical_key] = meta
+            if legacy_meta is not None:
+                legacy_meta.update(meta)
+                self._dataset_metadata[legacy_key] = legacy_meta
         if ts_unit == "day" and placeholder_mask is not None and len(placeholder_mask):
             try:
                 tail_missing = bool(placeholder_mask.iloc[-1])
@@ -1883,6 +2076,21 @@ class ThetaDataBacktestingPandas(PandasData):
                     ts_unit,
                     end_requirement,
                 )
+            elif is_index_asset:
+                clamp_end = meta.get("last_real_ts") or meta.get("data_end") or meta.get("end")
+                if clamp_end is not None and end_requirement is not None:
+                    if clamp_end < end_requirement:
+                        logger.warning(
+                            "[THETA][COVERAGE][TAIL_PLACEHOLDER] asset=%s/%s (%s) ends with placeholders; "
+                            "clamping backtest end to %s (target_end=%s).",
+                            asset_separated,
+                            quote_asset,
+                            ts_unit,
+                            clamp_end,
+                            end_requirement,
+                        )
+                        self.datetime_end = clamp_end
+                meta["tail_missing_permanent"] = True
             else:
                 raise ValueError(
                     f"[THETA][COVERAGE][TAIL_PLACEHOLDER] asset={asset_separated}/{quote_asset} ({ts_unit}) ends with placeholders "
@@ -2301,12 +2509,19 @@ class ThetaDataBacktestingPandas(PandasData):
         # FIX (2025-12-12): Also check if any existing data uses "day" timestep to detect day mode
         current_mode = getattr(self, "_timestep", None)
 
-        # Additional check: if any data in the store uses "day" timestep, we're in day mode
+        # PERF: determine "effective day mode" once per backtest instead of scanning the entire store on
+        # every snapshot call (pandas_data can contain tens of thousands of option frames).
         if current_mode != "day":
-            for data in self.pandas_data.values():
-                if hasattr(data, "timestep") and data.timestep == "day":
-                    current_mode = "day"
-                    break
+            effective_day_mode = getattr(self, "_effective_day_mode", None)
+            if effective_day_mode is None:
+                effective_day_mode = any(
+                    getattr(data, "timestep", None) == "day" for data in self.pandas_data.values()
+                )
+                self._effective_day_mode = effective_day_mode
+            if effective_day_mode:
+                current_mode = "day"
+        else:
+            self._effective_day_mode = True
         if current_mode == "day" and timestep == "minute":
             timestep = "day"
             logger.debug(
@@ -2328,24 +2543,56 @@ class ThetaDataBacktestingPandas(PandasData):
         asset_for_check = asset[0] if isinstance(asset, tuple) else asset
         require_quote_data = getattr(asset_for_check, "asset_type", None) == "option"
         require_ohlc_data = True
+        ts_unit = None
         try:
             _, ts_unit = self.convert_timestep_str_to_timedelta(timestep)
             if require_quote_data and ts_unit in {"minute", "hour", "second"}:
                 require_ohlc_data = False
         except Exception:
             require_ohlc_data = True
-        self._update_pandas_data(
-            asset,
-            quote,
-            sample_length,
-            timestep,
-            dt,
-            require_quote_data=require_quote_data,
-            require_ohlc_data=require_ohlc_data,
-        )
-        _, ts_unit = self.get_start_datetime_and_ts_unit(
-            sample_length, timestep, dt, start_buffer=START_BUFFER
-        )
+
+        # PERF: Portfolio valuation can request snapshots for many assets each bar. Avoid calling
+        # `_update_pandas_data()` when the in-memory frame already covers `dt` and has the required
+        # columns (quote-only for options, OHLC for everything else).
+        should_refresh = True
+        candidate_data = None
+        if ts_unit is not None:
+            try:
+                quote_asset = quote if quote is not None else Asset("USD", "forex")
+                canonical_key, legacy_key = self._build_dataset_keys(asset_for_check, quote_asset, ts_unit)
+                candidate_data = self.pandas_data.get(canonical_key) or self.pandas_data.get(legacy_key)
+                if candidate_data is not None and getattr(candidate_data, "timestep", None) == ts_unit:
+                    candidate_df = getattr(candidate_data, "df", None)
+                    if candidate_df is not None and not candidate_df.empty:
+                        has_required = True
+                        if require_quote_data and not self._frame_has_quote_columns(candidate_df):
+                            has_required = False
+                        if require_ohlc_data and not self._frame_has_ohlc_columns(candidate_df):
+                            has_required = False
+                        if has_required:
+                            data_end = getattr(candidate_data, "datetime_end", None)
+                            if data_end is None:
+                                data_end = self._normalize_default_timezone(candidate_df.index.max())
+                            if data_end is not None and dt <= data_end:
+                                should_refresh = False
+            except Exception:
+                should_refresh = True
+
+        if should_refresh:
+            self._update_pandas_data(
+                asset,
+                quote,
+                sample_length,
+                timestep,
+                dt,
+                require_quote_data=require_quote_data,
+                require_ohlc_data=require_ohlc_data,
+            )
+        if ts_unit is None:
+            try:
+                _, ts_unit = self.convert_timestep_str_to_timedelta(timestep)
+            except Exception:
+                ts_unit = None
 
         tuple_key = self.find_asset_in_data_store(asset, quote, ts_unit)
         data = None
@@ -2533,12 +2780,18 @@ class ThetaDataBacktestingPandas(PandasData):
         # for historical options, but does have EOD data.
         current_mode = getattr(self, "_timestep", None)
 
-        # Additional check: if any data in the store uses "day" timestep, we're in day mode
+        # PERF: avoid scanning the entire pandas_data store on every quote call.
         if current_mode != "day":
-            for data in self.pandas_data.values():
-                if hasattr(data, "timestep") and data.timestep == "day":
-                    current_mode = "day"
-                    break
+            effective_day_mode = getattr(self, "_effective_day_mode", None)
+            if effective_day_mode is None:
+                effective_day_mode = any(
+                    getattr(data, "timestep", None) == "day" for data in self.pandas_data.values()
+                )
+                self._effective_day_mode = effective_day_mode
+            if effective_day_mode:
+                current_mode = "day"
+        else:
+            self._effective_day_mode = True
 
         if current_mode == "day" and timestep == "minute":
             timestep = "day"
@@ -2591,10 +2844,7 @@ class ThetaDataBacktestingPandas(PandasData):
         try:
             quote_asset = quote if quote is not None else Asset("USD", "forex")
             _, ts_unit = self.convert_timestep_str_to_timedelta(timestep)
-            if (
-                getattr(asset, "asset_type", None) == Asset.AssetType.OPTION
-                and ts_unit in {"minute", "hour", "second"}
-            ):
+            if ts_unit in {"minute", "hour", "second"}:
                 canonical_key, legacy_key = self._build_dataset_keys(asset, quote_asset, ts_unit)
                 candidate_data = self.pandas_data.get(canonical_key)
                 if candidate_data is None:
@@ -2694,7 +2944,7 @@ class ThetaDataBacktestingPandas(PandasData):
 
         # ThetaData quote history for options can omit trade-derived fields (e.g., close/last), while still providing
         # actionable NBBO. Avoid forcing an OHLC download just to fill Quote.price: prefer quote-derived marks when
-        # bid/ask exist, and only fall back to last trade when NBBO is unavailable.
+        # bid/ask exist, and do NOT fall back to last trade (which can trigger an OHLC download).
         if quote_obj is not None and getattr(asset, "asset_type", None) == Asset.AssetType.OPTION:
             try:
                 numeric_price = float(quote_obj.price) if quote_obj.price is not None else None
@@ -2720,9 +2970,10 @@ class ThetaDataBacktestingPandas(PandasData):
                 elif ask is not None and ask > 0:
                     quote_obj.price = ask
                 else:
-                    last_trade = self.get_last_price(asset, timestep=timestep, quote=quote, exchange=exchange)
-                    if last_trade is not None:
-                        quote_obj.price = float(last_trade)
+                    # Leave price unset when NBBO is unavailable. Consumers that require an execution
+                    # anchor should use bid/ask when present; trade-only last price remains accessible
+                    # via `get_last_price()` but is intentionally not pulled as part of quote retrieval.
+                    quote_obj.price = None
 
         # [INSTRUMENTATION] Final quote result with all details
         if logger.isEnabledFor(logging.DEBUG):
@@ -2776,12 +3027,38 @@ class ThetaDataBacktestingPandas(PandasData):
         """
         from lumibot.entities import Chains
 
-        constraints = getattr(self, "_chain_constraints", None)
+        current_date = self.get_datetime().date()
+        constraints = getattr(self, "_chain_constraints", None) or {}
+
+        # PERF: `get_chains_cached()` hits parquet (local/S3) and `Chains(...)` normalizes expiry keys.
+        # Option-heavy strategies can call `get_chains()` hundreds of times per trading day, which
+        # becomes the dominant CPU cost in year-long backtests. Cache per (symbol, date, constraints)
+        # within the backtest process; invalidate automatically as the simulated date advances.
+        cache_date = getattr(self, "_chains_cache_date", None)
+        if cache_date != current_date:
+            self._chains_cache_date = current_date
+            self._chains_cache = {}
+
+        try:
+            constraints_key = json.dumps(constraints, sort_keys=True, default=str)
+        except Exception:
+            constraints_key = str(constraints)
+
+        cache_key = (getattr(asset, "symbol", str(asset)), str(getattr(asset, "asset_type", "")), current_date, constraints_key)
+        cached = getattr(self, "_chains_cache", {}).get(cache_key)
+        if cached is not None:
+            return cached
+
         chains_dict = thetadata_helper.get_chains_cached(
             asset=asset,
-            current_date=self.get_datetime().date(),
+            current_date=current_date,
             chain_constraints=constraints,
         )
 
-        # Wrap in Chains entity for modern API
-        return Chains(chains_dict)
+        chains = Chains(chains_dict)
+        try:
+            self._chains_cache[cache_key] = chains
+        except Exception:
+            pass
+
+        return chains

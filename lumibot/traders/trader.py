@@ -1,5 +1,6 @@
 import logging  # Needed for logging infrastructure setup
 import signal
+import warnings
 from pathlib import Path
 
 from lumibot.tools.lumibot_logger import get_logger
@@ -195,6 +196,16 @@ class Trader:
         else:
             # Live trades should always have full logging for both console and file
             set_log_level("INFO")
+
+        # PERFORMANCE: avoid spamming identical FutureWarnings thousands of times during backtests
+        # (e.g., pandas chained-assignment warnings inside strategy indicator code).
+        if self.is_backtest_broker:
+            warnings.simplefilter("once", FutureWarning)
+            warnings.filterwarnings(
+                "ignore",
+                category=FutureWarning,
+                message=r"A value is trying to be set on a copy of a DataFrame or Series through chained assignment using an inplace method.*",
+            )
 
         # Setting file logging if specified
         if self.logfile:

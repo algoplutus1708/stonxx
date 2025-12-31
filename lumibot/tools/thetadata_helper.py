@@ -1841,8 +1841,6 @@ def get_price_data(
     remote_payload = build_remote_cache_payload(asset, timespan, datastyle)
     cache_manager = get_backtest_cache()
 
-    sidecar_file = _cache_sidecar_path(cache_file)
-
     if cache_manager.enabled:
         try:
             fetched_remote = cache_manager.ensure_local_file(cache_file, payload=remote_payload)
@@ -1862,18 +1860,9 @@ def get_price_data(
                 exc,
             )
 
-        try:
-            # PERFORMANCE FIX (2025-12-07): Removed force_download=True for sidecar files.
-            # This was causing unnecessary S3 downloads on every backtest run.
-            # The sidecar will be downloaded if missing; if out-of-sync, validation will catch it.
-            cache_manager.ensure_local_file(sidecar_file, payload=remote_payload)
-        except Exception as exc:
-            logger.debug(
-                "[THETA][DEBUG][CACHE][REMOTE_SIDECAR_ERROR] asset=%s sidecar=%s error=%s",
-                asset,
-                sidecar_file,
-                exc,
-            )
+        # PERF: Sidecars are optional. Downloading them doubles S3 roundtrips for option-heavy
+        # strategies (parquet + sidecar per contract). If the sidecar is missing locally we fall
+        # back to computing metadata from the parquet itself.
 
     # DEBUG-LOG: Cache file check
     logger.debug(
@@ -1931,7 +1920,6 @@ def get_price_data(
     )
 
     sidecar_data = _load_cache_sidecar(cache_file)
-    cache_checksum = _hash_file(cache_file)
 
     def _validate_cache_frame(
         frame: Optional[pd.DataFrame],
@@ -1982,10 +1970,11 @@ def get_price_data(
         if sidecar_data:
             rows_match = sidecar_data.get("rows") in (None, total_rows) or int(sidecar_data.get("rows", 0)) == total_rows
             placeholders_match = sidecar_data.get("placeholders") in (None, placeholder_rows) or int(sidecar_data.get("placeholders", 0)) == placeholder_rows
-            checksum_match = (sidecar_data.get("checksum") is None) or (cache_checksum is None) or (sidecar_data.get("checksum") == cache_checksum)
             min_match = sidecar_data.get("min") is None or sidecar_data.get("min") == (min_ts.isoformat() if hasattr(min_ts, "isoformat") else None)
             max_match = sidecar_data.get("max") is None or sidecar_data.get("max") == (max_ts.isoformat() if hasattr(max_ts, "isoformat") else None)
-            if not all([rows_match, placeholders_match, checksum_match, min_match, max_match]):
+            # Checksum validation is intentionally skipped for performance. Parquet corruption is
+            # surfaced at read time; the remaining fields catch most logical mismatches cheaply.
+            if not all([rows_match, placeholders_match, min_match, max_match]):
                 return False, "sidecar_mismatch", True  # INTEGRITY FAILURE
 
         if span == "day":
@@ -2048,16 +2037,8 @@ def get_price_data(
         return True, "", False
 
     cache_ok, cache_reason, is_integrity_failure = _validate_cache_frame(df_all, requested_start, requested_end, timespan)
-    if cache_ok and df_all is not None and _load_cache_sidecar(cache_file) is None:
-        # Backfill a missing sidecar for a valid cache.
-        try:
-            checksum = _hash_file(cache_file)
-            _write_cache_sidecar(cache_file, df_all, checksum)
-        except Exception:
-            logger.debug(
-                "[THETA][DEBUG][CACHE][SIDECAR_BACKFILL_ERROR] cache_file=%s",
-                cache_file,
-            )
+    # Sidecar backfill intentionally skipped: sidecars are optional and should not add overhead for
+    # option-heavy backtests.
 
     if not cache_ok and df_all is not None:
         if is_integrity_failure:
@@ -2113,13 +2094,27 @@ def get_price_data(
         and str(getattr(asset, "asset_type", "stock")).lower() == "option"
         and not {"bid", "ask"}.issubset(df_all.columns)
     ):
-        cache_invalid = True
-        logger.info(
-            "[THETA][CACHE][SCHEMA_UPGRADE] asset=%s span=%s datastyle=%s missing_nbbo_cols=True; forcing refresh to include bid/ask",
-            asset,
-            timespan,
-            datastyle,
-        )
+        placeholder_only = False
+        try:
+            if "missing" in df_all.columns:
+                placeholder_only = bool(df_all["missing"].fillna(False).astype(bool).all())
+        except Exception:
+            placeholder_only = False
+        if placeholder_only:
+            logger.info(
+                "[THETA][CACHE][SCHEMA_UPGRADE] asset=%s span=%s datastyle=%s missing_nbbo_cols=True but cache is placeholder-only; skipping refresh",
+                asset,
+                timespan,
+                datastyle,
+            )
+        else:
+            cache_invalid = True
+            logger.info(
+                "[THETA][CACHE][SCHEMA_UPGRADE] asset=%s span=%s datastyle=%s missing_nbbo_cols=True; forcing refresh to include bid/ask",
+                asset,
+                timespan,
+                datastyle,
+            )
 
     # Check if we need to get more data
     logger.debug(
@@ -2313,8 +2308,15 @@ def get_price_data(
     # Initialize tqdm progress bar
     total_days = (fetch_end - fetch_start).days + 1
     total_queries = (total_days // MAX_DAYS) + 1
-    description = f"\nDownloading '{datastyle}' data for {asset} / {quote_asset} with '{timespan}' from ThetaData..."
-    logger.info(description)
+    quiet_logs = os.environ.get("BACKTESTING_QUIET_LOGS", "true").lower() == "true"
+    show_progress_bar = os.environ.get("BACKTESTING_SHOW_PROGRESS_BAR", "true").lower() == "true"
+    disable_progress = quiet_logs or not show_progress_bar
+
+    description = f"Downloading '{datastyle}' data for {asset} / {quote_asset} with '{timespan}' from ThetaData..."
+    if disable_progress:
+        logger.debug(description)
+    else:
+        logger.info(f"\n{description}")
 
     delta = timedelta(days=MAX_DAYS)
 
@@ -2576,12 +2578,24 @@ def get_price_data(
 
     total_queries = len(chunk_ranges)
     chunk_workers = max(1, min(MAX_PARALLEL_CHUNKS, total_queries))
-    logger.info(
-        "ThetaData downloader requesting %d chunk(s) with up to %d parallel workers.",
-        total_queries,
-        chunk_workers,
+    if disable_progress:
+        logger.debug(
+            "ThetaData downloader requesting %d chunk(s) with up to %d parallel workers.",
+            total_queries,
+            chunk_workers,
+        )
+    else:
+        logger.info(
+            "ThetaData downloader requesting %d chunk(s) with up to %d parallel workers.",
+            total_queries,
+            chunk_workers,
+        )
+    pbar = tqdm(
+        total=max(1, total_queries),
+        desc=f"\n{description}" if not disable_progress else description,
+        dynamic_ncols=True,
+        disable=disable_progress,
     )
-    pbar = tqdm(total=max(1, total_queries), desc=description, dynamic_ncols=True)
 
     # Track completed chunks for download status (thread-safe counter)
     completed_chunks = [0]  # Use list to allow mutation in nested scope
@@ -2863,6 +2877,17 @@ def get_missing_dates(df_all, asset, start, end):
         0 if df_all is None else len(df_all)
     )
 
+    asset_type_value = str(getattr(asset, "asset_type", "")).lower()
+    symbol_upper = str(getattr(asset, "symbol", "") or "").upper()
+    index_symbols = {
+        "SPX", "SPXW",
+        "RUT", "RUTW",
+        "VIX", "VIXW",
+        "NDX", "NDXP",
+        "XSP", "DJX", "OEX", "XEO",
+    }
+    is_index_asset = asset_type_value == "index" or symbol_upper in index_symbols
+
     trading_dates = get_trading_dates(asset, start, end)
 
     logger.debug(
@@ -2893,6 +2918,12 @@ def get_missing_dates(df_all, asset, start, end):
         df_working["missing"].astype(bool) if "missing" in df_working.columns else pd.Series(False, index=df_working.index)
     )
     placeholder_dates = set(dates_series[placeholder_mask].unique()) if hasattr(placeholder_mask, "__len__") else set()
+    if is_index_asset and hasattr(placeholder_mask, "__len__") and bool(placeholder_mask.all()):
+        logger.info(
+            "[THETA][CACHE][PLACEHOLDER_ONLY] asset=%s | placeholder-only cache detected; skipping refetch for index",
+            asset.symbol if hasattr(asset, 'symbol') else str(asset),
+        )
+        return []
     # Placeholder rows should be treated as missing coverage for past dates so we can refetch real data
     # (e.g. when caches were populated during an outage). We suppress future/expired-placeholder refetch
     # later when computing missing_dates.

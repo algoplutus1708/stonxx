@@ -94,6 +94,12 @@ class BacktestCacheManager:
         self._client_factory = client_factory
         self._client = None
         self._client_lock = threading.Lock()
+        # When using the S3 backend we want "fresh per run" semantics (never trust an on-disk file that
+        # may have been produced by a previous cache version), but re-downloading the same object
+        # repeatedly within a single backtest is prohibitively slow. Track which remote keys have been
+        # downloaded in this process so we can safely reuse the local copy for the remainder of the run.
+        self._downloaded_remote_keys: set[str] = set()
+        self._downloaded_remote_keys_lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -117,21 +123,48 @@ class BacktestCacheManager:
         if not isinstance(local_path, Path):
             local_path = Path(local_path)
 
+        remote_key = self.remote_key_for(local_path, payload)
+        if remote_key is None:
+            return False
+
         if self._settings and self._settings.backend == "s3":
-            # S3 cache mode is exclusive: NEVER reuse a local file. We always delete any local copy
-            # and require a fresh download from S3. If the download fails, callers must fetch from
-            # the data source and re-upload—no local fallback is allowed when backend=s3.
+            marker_path = local_path.with_suffix(local_path.suffix + ".s3key")
+
+            # If the file was already downloaded (or produced) for this exact remote key, allow reuse
+            # across backtest runs. This preserves cache-version isolation because `remote_key`
+            # already includes `self._settings.version`.
+            if local_path.exists() and not force_download and marker_path.exists():
+                try:
+                    marker_value = marker_path.read_text(encoding="utf-8").strip()
+                except Exception:
+                    marker_value = ""
+
+                if marker_value == remote_key:
+                    with self._downloaded_remote_keys_lock:
+                        self._downloaded_remote_keys.add(remote_key)
+                    return False
+
+            with self._downloaded_remote_keys_lock:
+                already_downloaded = remote_key in self._downloaded_remote_keys
+
+            # S3 cache mode: ensure we download the object at least once per process (fresh run
+            # semantics), but then allow local reuse to avoid repeated downloads during the same
+            # backtest.
+            if local_path.exists() and already_downloaded and not force_download:
+                return False
+
             if local_path.exists():
                 try:
                     local_path.unlink()
                 except Exception:
                     pass
+            if marker_path.exists():
+                try:
+                    marker_path.unlink()
+                except Exception:
+                    pass
             force_download = True
         elif local_path.exists() and not force_download:
-            return False
-
-        remote_key = self.remote_key_for(local_path, payload)
-        if remote_key is None:
             return False
 
         client = self._get_client()
@@ -141,9 +174,21 @@ class BacktestCacheManager:
         try:
             client.download_file(self._settings.bucket, remote_key, str(tmp_path))
             os.replace(tmp_path, local_path)
+            # Persist a tiny marker so future runs can reuse the file without an extra S3 roundtrip,
+            # as long as the remote key (including cache version) matches.
+            try:
+                marker_path = local_path.with_suffix(local_path.suffix + ".s3key")
+                marker_tmp = marker_path.with_suffix(marker_path.suffix + ".tmp")
+                marker_path.parent.mkdir(parents=True, exist_ok=True)
+                marker_tmp.write_text(remote_key, encoding="utf-8")
+                os.replace(marker_tmp, marker_path)
+            except Exception:
+                pass
             logger.debug(
                 "[REMOTE_CACHE][DOWNLOAD] %s -> %s", remote_key, local_path.as_posix()
             )
+            with self._downloaded_remote_keys_lock:
+                self._downloaded_remote_keys.add(remote_key)
             return True
         except Exception as exc:  # pragma: no cover - narrow in helper
             if tmp_path.exists():
@@ -158,6 +203,12 @@ class BacktestCacheManager:
                         local_path.unlink()
                     except Exception:
                         pass
+                try:
+                    marker_path = local_path.with_suffix(local_path.suffix + ".s3key")
+                    if marker_path.exists():
+                        marker_path.unlink()
+                except Exception:
+                    pass
                 return False
             raise
 

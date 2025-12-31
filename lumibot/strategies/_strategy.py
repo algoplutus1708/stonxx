@@ -179,6 +179,8 @@ class _Strategy:
         parameters={},
         buy_trading_fees=[],
         sell_trading_fees=[],
+        buy_trading_slippages=[],
+        sell_trading_slippages=[],
         force_start_immediately=False,
         discord_webhook_url=None,
         account_history_db_connection_str=None,
@@ -244,6 +246,10 @@ class _Strategy:
             A list of TradingFee objects to use for buying assets. Defaults to an empty list.
         sell_trading_fees : list
             A list of TradingFee objects to use for selling assets. Defaults to an empty list.
+        buy_trading_slippages : list
+            A list of TradingSlippage objects to use for buy fills in backtesting. Defaults to empty list.
+        sell_trading_slippages : list
+            A list of TradingSlippage objects to use for sell fills in backtesting. Defaults to empty list.
         force_start_immidiately : bool
             If True, the strategy will start immediately. If False, the strategy will wait until the market opens
             to start. Defaults to True.
@@ -288,6 +294,8 @@ class _Strategy:
 
         self.buy_trading_fees = buy_trading_fees
         self.sell_trading_fees = sell_trading_fees
+        self.buy_trading_slippages = buy_trading_slippages
+        self.sell_trading_slippages = sell_trading_slippages
         self.save_logfile = save_logfile
         self.broker = broker
 
@@ -844,6 +852,32 @@ class _Strategy:
             and isinstance(source, ThetaDataBacktestingPandas)
         )
 
+        def _thetadata_quote_mark(quote_obj):
+            if quote_obj is None:
+                return None
+            bid = getattr(quote_obj, "bid", None)
+            ask = getattr(quote_obj, "ask", None)
+            price = getattr(quote_obj, "price", None)
+
+            def _coerce(val):
+                try:
+                    numeric = float(val)
+                except (TypeError, ValueError):
+                    return None
+                if math.isnan(numeric) or numeric <= 0:
+                    return None
+                return numeric
+
+            bid_val = _coerce(bid)
+            ask_val = _coerce(ask)
+            if bid_val is not None and ask_val is not None:
+                return (bid_val + ask_val) / 2
+            if bid_val is not None:
+                return bid_val
+            if ask_val is not None:
+                return ask_val
+            return _coerce(price)
+
         # Determine if this strategy is effectively daily cadence.
         try:
             cadence_seconds = self._get_sleeptime_seconds()
@@ -851,6 +885,27 @@ class _Strategy:
                 timestep_hint = "day"
         except Exception:
             timestep_hint = None
+
+        # ThetaData backtesting: for options, mark-to-market should be quote-driven (NBBO mark) and
+        # extremely fast. Calling `get_price_snapshot()` first causes an extra `_update_pandas_data()`
+        # pass per asset (and often still falls back to `get_quote()`), which is the dominant cost in
+        # long, option-heavy intraday backtests.
+        if is_thetadata_option_backtest:
+            try:
+                get_quote = getattr(source, "get_quote", None)
+                if callable(get_quote):
+                    quote_asset = getattr(self, "_quote_asset", None)
+                    if quote_asset is not None:
+                        quote = get_quote(base_asset, quote=quote_asset, timestep=timestep_hint or "minute")
+                    else:
+                        quote = get_quote(base_asset, timestep=timestep_hint or "minute")
+                    quote_mark = _thetadata_quote_mark(quote)
+                    if quote_mark is not None:
+                        return quote_mark
+            except Exception as e:
+                self.logger.debug("ThetaData quote-mark lookup failed for %s: %s", base_asset, e)
+            return None
+
         if hasattr(source, "get_price_snapshot"):
             try:
                 if timestep_hint:
@@ -873,51 +928,6 @@ class _Strategy:
 
         if snapshot_price is not None:
             return snapshot_price
-
-        def _thetadata_quote_mark(quote_obj):
-            if quote_obj is None:
-                return None
-            bid = getattr(quote_obj, "bid", None)
-            ask = getattr(quote_obj, "ask", None)
-            try:
-                bid_val = float(bid) if bid is not None else None
-                ask_val = float(ask) if ask is not None else None
-            except (TypeError, ValueError):
-                bid_val = None
-                ask_val = None
-            if bid_val is not None and bid_val <= 0:
-                bid_val = None
-            if ask_val is not None and ask_val <= 0:
-                ask_val = None
-            if bid_val is not None and ask_val is not None:
-                mid_val = (bid_val + ask_val) / 2
-                return mid_val if mid_val > 0 else None
-            if bid_val is not None:
-                return bid_val
-            if ask_val is not None:
-                return ask_val
-            return None
-
-        # ThetaData backtesting: for options, prefer quote-based mark pricing over stale last-trade.
-        # If we still can't price the option, return None so the strategy-level MTM forward-fill can apply.
-        if is_thetadata_option_backtest:
-            try:
-                get_quote = getattr(source, "get_quote", None)
-                if callable(get_quote):
-                    quote = get_quote(base_asset, timestep=timestep_hint or "minute")
-                    quote_mark = _thetadata_quote_mark(quote)
-                    if quote_mark is not None:
-                        self.logger.debug(
-                            "Using ThetaData quote mark %.4f for %s (bid=%s, ask=%s)",
-                            quote_mark,
-                            base_asset,
-                            getattr(quote, "bid", None) if quote else None,
-                            getattr(quote, "ask", None) if quote else None,
-                        )
-                        return quote_mark
-            except Exception as e:
-                self.logger.debug("ThetaData quote-mark lookup failed for %s: %s", base_asset, e)
-            return None
 
         get_last_price = getattr(source, "get_last_price", None)
         if callable(get_last_price):
@@ -1483,6 +1493,8 @@ class _Strategy:
         parameters = {},
         buy_trading_fees = [],
         sell_trading_fees = [],
+        buy_trading_slippages = [],
+        sell_trading_slippages = [],
         polygon_api_key = None,
         use_other_option_source = False,
         thetadata_username = None,
@@ -1562,6 +1574,10 @@ class _Strategy:
             A list of TradingFee objects to apply to the buy orders during backtests.
         sell_trading_fees : list of TradingFee objects
             A list of TradingFee objects to apply to the sell orders during backtests.
+        buy_trading_slippages : list of TradingSlippage objects
+            Slippage amounts to apply to buy SMART_LIMIT fills when no per-order slippage is provided.
+        sell_trading_slippages : list of TradingSlippage objects
+            Slippage amounts to apply to sell SMART_LIMIT fills when no per-order slippage is provided.
         polygon_api_key : str
             The polygon api key to use for polygon data. Only required if you are using PolygonDataBacktesting as
             the datasource_class.
@@ -1901,6 +1917,8 @@ class _Strategy:
             parameters=parameters,
             buy_trading_fees=buy_trading_fees,
             sell_trading_fees=sell_trading_fees,
+            buy_trading_slippages=buy_trading_slippages,
+            sell_trading_slippages=sell_trading_slippages,
             save_logfile=save_logfile,
             include_cash_positions=include_cash_positions,
             **kwargs,
@@ -2041,11 +2059,18 @@ class _Strategy:
                 f"{end_dt} and {start_dt}"
             )
 
-        # Check that backtesting_end is not in the future
+        # Check that backtesting_end is not in the future (allow opt-in override for testing)
         now = datetime.datetime.now(end_dt.tzinfo) if end_dt.tzinfo else datetime.datetime.now()
         if end_dt > now:
-            raise ValueError(
-                f"`backtesting_end` cannot be in the future. You passed in {end_dt}, now is {now}"
+            allow_future = os.environ.get("BACKTESTING_ALLOW_FUTURE_END", "").strip().lower() in {"1", "true", "yes"}
+            if not allow_future:
+                raise ValueError(
+                    f"`backtesting_end` cannot be in the future. You passed in {end_dt}, now is {now}"
+                )
+            get_logger(__name__).warning(
+                "`backtesting_end` is in the future (%s > %s). Proceeding because BACKTESTING_ALLOW_FUTURE_END=true.",
+                end_dt,
+                now,
             )
 
     def send_update_to_cloud(self):
