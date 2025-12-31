@@ -1863,7 +1863,6 @@ class BacktestingBroker(Broker):
                 df_original = ohlc.df
 
                 # Handle both pandas and polars DataFrames
-                prefer_future_bar = getattr(getattr(self, "data_source", None), "_timestep", None) == "day"
                 if hasattr(df_original, 'select'):  # Polars DataFrame
                     # Find datetime column
                     dt_col = None
@@ -1874,10 +1873,7 @@ class BacktestingBroker(Broker):
                     if dt_col is None:
                         dt_col = 'datetime'  # fallback
 
-                    # For day-cadence backtests, fills should be based on the *next* bar to avoid
-                    # lookahead (orders created on a day bar execute on the next day bar).
-                    comparator = pl.col(dt_col) > self.datetime if prefer_future_bar else pl.col(dt_col) >= self.datetime
-                    df = df_original.filter(comparator)
+                    df = df_original.filter(pl.col(dt_col) >= self.datetime)
 
                     # If the dataframe is empty, get the last row
                     if len(df) == 0:
@@ -1891,12 +1887,7 @@ class BacktestingBroker(Broker):
                     close = df["close"][0]
                     volume = df["volume"][0]
                 else:  # Pandas DataFrame
-                    # For day-cadence backtests, fills should be based on the *next* bar to avoid
-                    # lookahead (orders created on a day bar execute on the next day bar).
-                    if prefer_future_bar:
-                        df = df_original[df_original.index > self.datetime]
-                    else:
-                        df = df_original[df_original.index >= self.datetime]
+                    df = df_original[df_original.index >= self.datetime]
 
                     # If the dataframe is empty, then we should get the last row of the original dataframe
                     # because it is the best data we have
