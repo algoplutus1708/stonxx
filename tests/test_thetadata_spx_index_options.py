@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from lumibot.backtesting.backtesting_broker import BacktestingBroker
@@ -150,3 +151,52 @@ def test_cash_settle_index_option_retries_when_stock_price_is_none(monkeypatch):
 
     broker.cash_settle_options_contract(position, strategy)
     assert get_last_price_calls == ["stock", "index"]
+
+
+def test_cash_settle_index_option_falls_back_to_daily_close_on_coverage_gap(monkeypatch):
+    """If minute last-price cannot be fetched due to an index coverage gap, settle via daily close."""
+
+    option = Asset(
+        symbol="SPXW",
+        asset_type="option",
+        expiration=date(2025, 12, 22),
+        strike=6000.0,
+        right="CALL",
+    )
+    option.underlying_asset = Asset(symbol="SPX", asset_type="index")
+    option.multiplier = getattr(option, "multiplier", 100) or 100
+
+    position = SimpleNamespace(asset=option, quantity=1)
+
+    broker = BacktestingBroker.__new__(BacktestingBroker)
+    broker.IS_BACKTESTING_BROKER = True
+    broker.CASH_SETTLED = "CASH_SETTLED"
+
+    get_last_price_calls: list[str] = []
+
+    def fake_get_last_price(asset):
+        get_last_price_calls.append(asset.asset_type)
+        raise ValueError(
+            "[THETA][COVERAGE][GAP] asset=SPX/USD (minute) coverage_end=2025-12-16 16:00:00-05:00 "
+            "target_end=2025-12-22 16:00:00-05:00 rows=26 placeholders=26 days_behind=6; refusing to proceed"
+        )
+
+    broker.get_last_price = fake_get_last_price
+    broker.stream = SimpleNamespace(dispatch=lambda *args, **kwargs: None)
+
+    get_historical_prices_calls: list[tuple[str, int, str]] = []
+
+    def fake_get_historical_prices(asset, length, timestep="", **kwargs):
+        get_historical_prices_calls.append((asset.asset_type, length, timestep))
+        return SimpleNamespace(df=pd.DataFrame({"close": [6100.0]}))
+
+    strategy = SimpleNamespace(
+        get_cash=lambda: 0,
+        _set_cash_position=lambda value: None,
+        create_order=lambda *args, **kwargs: SimpleNamespace(child_orders=[]),
+        get_historical_prices=fake_get_historical_prices,
+    )
+
+    broker.cash_settle_options_contract(position, strategy)
+    assert get_last_price_calls == ["index"]
+    assert get_historical_prices_calls == [("index", 1, "day")]

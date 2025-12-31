@@ -1094,33 +1094,64 @@ class BacktestingBroker(Broker):
 
         # Get the price of the underlying asset.
         #
-        # ThetaData index options (e.g., SPX) can arrive without an explicit underlying_asset,
+        # ThetaData index options (e.g., SPXW) can arrive without an explicit underlying_asset,
         # and legacy code defaulted to creating a stock Asset(symbol=SPX). That yields no data
-        # and can trigger the ThetaData "tail placeholder" coverage guard. If that happens,
-        # retry using an index asset type.
+        # and can trigger ThetaData coverage guards. If that happens, retry using an index asset type.
+        #
+        # Also, some ThetaData environments can lag on *minute* index coverage while still having
+        # official daily close (EOD) data. Cash settlement only needs the underlying level at
+        # expiration, so if minute last-price fails due to coverage gaps, fall back to daily close.
+        underlying_price = None
+        last_price_error = None
         try:
             underlying_price = self.get_last_price(underlying_asset)
-        except ValueError as exc:
+        except Exception as exc:
+            last_price_error = exc
             message = str(exc)
             if (
                 "[THETA][COVERAGE][TAIL_PLACEHOLDER]" in message
                 and getattr(underlying_asset, "asset_type", None) != "index"
             ):
-                underlying_asset_index = Asset(symbol=underlying_asset.symbol, asset_type="index")
-                underlying_price = self.get_last_price(underlying_asset_index)
-            else:
-                raise
+                underlying_asset = Asset(symbol=underlying_asset.symbol, asset_type="index")
+                try:
+                    underlying_price = self.get_last_price(underlying_asset)
+                    last_price_error = None
+                except Exception as exc2:
+                    last_price_error = exc2
 
         # If the underlying was mis-typed (e.g., SPX created as stock), some data sources
         # return None instead of raising. Retry as an index before settling.
         if underlying_price is None and getattr(underlying_asset, "asset_type", None) != "index":
-            underlying_asset_index = Asset(symbol=underlying_asset.symbol, asset_type="index")
-            underlying_price = self.get_last_price(underlying_asset_index)
+            underlying_asset = Asset(symbol=underlying_asset.symbol, asset_type="index")
+            try:
+                underlying_price = self.get_last_price(underlying_asset)
+                last_price_error = None
+            except Exception as exc:
+                last_price_error = exc
+
+        if underlying_price is None and last_price_error is not None:
+            # Common production failure mode: ThetaData returns placeholder-only minute bars for an
+            # index while daily close remains available. Use day-close as the settlement proxy.
+            message = str(last_price_error)
+            if "[THETA][COVERAGE]" in message:
+                try:
+                    bars = strategy.get_historical_prices(underlying_asset, length=1, timestep="day")
+                    df = getattr(bars, "df", None)
+                    if df is not None and not df.empty and "close" in df.columns:
+                        underlying_price = float(df["close"].iloc[-1])
+                        logger.warning(
+                            "[CASH_SETTLE][FALLBACK] get_last_price(%s) failed (%s); settling using daily close=%s",
+                            underlying_asset,
+                            message.splitlines()[0],
+                            underlying_price,
+                        )
+                except Exception:
+                    pass
 
         if underlying_price is None:
-            raise ValueError(
-                f"Unable to price underlying {underlying_asset} for cash settlement of {position.asset}"
-            )
+            if last_price_error is not None:
+                raise last_price_error
+            raise ValueError(f"Unable to price underlying {underlying_asset} for cash settlement of {position.asset}")
 
         # Calculate profit/loss per contract
         if position.asset.right == "CALL":
