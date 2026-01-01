@@ -688,7 +688,7 @@ class ThetaDataBacktestingPandas(PandasData):
             and start_dt is not None
             and isinstance(length, int)
             and length <= 5
-            and ts_unit_preview in {"minute", "hour"}
+            and ts_unit_preview in {"minute", "hour", "day"}
         ):
             effective_start_buffer = timedelta(0)
 
@@ -2804,7 +2804,7 @@ class ThetaDataBacktestingPandas(PandasData):
         else:
             self._effective_day_mode = True
 
-        if current_mode == "day" and timestep == "minute":
+        if current_mode == "day" and timestep == "minute" and not snapshot_only:
             timestep = "day"
             logger.debug(
                 "[THETA][DEBUG][TIMESTEP_ALIGN] get_quote aligned from minute to day for asset=%s",
@@ -3110,6 +3110,40 @@ class ThetaDataBacktestingPandas(PandasData):
                     # anchor should use bid/ask when present; trade-only last price remains accessible
                     # via `get_last_price()` but is intentionally not pulled as part of quote retrieval.
                     quote_obj.price = None
+
+        # Day-mode fallback (historical options):
+        # Some ThetaData option day bars omit NBBO entirely. If we're in day cadence and the day
+        # quote is empty, fall back to a minimal minute snapshot so strategies can still obtain
+        # actionable bid/ask/mark data without triggering a full-day minute prefetch.
+        if (
+            not snapshot_only
+            and current_mode == "day"
+            and timestep == "day"
+            and getattr(asset, "asset_type", None) == Asset.AssetType.OPTION
+            and quote_obj is not None
+            and getattr(quote_obj, "bid", None) is None
+            and getattr(quote_obj, "ask", None) is None
+            and getattr(quote_obj, "price", None) is None
+        ):
+            try:
+                snapshot_quote = self.get_quote(
+                    asset=asset,
+                    quote=quote,
+                    exchange=exchange,
+                    timestep="minute",
+                    snapshot_only=True,
+                )
+            except Exception:
+                snapshot_quote = None
+
+            if snapshot_quote is not None:
+                has_snapshot = (
+                    getattr(snapshot_quote, "bid", None) is not None
+                    or getattr(snapshot_quote, "ask", None) is not None
+                    or getattr(snapshot_quote, "price", None) is not None
+                )
+                if has_snapshot:
+                    quote_obj = snapshot_quote
 
         # [INSTRUMENTATION] Final quote result with all details
         if logger.isEnabledFor(logging.DEBUG):

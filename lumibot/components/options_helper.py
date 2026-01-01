@@ -1194,6 +1194,18 @@ class OptionsHelper:
         elif not isinstance(dt, date):
             raise TypeError(f"dt must be a datetime.date or datetime.datetime object, got {type(dt)}")
 
+        # Current "as-of" date for quote validation in backtests. This is NOT the same as `dt`,
+        # which is the target expiration date to search for.
+        as_of_date: Optional[date] = None
+        try:
+            as_of_dt = self.strategy.get_datetime()
+            if isinstance(as_of_dt, datetime):
+                as_of_date = as_of_dt.date()
+            elif isinstance(as_of_dt, date):
+                as_of_date = as_of_dt
+        except Exception:
+            as_of_date = None
+
         # Make it all caps and get the specific chain.
         call_or_put_caps = call_or_put.upper()
 
@@ -1238,6 +1250,13 @@ class OptionsHelper:
         # PERF: Intraday strategies often request the "next valid expiration" on every bar, even
         # though the answer is stable for the trading day. Cache per (underlying, date, side, chain
         # fingerprint) so repeated calls avoid re-validating strikes/quotes.
+        broker = getattr(self.strategy, "broker", None)
+        data_source = getattr(broker, "data_source", None) if broker is not None else None
+        is_backtesting = (
+            getattr(broker, "IS_BACKTESTING_BROKER", False) is True
+            or getattr(data_source, "IS_BACKTESTING_DATA_SOURCE", False) is True
+        )
+
         cache_dt = getattr(self, "_expiration_cache_dt", None)
         if cache_dt != dt:
             self._expiration_cache_dt = dt
@@ -1322,8 +1341,30 @@ class OptionsHelper:
             except Exception:
                 underlying_price = None
 
-        def _validate_candidates(candidates: List[Tuple[str, date]]) -> Optional[date]:
+        def _validate_candidates(
+            candidates: List[Tuple[str, date]],
+            *,
+            validate_quotes: bool = True,
+        ) -> Optional[date]:
+            # In historical backtests (especially long windows), validating tradeable quote data
+            # for every expiration can be extremely expensive when the provider has sparse quote
+            # history. Keep a bounded validation budget and fall back to "closest by date"
+            # selection in backtesting mode so strategies can proceed (and handle missing pricing
+            # via their own price checks).
+            max_checks = 30
+            checks = 0
+
             for exp_str, exp_date in candidates:
+                checks += 1
+                if checks > max_checks:
+                    if is_backtesting:
+                        self.strategy.log_message(
+                            f"Expiration validation exceeded {max_checks} candidates; no tradeable expiry found "
+                            f"for {call_or_put_caps} (dt={dt}).",
+                            color="yellow",
+                        )
+                    return None
+
                 strikes = specific_chain.get(exp_str)
                 if not strikes:
                     continue
@@ -1366,22 +1407,25 @@ class OptionsHelper:
                         right=call_or_put,
                     )
 
-                    # First try: Check for quote data (bid/ask) - most reliable signal
+                    if not validate_quotes:
+                        return exp_date
+
+                    # Use a point-in-time quote probe for validation.
+                    #
+                    # NOTE: Intraday quote history is often more complete than day-level NBBO
+                    # for historical options (ThetaData can omit bid/ask on day bars). For
+                    # performance and robustness we use the quote-derived mark path, which can
+                    # use a snapshot-only implementation in backtesting data sources.
                     try:
-                        quote = self.strategy.get_quote(test_option)
-                        has_valid_quote = quote and (quote.bid is not None or quote.ask is not None)
-                        if has_valid_quote:
+                        mark_price, bid, ask = self._get_option_mark_from_quote(test_option, snapshot=True)
+                        has_bid_ask = bid is not None or ask is not None
+
+                        if has_bid_ask:
                             self.strategy.log_message(
                                 f"Found valid expiry {exp_date} with quote data for {call_or_put_caps}",
                                 color="blue",
                             )
                             return exp_date
-                    except Exception:
-                        pass  # Quote not available, try price data
-
-                    # Fallback: Check for last traded price data
-                    try:
-                        mark_price, _, _ = self._get_option_mark_from_quote(test_option)
                         if mark_price is not None:
                             self.strategy.log_message(
                                 f"Found valid expiry {exp_date} with quote-derived price data for {call_or_put_caps}",
@@ -1401,6 +1445,35 @@ class OptionsHelper:
 
             return None
 
+        # If we recently concluded (for this as-of date range) that no expirations have actionable
+        # quote data, skip the expensive validation scan for a short period to avoid hammering the
+        # downloader on consecutive backtest days. We still enforce strike proximity checks so we
+        # don't return obviously-invalid expirations.
+        disabled_until: Optional[date] = None
+        if is_backtesting and underlying_symbol and as_of_date is not None:
+            disabled_until_map = getattr(self, "_expiration_validation_disabled_until", None)
+            if isinstance(disabled_until_map, dict):
+                disabled_until = disabled_until_map.get(underlying_symbol)
+
+        if isinstance(disabled_until, date) and as_of_date is not None and as_of_date < disabled_until:
+            resolved = _validate_candidates(future_candidates, validate_quotes=False)
+            if resolved is None and (allow_prior or is_backtesting):
+                prior_candidates = [(s, d) for s, d in expiration_dates if d < dt]
+                prior_candidates.sort(key=lambda x: x[1], reverse=True)
+                resolved = _validate_candidates(prior_candidates, validate_quotes=False)
+
+            try:
+                self._expiration_cache[expiration_cache_key] = resolved
+            except Exception:
+                pass
+
+            self.strategy.log_message(
+                f"Skipping expiration quote validation for {underlying_symbol} until {disabled_until}; "
+                f"returning {resolved} by date for {call_or_put_caps}.",
+                color="yellow",
+            )
+            return resolved
+
         resolved = _validate_candidates(future_candidates)
         if resolved is not None:
             try:
@@ -1408,13 +1481,6 @@ class OptionsHelper:
             except Exception:
                 pass
             return resolved
-
-        broker = getattr(self.strategy, "broker", None)
-        data_source = getattr(broker, "data_source", None) if broker is not None else None
-        is_backtesting = (
-            getattr(broker, "IS_BACKTESTING_BROKER", False) is True
-            or getattr(data_source, "IS_BACKTESTING_DATA_SOURCE", False) is True
-        )
 
         if allow_prior or is_backtesting:
             prior_candidates = [(s, d) for s, d in expiration_dates if d < dt]
@@ -1433,6 +1499,14 @@ class OptionsHelper:
 
         msg = f"No valid expirations on or after {dt} with tradeable data for {call_or_put_caps}; skipping."
         self.strategy.log_message(msg, color="yellow")
+        if is_backtesting and underlying_symbol and as_of_date is not None:
+            try:
+                if not isinstance(getattr(self, "_expiration_validation_disabled_until", None), dict):
+                    self._expiration_validation_disabled_until = {}
+                # Skip repeated validation for a short window; we will re-validate once we advance.
+                self._expiration_validation_disabled_until[underlying_symbol] = as_of_date + timedelta(days=7)
+            except Exception:
+                pass
         try:
             self._expiration_cache[expiration_cache_key] = None
         except Exception:
