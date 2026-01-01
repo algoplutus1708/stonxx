@@ -787,3 +787,46 @@ For each acceptance run, record:
 - Any warnings: placeholders/gaps/quotes missing
 
 Important: do not assert exact values unless the system is stable; use broad ranges and invariants.
+
+---
+
+## Appendix C — Known `manager_bot_id` references (prod debugging)
+
+These are the `manager_bot_id` values provided during this session that correspond to “something went wrong in production” investigations. These are used as the **filter key** when pulling CloudWatch logs.
+
+Quick command (BotManager profile):
+```bash
+aws logs tail "/aws/ecs/prod-trading-bots-backtest" \
+  --profile BotManager --since 24h \
+  --filter-pattern "<manager_bot_id>"
+```
+
+### Stalls / “goes silent” / stuck with `download_status.active=true`
+
+- `72c0dffa-b3e8-488a-8fa7-3192ce3fc007`
+  - Early report: extremely slow, looked “stalled” around ~23% progress.
+- `4296b619-a417-4ec5-88f2-c3264449cbba`
+  - Very slow/stuck report: ~27–28% after ~12–22 hours, “no logs on website”.
+- `3d73c360-b4ef-477f-87ce-6247928f85a1`
+  - SPX Short Straddle Intraday: stuck with `download_status` showing an SPXW option minute quote request.
+- `9f2f4693-e541-4038-9994-185b9339208b`
+  - SPX Short Straddle Intraday: primary stall evidence used in PR #924.
+  - UI showed it waiting on `SPXW 2025-01-15 5645C minute quote`; logs ended right after caching `5640C`, with no subsequent `Submitted to queue` log line.
+
+### “Cannot predict future” / end date beyond available trading days (infinite loop bug)
+
+- `54bfdaf6-da96-4e0e-9fc0-7d42f76f61d7`
+  - Repro from ECS logs: backtest freezes at ~80% when BACKTESTING_END is in the future; log spam “Cannot predict future”.
+- `de54d5c1-36f8-40e3-b040-77cb502b76d7`
+  - TeslaEmaTrend prod logs (Lumibot 4.4.16) showing repeated:
+    - “Backtesting reached end of available trading days data”
+    - “Cannot predict future”
+
+### Production speed parity / reference runs
+
+- `1f86e156-2ebe-404c-9aad-0aa6aed0e2b5`
+  - Prod rerun you cited for speed parity: ~55 minutes wall time (compare to local).
+- `0c00f2e1-2901-4fee-ab99-ecf729b6b075`
+  - Backdoor Butterfly prod run started to measure prod time vs local time.
+- `5b3ad480-16f7-46e0-a806-d6e5d6631c0c`
+  - A “running well / big improvement” prod run (positive reference point).
