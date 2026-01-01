@@ -474,6 +474,19 @@ class QueueClient:
             correlation_id,
             queue_position,
         )
+        # Best-effort: surface request_id into the progress UI so a "stall" is diagnosable.
+        try:  # pragma: no cover - UI plumbing
+            from lumibot.tools.thetadata_helper import update_download_status_queue_info
+
+            update_download_status_queue_info(
+                request_id=request_id,
+                correlation_id=correlation_id,
+                queue_status=status,
+                queue_position=queue_position,
+                submitted_at=time.time(),
+            )
+        except Exception:
+            pass
         return request_id, status
 
     def _refresh_status(self, request_id: str) -> Optional[QueuedRequestInfo]:
@@ -506,6 +519,21 @@ class QueueClient:
                     info.attempts = data.get("attempts", info.attempts)
                     info.error = data.get("last_error")
                     info.last_checked = time.time()
+                    # Best-effort: surface queue status into the progress UI.
+                    try:  # pragma: no cover - UI plumbing
+                        from lumibot.tools.thetadata_helper import update_download_status_queue_info
+
+                        update_download_status_queue_info(
+                            request_id=info.request_id,
+                            correlation_id=info.correlation_id,
+                            queue_status=info.status,
+                            queue_position=info.queue_position,
+                            estimated_wait=info.estimated_wait,
+                            attempts=info.attempts,
+                            last_error=info.error,
+                        )
+                    except Exception:
+                        pass
                     return info
             return None
         except Exception as exc:
@@ -559,6 +587,7 @@ class QueueClient:
         last_log_time = 0
         last_position = None
         last_status = None
+        last_info_time = 0.0
 
         while True:
             elapsed = time.time() - start_time
@@ -597,6 +626,19 @@ class QueueClient:
                 status = info.status
                 position = info.queue_position
                 last_status = status
+
+                # Emit a low-rate heartbeat at INFO so "no logs for an hour" is diagnosable in prod.
+                if elapsed >= 10 and time.time() - last_info_time > 30:
+                    logger.info(
+                        "[THETA][QUEUE] Still waiting: request_id=%s status=%s position=%s attempts=%s est_wait=%.1fs elapsed=%.1fs",
+                        request_id,
+                        status,
+                        position,
+                        info.attempts,
+                        info.estimated_wait or 0,
+                        elapsed,
+                    )
+                    last_info_time = time.time()
 
                 # Log position changes or periodic updates
                 if position != last_position or time.time() - last_log_time > 10:
