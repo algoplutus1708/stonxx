@@ -101,6 +101,66 @@ If you only read one section, read **#4.1 SPX Short Straddle Intraday stalls in 
 - Local checkout:
   - `/Users/robertgrzesik/Documents/Development/botspot_data_downloader`
 
+### Key docs + important files (by path)
+
+If a new session is lost, these are the “map” files to open first.
+
+**Architecture / rules**
+- Backtesting architecture (canonical, long form):
+  - `docs/BACKTESTING_ARCHITECTURE.md`
+- Backtesting architecture redirect (short stub at repo root):
+  - `BACKTESTING_ARCHITECTURE.md`
+- Backtesting tests overview:
+  - `docs/BACKTESTING_TESTS.md`
+- ThetaData cache / remote cache notes:
+  - `docs/remote_cache.md`
+  - `docs/THETADATA_CACHE_VALIDATION.md`
+- Agent safety + conventions:
+  - `AGENTS.md`
+  - `tests/AGENTS.md`
+  - `CLAUDE.md`
+
+**Prior handoffs (the ones humans reference)**
+- Latest prior session handoff (Dec 26, 2025):
+  - `docs/handoffs/THETADATA_SESSION_HANDOFF_2025-12-26.md`
+- Earlier merge/backtesting handoffs (Dec 17–18, 2025):
+  - `docs/handoffs/THETADATA_BACKTESTING_HANDOFF_2025-12-17.md`
+  - `docs/handoffs/THETADATA_MERGE_HANDOFF_2025-12-18.md`
+
+**Investigations (high signal)**
+- SmartLimit / slippage design + semantics:
+  - `docs/investigations/SMART_LIMIT_ORDER_DESIGN.md`
+- SPX Short Straddle / stall+perf investigation notes:
+  - `docs/investigations/THETADATA_INVESTIGATION_2025-12-27_SPX_STRADDLE_PERF.md`
+- ThetaData investigation (Dec 11, 2025):
+  - `docs/investigations/THETADATA_INVESTIGATION_2025-12-11.md`
+
+**Core code hotspots (backtesting + ThetaData)**
+- Backtest engine (fills, settlement, lifecycle):
+  - `lumibot/backtesting/backtesting_broker.py`
+- Strategy runtime (main loop, lifecycle hooks):
+  - `lumibot/strategies/strategy_executor.py`
+- ThetaData backtesting data source (pandas):
+  - `lumibot/backtesting/thetadata_backtesting_pandas.py`
+- ThetaData downloader client / queue recovery (prod stall focus):
+  - `lumibot/tools/thetadata_queue_client.py`
+- ThetaData helper + cache glue + `download_status` plumbing:
+  - `lumibot/tools/thetadata_helper.py`
+- Backtest cache (local + S3):
+  - `lumibot/tools/backtest_cache.py`
+- Options chain / delta strike search / market eval:
+  - `lumibot/components/options_helper.py`
+- Progress bar printing:
+  - `lumibot/tools/helpers.py`
+
+**BotSpot / Bot Manager (prod parity + UI)**
+- Bot Manager (runs backtests/bots):
+  - `/Users/robertgrzesik/Documents/Development/bot_manager`
+- BotSpot backend API (status/progress endpoints):
+  - `/Users/robertgrzesik/Documents/Development/botspot_node`
+- BotSpot frontend (backtest page):
+  - `/Users/robertgrzesik/Documents/Development/botspot_react`
+
 ---
 
 ## 2) Current Versions / Deployment Timeline
