@@ -163,6 +163,77 @@ If a new session is lost, these are the “map” files to open first.
 
 ---
 
+## 1.1) Backtesting Architecture (high-level summary)
+
+The canonical architecture doc is `docs/BACKTESTING_ARCHITECTURE.md`. This section is a “mental model” summary for continuing work.
+
+### Core flow
+
+1) A strategy calls `Strategy.backtest()` / `Strategy.run_backtest()` (internals in `lumibot/strategies/_strategy.py`).
+2) Backtest selects a backtesting data source:
+   - Strategy can specify one explicitly **but**
+   - `BACKTESTING_DATA_SOURCE` env var can override that (very common in Strategy Library runs).
+3) `BacktestingBroker` drives:
+   - order lifecycle
+   - fills
+   - portfolio accounting
+   - mark-to-market valuation (PV is computed, not fetched from a broker)
+4) Bars/quotes load through the chosen backtesting data source into `Data` objects (pandas-backed for Theta/Yahoo/Polygon).
+
+### Pricing semantics (correctness rules)
+
+These rules are the “backtesting must mimic live broker behavior” contract:
+
+- **`get_last_price()` is trade-only.**
+  - It must never silently fall back to bid/ask/mid.
+  - Options often have no trades; `get_last_price(option)` may be stale/missing and that is realistic.
+
+- **Quote-derived marks exist and are used where appropriate:**
+  - For **option MTM** and **quote-based fills**, use bid/ask-derived marks (mid) when available.
+  - Missing option pricing should not zero portfolio valuation; forward-fill marks instead (avoid “sawtooth” equity curves).
+
+- **No lookahead bias on daily bars.**
+  - Day bars must not be visible before they “happen” in the simulated timeline.
+
+### Cache layers (why runs can differ wildly)
+
+There are multiple caching layers; confusing them causes “why is prod slower?” mistakes:
+- Local cache (macOS typical): `~/Library/Caches/lumibot/1.0/thetadata`
+- Remote cache (S3) via downloader/hydrator (prod uses this heavily)
+- Downloader’s own internal cache / queue behavior
+
+When diagnosing performance or “missing quote columns”, always confirm:
+- which data source is active (`BACKTESTING_DATA_SOURCE`)
+- which downloader URL is used (`DATADOWNLOADER_BASE_URL`)
+- whether you’re hitting an old cache schema (NBBO columns missing) vs fresh
+
+---
+
+## 1.2) Environment Variables (high-impact)
+
+These are the env vars that most often change behavior/speed:
+
+- Data source selection:
+  - `IS_BACKTESTING=True`
+  - `BACKTESTING_DATA_SOURCE=thetadata` (overrides strategy code)
+  - `DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080`
+
+- Backtest window:
+  - `BACKTESTING_START=YYYY-MM-DD`
+  - `BACKTESTING_END=YYYY-MM-DD`
+
+- Artifacts / logging (large impact on speed):
+  - `SHOW_TEARSHEET=True|False`
+  - `SHOW_PLOT=True|False`
+  - `SHOW_INDICATORS=True|False`
+  - `BACKTESTING_QUIET_LOGS=true|false` (CloudWatch/log volume)
+  - `BACKTESTING_SHOW_PROGRESS_BAR=true|false`
+
+- Planned (not implemented yet in 4.4.21, but requested next):
+  - `BACKTESTING_PROFILE=yappi` (opt-in profiling artifact)
+
+---
+
 ## 2) Current Versions / Deployment Timeline
 
 ### What is deployed
