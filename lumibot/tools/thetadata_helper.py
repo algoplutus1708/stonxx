@@ -53,6 +53,17 @@ _download_status = {
     "progress": 0,        # Progress percentage (0-100)
     "current": 0,         # Current chunk number
     "total": 0,           # Total chunks to download
+    # Queue diagnostics (best-effort; may be None if the caller doesn't go through queue mode)
+    "request_id": None,
+    "correlation_id": None,
+    "queue_status": None,
+    "queue_position": None,
+    "estimated_wait": None,
+    "attempts": None,
+    "last_error": None,
+    "submitted_at": None,
+    "last_poll_at": None,
+    "timeout_at": None,
 }
 
 
@@ -75,6 +86,16 @@ def get_download_status() -> dict:
         - progress: int - Progress percentage (0-100)
         - current: int - Current chunk number
         - total: int - Total chunks
+        - request_id: str or None - Data Downloader queue request id (if available)
+        - correlation_id: str or None - Request correlation id (if available)
+        - queue_status: str or None - pending/processing/completed/dead (if available)
+        - queue_position: int or None - Queue position (if available)
+        - estimated_wait: float or None - Estimated wait (seconds; if available)
+        - attempts: int or None - Attempts count (if available)
+        - last_error: str or None - Last queue error (if available)
+        - submitted_at: float or None - Epoch seconds when request submitted (if available)
+        - last_poll_at: float or None - Epoch seconds when last polled (if available)
+        - timeout_at: float or None - Epoch seconds when client timeout triggers (if available)
 
     Example
     -------
@@ -92,7 +113,8 @@ def set_download_status(
     data_type: str,
     timespan: str,
     current: int,
-    total: int
+    total: int,
+    timeout_s: Optional[float] = None,
 ) -> None:
     """
     Update the current download status.
@@ -113,6 +135,8 @@ def set_download_status(
         Current chunk number (0-based)
     total : int
         Total number of chunks
+    timeout_s : Optional[float]
+        If provided, records an absolute timeout_at for the current fetch.
     """
     with _download_status_lock:
         _download_status["active"] = True
@@ -123,6 +147,67 @@ def set_download_status(
         _download_status["progress"] = int((current / max(total, 1)) * 100)
         _download_status["current"] = current
         _download_status["total"] = total
+        # Reset queue diagnostics at the start of a new download.
+        _download_status["request_id"] = None
+        _download_status["correlation_id"] = None
+        _download_status["queue_status"] = None
+        _download_status["queue_position"] = None
+        _download_status["estimated_wait"] = None
+        _download_status["attempts"] = None
+        _download_status["last_error"] = None
+        _download_status["submitted_at"] = None
+        _download_status["last_poll_at"] = None
+        _download_status["timeout_at"] = (time.time() + timeout_s) if (timeout_s is not None and timeout_s > 0) else None
+
+
+def update_download_status_queue_info(
+    *,
+    request_id: str,
+    correlation_id: Optional[str] = None,
+    queue_status: Optional[str] = None,
+    queue_position: Optional[int] = None,
+    estimated_wait: Optional[float] = None,
+    attempts: Optional[int] = None,
+    last_error: Optional[str] = None,
+    submitted_at: Optional[float] = None,
+) -> None:
+    """Best-effort update of queue diagnostics for the active download.
+
+    Called from the queue client while a ThetaData fetch is in progress.
+    It intentionally does nothing if there is no active download, or if the active
+    download already has a different request_id (to avoid cross-request noise).
+    """
+    now = time.time()
+    with _download_status_lock:
+        if not _download_status.get("active"):
+            return
+
+        existing_request_id = _download_status.get("request_id")
+        if existing_request_id is not None and existing_request_id != request_id:
+            return
+
+        # Avoid hammering the lock/payload. The queue poll interval can be 200ms;
+        # UI only needs coarse updates.
+        last_poll_at = _download_status.get("last_poll_at")
+        if last_poll_at is not None and (now - float(last_poll_at)) < 1.0:
+            return
+
+        _download_status["request_id"] = request_id
+        if correlation_id is not None:
+            _download_status["correlation_id"] = correlation_id
+        if queue_status is not None:
+            _download_status["queue_status"] = queue_status
+        if queue_position is not None:
+            _download_status["queue_position"] = queue_position
+        if estimated_wait is not None:
+            _download_status["estimated_wait"] = estimated_wait
+        if attempts is not None:
+            _download_status["attempts"] = attempts
+        if last_error is not None:
+            _download_status["last_error"] = last_error
+        if submitted_at is not None:
+            _download_status["submitted_at"] = submitted_at
+        _download_status["last_poll_at"] = now
 
 
 def clear_download_status() -> None:
@@ -141,6 +226,16 @@ def clear_download_status() -> None:
         _download_status["progress"] = 0
         _download_status["current"] = 0
         _download_status["total"] = 0
+        _download_status["request_id"] = None
+        _download_status["correlation_id"] = None
+        _download_status["queue_status"] = None
+        _download_status["queue_position"] = None
+        _download_status["estimated_wait"] = None
+        _download_status["attempts"] = None
+        _download_status["last_error"] = None
+        _download_status["submitted_at"] = None
+        _download_status["last_poll_at"] = None
+        _download_status["timeout_at"] = None
 
 
 WAIT_TIME = 60
@@ -2612,96 +2707,132 @@ def get_price_data(
             kwargs["password"] = password
         return get_historical_data(asset, chunk_start, chunk_end, interval_ms, **kwargs)
 
-    with ThreadPoolExecutor(max_workers=chunk_workers) as executor:
-        future_map: Dict[Any, Tuple[datetime, datetime, float]] = {}
-        for chunk_start, chunk_end in chunk_ranges:
-            submitted_at = time.perf_counter()
-            future = executor.submit(_fetch_chunk, chunk_start, chunk_end)
-            future_map[future] = (chunk_start, chunk_end, submitted_at)
-        for future in as_completed(future_map):
-            chunk_start, chunk_end, submitted_at = future_map[future]
-            try:
-                result_df = future.result()
-            except Exception as exc:
-                logger.warning(
-                    "ThetaData chunk fetch failed for %s between %s and %s: %s",
-                    asset,
-                    chunk_start,
-                    chunk_end,
-                    exc,
-                )
-                result_df = None
+    def _handle_chunk_result(
+        *,
+        chunk_start: datetime,
+        chunk_end: datetime,
+        submitted_at: float,
+        result_df: Optional[pd.DataFrame],
+    ) -> None:
+        nonlocal df_all
 
-            clamped_end = _clamp_option_end(asset, chunk_end)
-            elapsed = time.perf_counter() - submitted_at
+        clamped_end = _clamp_option_end(asset, chunk_end)
+        elapsed = time.perf_counter() - submitted_at
 
-            if result_df is None or len(result_df) == 0:
-                expired_chunk = (
-                    asset.asset_type == "option"
-                    and asset.expiration is not None
-                    and clamped_end.date() >= asset.expiration
-                )
-                if expired_chunk:
-                    logger.debug(
-                        "[THETA][DEBUG][THETADATA] Option %s considered expired on %s; reusing cached data between %s and %s.",
-                        asset,
-                        asset.expiration,
-                        chunk_start,
-                        clamped_end,
-                    )
-                else:
-                    logger.warning(
-                        "No data returned for %s / %s with '%s' timespan between %s and %s",
-                        asset,
-                        quote_asset,
-                        timespan,
-                        chunk_start,
-                        chunk_end,
-                    )
-                missing_chunk = get_trading_dates(asset, chunk_start, clamped_end)
-                logger.info(
-                    "ThetaData chunk complete (no rows) for %s between %s and %s in %.2fs",
+        if result_df is None or len(result_df) == 0:
+            expired_chunk = (
+                asset.asset_type == "option"
+                and asset.expiration is not None
+                and clamped_end.date() >= asset.expiration
+            )
+            if expired_chunk:
+                logger.debug(
+                    "[THETA][DEBUG][THETADATA] Option %s considered expired on %s; reusing cached data between %s and %s.",
                     asset,
+                    asset.expiration,
                     chunk_start,
                     clamped_end,
-                    elapsed,
                 )
-                df_all = append_missing_markers(df_all, missing_chunk)
-                pbar.update(1)
-                # Update download status
-                with completed_chunks_lock:
-                    completed_chunks[0] += 1
-                    set_download_status(asset, quote_asset, datastyle, timespan, completed_chunks[0], total_queries)
-                continue
-
-            df_all = update_df(df_all, result_df)
-            available_chunk = get_trading_dates(asset, chunk_start, clamped_end)
-            df_all = remove_missing_markers(df_all, available_chunk)
-            if "datetime" in result_df.columns:
-                chunk_index = pd.DatetimeIndex(pd.to_datetime(result_df["datetime"], utc=True))
             else:
-                chunk_index = pd.DatetimeIndex(result_df.index)
-            if chunk_index.tz is None:
-                chunk_index = chunk_index.tz_localize(pytz.UTC)
-            else:
-                chunk_index = chunk_index.tz_convert(pytz.UTC)
-            covered_days = {ts.date() for ts in chunk_index}
-            missing_within_chunk = [day for day in available_chunk if day not in covered_days]
-            if missing_within_chunk:
-                df_all = append_missing_markers(df_all, missing_within_chunk)
+                logger.warning(
+                    "No data returned for %s / %s with '%s' timespan between %s and %s",
+                    asset,
+                    quote_asset,
+                    timespan,
+                    chunk_start,
+                    chunk_end,
+                )
+            missing_chunk = get_trading_dates(asset, chunk_start, clamped_end)
             logger.info(
-                "ThetaData chunk complete for %s between %s and %s (rows=%d) in %.2fs",
+                "ThetaData chunk complete (no rows) for %s between %s and %s in %.2fs",
                 asset,
                 chunk_start,
                 clamped_end,
-                len(result_df),
                 elapsed,
             )
+            df_all = append_missing_markers(df_all, missing_chunk)
             pbar.update(1)
-            # Update download status
             with completed_chunks_lock:
                 completed_chunks[0] += 1
                 set_download_status(asset, quote_asset, datastyle, timespan, completed_chunks[0], total_queries)
+            return
+
+        df_all = update_df(df_all, result_df)
+        available_chunk = get_trading_dates(asset, chunk_start, clamped_end)
+        df_all = remove_missing_markers(df_all, available_chunk)
+        if "datetime" in result_df.columns:
+            chunk_index = pd.DatetimeIndex(pd.to_datetime(result_df["datetime"], utc=True))
+        else:
+            chunk_index = pd.DatetimeIndex(result_df.index)
+        if chunk_index.tz is None:
+            chunk_index = chunk_index.tz_localize(pytz.UTC)
+        else:
+            chunk_index = chunk_index.tz_convert(pytz.UTC)
+        covered_days = {ts.date() for ts in chunk_index}
+        missing_within_chunk = [day for day in available_chunk if day not in covered_days]
+        if missing_within_chunk:
+            df_all = append_missing_markers(df_all, missing_within_chunk)
+        logger.info(
+            "ThetaData chunk complete for %s between %s and %s (rows=%d) in %.2fs",
+            asset,
+            chunk_start,
+            clamped_end,
+            len(result_df),
+            elapsed,
+        )
+        pbar.update(1)
+        with completed_chunks_lock:
+            completed_chunks[0] += 1
+            set_download_status(asset, quote_asset, datastyle, timespan, completed_chunks[0], total_queries)
+
+    # Avoid ThreadPoolExecutor overhead (and potential deadlocks) when there's only a single chunk.
+    if total_queries == 1:
+        chunk_start, chunk_end = chunk_ranges[0]
+        submitted_at = time.perf_counter()
+        try:
+            result_df = _fetch_chunk(chunk_start, chunk_end)
+        except Exception as exc:
+            logger.warning(
+                "ThetaData chunk fetch failed for %s between %s and %s: %s",
+                asset,
+                chunk_start,
+                chunk_end,
+                exc,
+            )
+            result_df = None
+        _handle_chunk_result(
+            chunk_start=chunk_start,
+            chunk_end=chunk_end,
+            submitted_at=submitted_at,
+            result_df=result_df,
+        )
+    else:
+        with ThreadPoolExecutor(max_workers=chunk_workers) as executor:
+            future_map: Dict[Any, Tuple[datetime, datetime, float]] = {}
+            for chunk_start, chunk_end in chunk_ranges:
+                submitted_at = time.perf_counter()
+                future = executor.submit(_fetch_chunk, chunk_start, chunk_end)
+                future_map[future] = (chunk_start, chunk_end, submitted_at)
+            for future in as_completed(future_map):
+                chunk_start, chunk_end, submitted_at = future_map[future]
+                try:
+                    result_df = future.result()
+                except Exception as exc:
+                    logger.warning(
+                        "ThetaData chunk fetch failed for %s between %s and %s: %s",
+                        asset,
+                        chunk_start,
+                        chunk_end,
+                        exc,
+                    )
+                    result_df = None
+
+                _handle_chunk_result(
+                    chunk_start=chunk_start,
+                    chunk_end=chunk_end,
+                    submitted_at=submitted_at,
+                    result_df=result_df,
+                )
 
     # Clear download status when fetch completes
     clear_download_status()

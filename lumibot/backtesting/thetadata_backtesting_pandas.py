@@ -1,8 +1,9 @@
 import json
 import logging
+import math
 import os
 import subprocess
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional, Union
 
@@ -63,6 +64,10 @@ class ThetaDataBacktestingPandas(PandasData):
         # PERF: Avoid scanning the entire pandas_data store on every quote/snapshot call to infer day-mode.
         # This flag is set eagerly when day data is loaded.
         self._effective_day_mode = None
+        # Cadence detector: some intraday strategies also request daily history (e.g., indicators).
+        # Do NOT let those day-series requests force the entire backtest into "day" cadence.
+        self._cadence_last_dt = None
+        self._observed_intraday_cadence = False
 
         if username is None:
             username = THETADATA_CONFIG.get("THETADATA_USERNAME")
@@ -256,8 +261,34 @@ class ThetaDataBacktestingPandas(PandasData):
         else:
             metadata["last_real_ts"] = None
 
+        # Only treat an option as "permanently missing" when we have fetched through its expiration
+        # date and still have no real rows. An empty fetch for a single day/minute window is common
+        # for illiquid contracts and must NOT disable future refetches (it breaks strategies that
+        # rely on sparse last-trade prints over multi-year windows).
         if metadata.get("empty_fetch") and getattr(asset, "asset_type", None) == Asset.AssetType.OPTION:
-            metadata["negative_cache"] = True
+            try:
+                expiration = getattr(asset, "expiration", None)
+                if (
+                    isinstance(expiration, date)
+                    and normalized_data_end is not None
+                    and hasattr(normalized_data_end, "date")
+                    and normalized_data_end.date() >= expiration
+                ):
+                    metadata["negative_cache"] = True
+            except Exception:
+                pass
+
+            # Backtesting often probes many expirations/strikes repeatedly while an option has no
+            # historical coverage yet (472 / placeholder-only). Avoid day-after-day refetch storms
+            # by caching "empty" results for a short TTL, while still allowing refetches later in
+            # the contract's lifetime (we do NOT treat this as permanently missing unless we have
+            # fetched through expiration above).
+            if not metadata.get("negative_cache"):
+                try:
+                    if normalized_data_end is not None:
+                        metadata["empty_fetch_until"] = normalized_data_end + timedelta(days=7)
+                except Exception:
+                    pass
 
         # Preserve runtime cache flags that should not be reset by metadata refreshes
         # (e.g., day-mode metadata rebuilds during _update_pandas_data).
@@ -266,6 +297,7 @@ class ThetaDataBacktestingPandas(PandasData):
             "ffilled",
             "sidecar_loaded",
             "negative_cache",
+            "empty_fetch_until",
             "quotes_missing_permanent",
             "tail_missing_permanent",
         ):
@@ -615,6 +647,7 @@ class ThetaDataBacktestingPandas(PandasData):
         start_dt=None,
         require_quote_data: bool = False,
         require_ohlc_data: bool = True,
+        snapshot_only: bool = False,
     ):
         """
         Get asset data and update the self.pandas_data dictionary.
@@ -687,9 +720,12 @@ class ThetaDataBacktestingPandas(PandasData):
             and start_dt is not None
             and isinstance(length, int)
             and length <= 5
-            and ts_unit_preview in {"minute", "hour"}
+            and ts_unit_preview in {"minute", "hour", "day"}
         ):
-            effective_start_buffer = timedelta(0)
+            # Quote probes (and snapshot-only fetches) should stay as tight as possible for performance.
+            # Trade-only last-price probes, however, need a small lookback so early-session requests
+            # (e.g., 09:30) can still see a prior-day print when the current day has no trades yet.
+            effective_start_buffer = timedelta(0) if (require_quote_data or snapshot_only) else timedelta(days=1)
 
         start_datetime, ts_unit = self.get_start_datetime_and_ts_unit(
             length, timestep, start_dt, start_buffer=effective_start_buffer
@@ -750,6 +786,7 @@ class ThetaDataBacktestingPandas(PandasData):
                     and isinstance(length, int)
                     and length <= 5
                     and ts_unit in {"minute", "hour"}
+                    and not snapshot_only
                 ):
                     try:
                         # PERF: `get_trading_days()` is expensive (calendar lookup + schedule build).
@@ -1286,8 +1323,28 @@ class ThetaDataBacktestingPandas(PandasData):
                 existing_rows,
                 requested_length,
             )
+
+            # Backtesting can legitimately see placeholder-only windows for illiquid option contracts.
+            # When we detect a recent empty fetch, avoid repeatedly re-submitting identical requests
+            # on every subsequent bar/day (it can dominate runtime for long windows).
+            if is_option_asset and existing_meta is not None and existing_meta.get("empty_fetch") and not existing_meta.get("negative_cache"):
+                try:
+                    empty_until = existing_meta.get("empty_fetch_until")
+                    normalized_current_dt = self._normalize_default_timezone(current_dt)
+                    if empty_until is not None and normalized_current_dt is not None and normalized_current_dt < empty_until:
+                        logger.info(
+                            "[THETA][CACHE][EMPTY_TTL] asset=%s/%s (%s) empty fetch cached; skipping refetch until %s (dt=%s)",
+                            asset_separated,
+                            quote_asset,
+                            ts_unit,
+                            empty_until,
+                            normalized_current_dt,
+                        )
+                        return None
+                except Exception:
+                    pass
             if existing_meta is not None and existing_meta.get("prefetch_complete"):
-                if is_option_asset and (existing_meta.get("empty_fetch") or existing_meta.get("negative_cache")):
+                if is_option_asset and existing_meta.get("negative_cache"):
                     logger.info(
                         "[THETA][CACHE][NEGATIVE] asset=%s/%s (%s) placeholder-only cache; skipping refetch. existing_end=%s target_end=%s",
                         asset_separated,
@@ -1869,8 +1926,11 @@ class ThetaDataBacktestingPandas(PandasData):
             self.pandas_data.update(enriched_update)
             self._data_store.update(enriched_update)
             if ts_unit == "day":
-                # Signal to the strategy executor that we're effectively running on daily cadence.
-                if getattr(self, "_timestep", None) != "day":
+                # Signal daily cadence ONLY when we haven't observed intraday stepping.
+                #
+                # Some intraday strategies still request daily history for indicators; those requests
+                # must not flip the entire backtest into day cadence (it breaks intraday option quotes).
+                if not getattr(self, "_observed_intraday_cadence", False) and getattr(self, "_timestep", None) != "day":
                     self._timestep = "day"
                 # Refresh the cached date index so daily iteration can advance efficiently.
                 try:
@@ -1930,9 +1990,8 @@ class ThetaDataBacktestingPandas(PandasData):
                     ts_unit,
                 )
 
-        if is_option_asset and meta.get("empty_fetch"):
+        if is_option_asset and meta.get("negative_cache"):
             self._negative_option_cache.add(asset_separated)
-            meta["negative_cache"] = True
             self._dataset_metadata[canonical_key] = meta
             if legacy_meta is not None:
                 legacy_meta.update(meta)
@@ -2331,18 +2390,12 @@ class ThetaDataBacktestingPandas(PandasData):
 
     def get_last_price(self, asset, timestep="minute", quote=None, exchange=None, **kwargs) -> Union[float, Decimal, None]:
         dt = self.get_datetime()
+        self._update_cadence_from_dt(dt)
         # In day mode, use day data for price lookups instead of defaulting to minute.
         # This prevents unnecessary minute data downloads at end of day-mode backtests.
-        # FIX (2025-12-12): Also check if we're effectively in day mode by looking at existing data
-        # or the data store. This fixes options not getting day data when _timestep hasn't been set yet.
+        # NOTE: Do not infer day-mode from "any day data exists" because intraday strategies may
+        # still request daily history for indicators.
         current_mode = getattr(self, "_timestep", None)
-
-        # Additional check: if any data in the store uses "day" timestep, we're in day mode
-        if current_mode != "day":
-            for data in self.pandas_data.values():
-                if hasattr(data, "timestep") and data.timestep == "day":
-                    current_mode = "day"
-                    break
 
         if current_mode == "day" and timestep == "minute":
             timestep = "day"
@@ -2758,6 +2811,46 @@ class ThetaDataBacktestingPandas(PandasData):
         )
         return bars
 
+    def _update_cadence_from_dt(self, dt) -> None:
+        """Detect intraday cadence so daily-history requests don't flip the whole run to day mode.
+
+        This is used to prevent a common failure mode:
+        - Intraday strategies request daily history for indicators.
+        - If we infer "day mode" from the mere presence of day data, intraday option quote/ohlc
+          requests can be incorrectly aligned to daily cadence and explode into 472/no-data churn.
+
+        Cadence detection must be conservative:
+        - Repeated calls at the same strategy datetime must NOT mark a run as intraday.
+        - Daily strategies may execute multiple lifecycle hooks per trading day; those should also
+          not flip cadence.
+        """
+        if dt is None:
+            return
+
+        try:
+            if isinstance(dt, pd.Timestamp):
+                dt = dt.to_pydatetime()
+        except Exception:
+            pass
+
+        last_dt = getattr(self, "_cadence_last_dt", None)
+        if last_dt is not None:
+            try:
+                if isinstance(last_dt, pd.Timestamp):
+                    last_dt = last_dt.to_pydatetime()
+            except Exception:
+                pass
+
+            try:
+                delta_s = abs((dt - last_dt).total_seconds())
+                # Any sub-6h step strongly indicates an intraday backtest (minute/hour cadence).
+                if 0 < delta_s < 6 * 3600:
+                    self._observed_intraday_cadence = True
+            except Exception:
+                pass
+
+        self._cadence_last_dt = dt
+
     def get_quote(self, asset, quote=None, exchange=None, timestep="minute", **kwargs):
         """
         Get quote data for an asset during backtesting.
@@ -2781,27 +2874,17 @@ class ThetaDataBacktestingPandas(PandasData):
         Quote
             A Quote object with the quote information.
         """
+        snapshot_only = bool(kwargs.pop("snapshot_only", False))
         dt = self.get_datetime()
+        self._update_cadence_from_dt(dt)
 
         # FIX (2025-12-12): In day mode, use day data for quote lookups instead of minute.
         # This prevents 472 (no data) errors when ThetaData doesn't have minute quote data
         # for historical options, but does have EOD data.
         current_mode = getattr(self, "_timestep", None)
+        self._effective_day_mode = current_mode == "day"
 
-        # PERF: avoid scanning the entire pandas_data store on every quote call.
-        if current_mode != "day":
-            effective_day_mode = getattr(self, "_effective_day_mode", None)
-            if effective_day_mode is None:
-                effective_day_mode = any(
-                    getattr(data, "timestep", None) == "day" for data in self.pandas_data.values()
-                )
-                self._effective_day_mode = effective_day_mode
-            if effective_day_mode:
-                current_mode = "day"
-        else:
-            self._effective_day_mode = True
-
-        if current_mode == "day" and timestep == "minute":
+        if current_mode == "day" and timestep == "minute" and not snapshot_only:
             timestep = "day"
             logger.debug(
                 "[THETA][DEBUG][TIMESTEP_ALIGN] get_quote aligned from minute to day for asset=%s",
@@ -2819,6 +2902,215 @@ class ThetaDataBacktestingPandas(PandasData):
         cached = getattr(self, "_quote_cache", {}).get(cache_key)
         if cached is not None:
             return cached
+
+        # SNAPSHOT MODE (perf-critical)
+        # -----------------------------
+        # Some strategies (notably delta/strike scanners) need only a point-in-time NBBO for many
+        # strikes that will never be traded. The normal caching path for intraday ThetaData quotes
+        # is date-based and can download an entire trading day (~956 minute rows) per strike, which
+        # is both slow and can stall long-running backtests in production.
+        #
+        # When snapshot_only=True, bypass parquet caching entirely and request only the minimal
+        # intraday quote window around the current simulation timestamp.
+        if snapshot_only:
+            from lumibot.entities import Quote as QuoteEntity
+
+            def _cache_and_return(obj: QuoteEntity):
+                try:
+                    self._quote_cache[cache_key] = obj
+                except Exception:
+                    pass
+                return obj
+
+            try:
+                from lumibot.tools import thetadata_helper
+
+                delta_td, ts_unit = self.convert_timestep_str_to_timedelta(timestep)
+                if ts_unit not in {"minute", "second", "hour"}:
+                    raise ValueError(f"snapshot_only unsupported for ts_unit={ts_unit}")
+
+                ivl_ms = int(delta_td.total_seconds() * 1000)
+                if ivl_ms <= 0:
+                    ivl_ms = 60_000
+
+                # PERF: Snapshot-only quote probes can happen many times per minute in option scanners.
+                # If a given contract returns "no data" (472 / empty), avoid re-hitting the downloader
+                # every single bar by caching that negative result for a short TTL.
+                negative_cache = getattr(self, "_snapshot_negative_cache", None)
+                if not isinstance(negative_cache, dict):
+                    negative_cache = {}
+                    self._snapshot_negative_cache = negative_cache
+                cache_day = None
+                try:
+                    cache_day = dt.date()
+                except Exception:
+                    cache_day = None
+                negative_key = (asset, ts_unit, cache_day)
+                cached_skip_until = negative_cache.get(negative_key)
+                if cached_skip_until is not None and dt is not None:
+                    try:
+                        if dt < cached_skip_until:
+                            return _cache_and_return(
+                                QuoteEntity(
+                                    asset=asset,
+                                    price=None,
+                                    bid=None,
+                                    ask=None,
+                                    volume=None,
+                                    timestamp=dt,
+                                    bid_size=None,
+                                    ask_size=None,
+                                    raw_data=None,
+                                )
+                            )
+                    except Exception:
+                        pass
+
+                # Request only a tiny window around dt.
+                #
+                # In daily-cadence backtests, ThetaData minute-aggregated quote bars are often
+                # timestamped at the END of the minute (e.g., the first bar after the 09:30 open
+                # can appear at 09:31). Use a small forward-looking window and take the first
+                # quote in that window so option selection doesn't get stuck with missing NBBO.
+                #
+                # In intraday backtests, prefer a backward-looking window so we never read quotes
+                # from the future bar.
+                if current_mode == "day":
+                    window_td = delta_td * 5
+                    start_dt = dt
+                    end_dt = dt + window_td
+                else:
+                    start_dt = dt - delta_td
+                    end_dt = dt
+
+                df_snapshot = thetadata_helper.get_historical_data(
+                    asset,
+                    start_dt,
+                    end_dt,
+                    ivl_ms,
+                    datastyle="quote",
+                    include_after_hours=True,
+                )
+
+                def _negative_ttl() -> timedelta:
+                    if ts_unit == "second":
+                        return timedelta(minutes=1)
+                    if ts_unit == "hour":
+                        return timedelta(hours=1)
+                    return timedelta(minutes=15)
+
+                is_empty = df_snapshot is None or getattr(df_snapshot, "empty", True)
+                if not is_empty and isinstance(df_snapshot, pd.DataFrame) and "missing" in df_snapshot.columns:
+                    try:
+                        missing_flags = df_snapshot["missing"].fillna(False).astype(bool)
+                        if bool(missing_flags.all()):
+                            is_empty = True
+                    except Exception:
+                        pass
+
+                if is_empty:
+                    try:
+                        negative_cache[negative_key] = dt + _negative_ttl()
+                    except Exception:
+                        pass
+                    # Snapshot-only is intentionally non-caching: do not fall back to the day-chunk
+                    # parquet fetch path, which is extremely expensive for delta probes and can
+                    # introduce lookahead if later-session quotes are forward-filled.
+                    return _cache_and_return(
+                        QuoteEntity(
+                            asset=asset,
+                            price=None,
+                            bid=None,
+                            ask=None,
+                            volume=None,
+                            timestamp=dt,
+                            bid_size=None,
+                            ask_size=None,
+                            raw_data=None,
+                        )
+                    )
+
+                if current_mode == "day":
+                    row = df_snapshot.iloc[0]
+                    row_ts = df_snapshot.index[0]
+                else:
+                    # Prefer the last bar at/before dt.
+                    try:
+                        df_slice = df_snapshot.loc[:dt]
+                        row = df_slice.iloc[-1] if not df_slice.empty else df_snapshot.iloc[-1]
+                        row_ts = df_slice.index[-1] if not df_slice.empty else df_snapshot.index[-1]
+                    except Exception:
+                        row = df_snapshot.iloc[-1]
+                        row_ts = df_snapshot.index[-1]
+
+                def _coerce_positive(value):
+                    try:
+                        numeric = float(value)
+                    except (TypeError, ValueError):
+                        return None
+                    if not math.isfinite(numeric) or numeric <= 0:
+                        return None
+                    return numeric
+
+                bid = _coerce_positive(row.get("bid") if hasattr(row, "get") else None)
+                ask = _coerce_positive(row.get("ask") if hasattr(row, "get") else None)
+
+                bid_size = row.get("bid_size") if hasattr(row, "get") else None
+                ask_size = row.get("ask_size") if hasattr(row, "get") else None
+                volume = row.get("volume") if hasattr(row, "get") else None
+
+                price = None
+                if bid is not None and ask is not None:
+                    price = (bid + ask) / 2.0
+                elif bid is not None:
+                    price = bid
+                elif ask is not None:
+                    price = ask
+                else:
+                    # ThetaData quote snapshots can sometimes omit actionable NBBO (bid/ask) for
+                    # historical options while still providing a trade-derived close/last field.
+                    # For snapshot-only probes (used for expiry/strike validation), treat that as a
+                    # usable price signal so strategies can locate tradable contracts without
+                    # forcing expensive full-day OHLC downloads.
+                    for field in ("close", "price", "last", "last_trade", "last_trade_price"):
+                        candidate = None
+                        try:
+                            candidate = row.get(field) if hasattr(row, "get") else None
+                        except Exception:
+                            candidate = None
+                        candidate = _coerce_positive(candidate)
+                        if candidate is not None:
+                            price = candidate
+                            break
+
+                return _cache_and_return(
+                    QuoteEntity(
+                        asset=asset,
+                        price=price,
+                        bid=bid,
+                        ask=ask,
+                        volume=volume,
+                        timestamp=row_ts,
+                        bid_size=bid_size,
+                        ask_size=ask_size,
+                        raw_data=None,
+                    )
+                )
+            except Exception:
+                logger.debug("[THETA][QUOTE][SNAPSHOT_ONLY] failed", exc_info=True)
+                return _cache_and_return(
+                    QuoteEntity(
+                        asset=asset,
+                        price=None,
+                        bid=None,
+                        ask=None,
+                        volume=None,
+                        timestamp=dt,
+                        bid_size=None,
+                        ask_size=None,
+                        raw_data=None,
+                    )
+                )
 
         # Log quote request details for debugging (options vs other assets).
         # Guard to avoid allocating strings/dicts when debug logging is disabled.
@@ -2888,6 +3180,7 @@ class ThetaDataBacktestingPandas(PandasData):
                 dt,
                 require_quote_data=True,
                 require_ohlc_data=require_ohlc_data,
+                snapshot_only=snapshot_only,
             )
 
         quote_obj = None
@@ -2948,40 +3241,54 @@ class ThetaDataBacktestingPandas(PandasData):
                 quote_obj = None
 
         if quote_obj is None:
-            quote_obj = super().get_quote(asset=asset, quote=quote, exchange=exchange)
-
-        # ThetaData quote history for options can omit trade-derived fields (e.g., close/last), while still providing
-        # actionable NBBO. Avoid forcing an OHLC download just to fill Quote.price: prefer quote-derived marks when
-        # bid/ask exist, and do NOT fall back to last trade (which can trigger an OHLC download).
-        if quote_obj is not None and getattr(asset, "asset_type", None) == Asset.AssetType.OPTION:
             try:
-                numeric_price = float(quote_obj.price) if quote_obj.price is not None else None
+                quote_obj = super().get_quote(asset=asset, quote=quote, exchange=exchange)
+            except Exception:
+                # Missing data (placeholders / no trades / sparse NBBO) is expected for many option
+                # contracts at many timestamps. Avoid raising and triggering high-volume error logs
+                # from Strategy.get_quote(); return an "empty" Quote instead.
+                from lumibot.entities import Quote
+
+                quote_obj = Quote(asset=asset, timestamp=dt)
+
+        # ThetaData quote history for options can omit actionable NBBO while still surfacing a trade-derived
+        # "close" field.
+        #
+        # Prefer quote-derived (bid/ask) pricing when available:
+        # - If NBBO is present, set Quote.price to a mid/bid/ask-derived value.
+        # - If NBBO is missing, preserve any existing `price` value (often trade close) so callers that
+        #   expect a numeric Quote.price (including backtest tests) remain functional.
+        #
+        # Important: Quote.price does not imply actionable two-sided NBBO exists; execution/fill logic must
+        # still prefer bid/ask when available.
+        if quote_obj is not None and getattr(asset, "asset_type", None) == Asset.AssetType.OPTION:
+            bid = getattr(quote_obj, "bid", None)
+            ask = getattr(quote_obj, "ask", None)
+            try:
+                bid = float(bid) if bid is not None else None
             except (TypeError, ValueError):
-                numeric_price = None
+                bid = None
+            try:
+                ask = float(ask) if ask is not None else None
+            except (TypeError, ValueError):
+                ask = None
 
-            if numeric_price is None or numeric_price <= 0:
-                bid = getattr(quote_obj, "bid", None)
-                ask = getattr(quote_obj, "ask", None)
+            if bid is not None and ask is not None and bid > 0 and ask > 0:
+                quote_obj.price = (bid + ask) / 2.0
+            elif bid is not None and bid > 0:
+                quote_obj.price = bid
+            elif ask is not None and ask > 0:
+                quote_obj.price = ask
+            else:
+                # Preserve the existing price (often trade close) but ensure it's finite and positive.
+                existing = getattr(quote_obj, "price", None)
                 try:
-                    bid = float(bid) if bid is not None else None
+                    existing = float(existing) if existing is not None else None
                 except (TypeError, ValueError):
-                    bid = None
-                try:
-                    ask = float(ask) if ask is not None else None
-                except (TypeError, ValueError):
-                    ask = None
-
-                if bid is not None and ask is not None and bid > 0 and ask > 0:
-                    quote_obj.price = (bid + ask) / 2.0
-                elif bid is not None and bid > 0:
-                    quote_obj.price = bid
-                elif ask is not None and ask > 0:
-                    quote_obj.price = ask
-                else:
-                    # Leave price unset when NBBO is unavailable. Consumers that require an execution
-                    # anchor should use bid/ask when present; trade-only last price remains accessible
-                    # via `get_last_price()` but is intentionally not pulled as part of quote retrieval.
-                    quote_obj.price = None
+                    existing = None
+                if existing is None or (not math.isfinite(existing)) or existing <= 0:
+                    existing = None
+                quote_obj.price = existing
 
         # [INSTRUMENTATION] Final quote result with all details
         if logger.isEnabledFor(logging.DEBUG):

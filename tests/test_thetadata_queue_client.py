@@ -502,6 +502,125 @@ class TestSubmitRetry:
         assert was_pending is False
         assert mock_post.call_count == 2
 
+
+class TestSubmitNetworkTimeout:
+    """Tests for network-wedge behavior during submit.
+
+    These reproduce the production failure mode where a downloader submit call blocks/hangs.
+    The client must always pass a bounded timeout to requests.post and must retry on transient
+    network errors instead of stalling forever.
+    """
+
+    @patch.object(time, "sleep", return_value=None)
+    @patch.object(requests.Session, "post")
+    def test_submit_request_retries_on_read_timeout(self, mock_post, _mock_sleep):
+        """A read timeout during submit should trigger a retry and session reset."""
+        timeout_exc = requests.exceptions.ReadTimeout("submit timed out")
+
+        success_response = MagicMock()
+        success_response.status_code = 200
+        success_response.headers = {}
+        success_response.json.return_value = {
+            "request_id": "req-123",
+            "status": "pending",
+            "queue_position": 5,
+        }
+
+        mock_post.side_effect = [timeout_exc, success_response]
+
+        client = QueueClient("http://test:8080", "test-key")
+        generation_before = client._session_generation
+
+        request_id, status, was_pending = client.check_or_submit(
+            method="GET",
+            path="v3/stock/history/ohlc",
+            query_params={"symbol": "AAPL", "start": "2024-01-01"},
+        )
+
+        assert request_id == "req-123"
+        assert status == "pending"
+        assert was_pending is False
+        assert mock_post.call_count == 2
+        assert client._session_generation > generation_before
+
+        # Ensure we always pass a bounded timeout to post() so it cannot hang forever.
+        _, first_kwargs = mock_post.call_args_list[0]
+        assert "timeout" in first_kwargs
+        connect_timeout, read_timeout = first_kwargs["timeout"]
+        assert connect_timeout > 0
+        assert read_timeout > 0
+
+
+class TestStatusRefreshRecovery:
+    """Tests for recovery when status polling becomes unreliable."""
+
+    @patch.object(requests.Session, "get")
+    def test_refresh_status_invalidate_sessions_after_error_streak(self, mock_get):
+        """After repeated status refresh failures, the client should reset HTTP sessions."""
+        mock_get.side_effect = requests.exceptions.ConnectionError("status down")
+
+        client = QueueClient("http://test:8080", "test-key")
+        generation_before = client._session_generation
+
+        # Trigger the internal error streak.
+        for _ in range(3):
+            client._refresh_status("req-123")
+
+        assert client._session_generation > generation_before
+
+
+class TestExecuteRequestRecovery:
+    """Tests for recovery inside execute_request().
+
+    These cover the production "silent stall" failure mode where:
+    - a request is submitted (or re-used idempotently),
+    - but waiting for the result times out repeatedly (e.g., downloader wedged),
+    - and the client must force a resubmit with a new correlation id instead of hanging forever.
+    """
+
+    @patch.object(time, "sleep", return_value=None)
+    def test_execute_request_forces_resubmit_after_repeated_timeouts(self, _mock_sleep):
+        client = QueueClient("http://test:8080", "test-key")
+
+        # Simulate a persistent wedge: wait_for_result keeps timing out, then finally succeeds.
+        wait_calls = {"count": 0}
+
+        def wait_side_effect(*args, **kwargs):
+            wait_calls["count"] += 1
+            if wait_calls["count"] <= 3:
+                raise TimeoutError("timed out waiting for req-1")
+            return {"ok": True}, 200
+
+        client.wait_for_result = MagicMock(side_effect=wait_side_effect)
+
+        # check_or_submit should be called repeatedly. After 3 timeouts, execute_request
+        # should force a resubmit using a correlation_id_override containing "-retry-<n>".
+        submit_calls = []
+
+        def check_or_submit_side_effect(*, correlation_id_override=None, **kwargs):
+            submit_calls.append(correlation_id_override)
+            # When forcing resubmit, pretend we get a new request id.
+            if correlation_id_override and "retry" in correlation_id_override:
+                return "req-2", "pending", False
+            return "req-1", "pending", False
+
+        client.check_or_submit = MagicMock(side_effect=check_or_submit_side_effect)
+
+        result, status_code = client.execute_request(
+            method="GET",
+            path="/v3/test",
+            query_params={"symbol": "AAPL"},
+            timeout=1.0,  # per-attempt timeout doesn't matter; wait_for_result is mocked
+        )
+
+        assert result == {"ok": True}
+        assert status_code == 200
+        assert wait_calls["count"] == 4
+
+        # We should see at least one forced-resubmit correlation id after repeated timeouts.
+        assert any((cid or "").find("retry") != -1 for cid in submit_calls)
+
+
 class TestThreadSafety:
     """Tests for thread safety."""
 
@@ -553,6 +672,81 @@ class TestThreadSafety:
         # All should succeed
         assert len(results) == 10
         assert all(r[1] is not None for r in results)
+
+
+class TestSessionRecovery:
+    """Tests for session handling + self-healing retries.
+
+    These cover production failure modes where shared sessions or wedged queue entries can
+    cause backtests to "go silent" while waiting forever.
+    """
+
+    def test_thread_local_sessions_are_isolated(self):
+        """Each thread should get its own requests.Session instance."""
+        client = QueueClient("http://test:8080", "test-key")
+        main_session = client._get_session()
+
+        other_session_id = {}
+
+        def _worker():
+            other_session_id["id"] = id(client._get_session())
+
+        thread = threading.Thread(target=_worker)
+        thread.start()
+        thread.join()
+
+        assert other_session_id["id"] != id(main_session)
+
+    def test_invalidate_sessions_rotates_generation(self):
+        """Invalidate should force a new Session in the current thread."""
+        client = QueueClient("http://test:8080", "test-key")
+        first = client._get_session()
+        client._invalidate_sessions("unit test")
+        second = client._get_session()
+        assert id(first) != id(second)
+
+    @patch.object(time, "sleep", return_value=None)
+    def test_execute_request_resubmits_after_repeated_timeouts(self, _mock_sleep):
+        """After repeated per-attempt timeouts, execute_request should force a new correlation id."""
+        client = QueueClient("http://test:8080", "test-key", timeout=0.05)
+
+        method = "GET"
+        path = "v3/test"
+        query_params = {"symbol": "AAPL"}
+        base_corr = client._build_correlation_id(method, path, query_params)
+
+        submit_calls = []
+
+        def _fake_check_or_submit(*args, **kwargs):
+            submit_calls.append(kwargs.get("correlation_id_override"))
+            return "req-123", "pending", False
+
+        wait_calls = {"count": 0}
+
+        def _fake_wait_for_result(*_args, **_kwargs):
+            wait_calls["count"] += 1
+            if wait_calls["count"] <= 3:
+                raise TimeoutError("simulated timeout")
+            return {"ok": True}, 200
+
+        with patch.object(client, "check_or_submit", side_effect=_fake_check_or_submit) as _mock_submit:
+            with patch.object(client, "wait_for_result", side_effect=_fake_wait_for_result):
+                result, status_code = client.execute_request(
+                    method=method,
+                    path=path,
+                    query_params=query_params,
+                    timeout=0.05,
+                )
+
+        assert result == {"ok": True}
+        assert status_code == 200
+        # First 3 attempts keep the base correlation (override=None); the 4th should force a retry override.
+        assert len(submit_calls) == 4
+        assert submit_calls[0] is None
+        assert submit_calls[1] is None
+        assert submit_calls[2] is None
+        assert isinstance(submit_calls[3], str)
+        assert submit_calls[3].startswith(f"{base_corr}-retry-3-")
 
 
 class TestQueuedRequestInfo:

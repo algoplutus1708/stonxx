@@ -379,17 +379,17 @@ def print_progress_bar(
     # When quiet_logs=false: add newline so log messages appear on their own lines
     quiet_logs = os.environ.get("BACKTESTING_QUIET_LOGS", "true").lower() == "true"
 
-    if not quiet_logs:
-        key = (id(file), str(prefix))
-        now_mono = time.monotonic()
-        last = _PROGRESS_LAST_PRINT.get(key)
-        if last is not None:
-            last_time, _ = last
-            # In newline-progress mode, cap output to ~1 line/sec regardless of how fast the
-            # simulation advances. Always allow the final 100% line through.
-            if (now_mono - last_time) < 1.0 and percent < 100:
-                return
-        _PROGRESS_LAST_PRINT[key] = (now_mono, percent_str)
+    # Progress output can be extremely chatty (especially minute-bar backtests) and, in
+    # non-interactive log sinks (CloudWatch, CI), carriage returns don't overwrite prior output.
+    # Cap progress printing to ~1 line/sec in all modes. Always allow the final 100% line through.
+    key = (id(file), str(prefix))
+    now_mono = time.monotonic()
+    last = _PROGRESS_LAST_PRINT.get(key)
+    if last is not None:
+        last_time, _ = last
+        if (now_mono - last_time) < 1.0 and percent < 100:
+            return
+    _PROGRESS_LAST_PRINT[key] = (now_mono, percent_str)
 
     now = dt.datetime.now()
     elapsed = now - backtesting_started

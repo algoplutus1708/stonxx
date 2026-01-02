@@ -3586,6 +3586,13 @@ class Strategy(_Strategy):
             "backtesting_data_sources": backtesting_data_sources,
             "backtest_time_seconds": backtest_time_seconds,
         }
+        profiling_enabled = bool(getattr(self, "_backtest_profiling_enabled", False))
+        if profiling_enabled:
+            settings["profiling_enabled"] = True
+            settings["profiling_tool"] = getattr(self, "_backtest_profiling_tool", None)
+            settings["profiling_format"] = getattr(self, "_backtest_profiling_format", None)
+            settings["profiling_clock"] = getattr(self, "_backtest_profiling_clock", None)
+            settings["profiling_artifact"] = getattr(self, "_backtest_profiling_artifact", None)
         os.makedirs(os.path.dirname(settings_file), exist_ok=True)
         with open(settings_file, "w") as outfile:
             json = jsonpickle.encode(settings)

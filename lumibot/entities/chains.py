@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, Iterable, List, Union
 
 
@@ -45,9 +45,40 @@ class Chains(dict):
 
     def strikes(self, expiration: Union[str, date, datetime], option_type: str = "CALL") -> List[float]:
         """Return the strikes list for a given expiration (accepts string YYYY-MM-DD or date)."""
-        if isinstance(expiration, (date, datetime)):
-            expiration = _normalise_expiry_key(expiration)
-        return self.get("Chains", {}).get(option_type.upper(), {}).get(expiration, [])
+        side_map = self.get("Chains", {}).get(option_type.upper(), {})
+
+        try:
+            expiry_key = _normalise_expiry_key(expiration)
+        except OptionsDataFormatError:
+            expiry_key = str(expiration)
+
+        strikes = side_map.get(expiry_key)
+        if strikes is not None:
+            return strikes
+
+        # Provider compatibility: Some chains report OCC "Saturday" expirations while the trading
+        # model uses the last tradable day (Friday). If the exact key isn't present, try the
+        # adjacent Friday/Saturday to recover the strike list.
+        try:
+            expiry_dt = _normalise_expiry(expiration)
+        except OptionsDataFormatError:
+            return []
+
+        fallback_dates: List[date] = []
+        if expiry_dt.weekday() == 4:
+            fallback_dates.append(expiry_dt + timedelta(days=1))
+        elif expiry_dt.weekday() == 5:
+            fallback_dates.append(expiry_dt - timedelta(days=1))
+        elif expiry_dt.weekday() == 6:
+            fallback_dates.extend([expiry_dt - timedelta(days=2), expiry_dt - timedelta(days=1)])
+
+        for candidate in fallback_dates:
+            candidate_key = candidate.strftime("%Y-%m-%d")
+            candidate_strikes = side_map.get(candidate_key)
+            if candidate_strikes is not None:
+                return candidate_strikes
+
+        return []
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a shallow copy of the underlying dict."""

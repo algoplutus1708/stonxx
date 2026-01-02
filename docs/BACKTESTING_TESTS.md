@@ -24,9 +24,21 @@ The acceptance suite lives in:
 - `Strategy Library/Demos/*` (do not edit demo strategy files)
 - `Strategy Library/logs/*` (artifacts)
 
-See the session handoff for the current required windows and what to validate:
+The canonical acceptance suite definition (strategies, windows, and what to validate) lives in:
 
-- `docs/handoffs/THETADATA_SESSION_HANDOFF_2025-12-26.md`
+- `docs/acceptance/ACCEPTANCE_BACKTESTS.md`
+
+The latest “why are we changing this?” investigation context (stalls/perf history) lives in the session handoffs:
+
+- `docs/handoffs/THETADATA_SESSION_HANDOFF_2026-01-01.md`
+
+## Backtest profiling (opt-in)
+
+Backtests can produce a profiling artifact to help explain production-vs-local speed differences.
+
+- Enable: `BACKTESTING_PROFILE=yappi`
+- Output artifact: `*_profile_yappi.csv` (written alongside other backtest artifacts like `*_trades.csv`).
+- Settings metadata: written into `*_settings.json` under `profiling_*` keys when enabled.
 
 ## Performance regressions
 

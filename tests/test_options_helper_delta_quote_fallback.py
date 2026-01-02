@@ -1,5 +1,6 @@
 import datetime
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from lumibot.components.options_helper import OptionsHelper
 from lumibot.entities import Asset
@@ -59,6 +60,43 @@ def test_get_delta_for_strike_uses_quote_mid_when_last_trade_missing():
     assert strategy.last_greeks_call["underlying_price"] == 60.0
 
 
+def test_get_delta_for_strike_uses_snapshot_only_quotes_when_backtesting_source_supports_it():
+    class _StubOptionSource:
+        def __init__(self):
+            self.calls = []
+
+        def get_quote(self, _asset, quote=None, exchange=None, **kwargs):
+            self.calls.append({"quote": quote, "exchange": exchange, **kwargs})
+            return SimpleNamespace(bid=1.0, ask=3.0)
+
+    class _StubBroker:
+        IS_BACKTESTING_BROKER = True
+
+        def __init__(self, option_source):
+            self.option_source = option_source
+            self.data_source = None
+
+    option_source = _StubOptionSource()
+    strategy = _StubStrategy()
+    strategy.broker = _StubBroker(option_source)
+    helper = OptionsHelper(strategy)
+
+    underlying = Asset("UBER", asset_type=Asset.AssetType.STOCK)
+    expiry = datetime.date(2027, 6, 17)
+
+    delta = helper.get_delta_for_strike(
+        underlying_asset=underlying,
+        underlying_price=60.0,
+        strike=60.0,
+        expiry=expiry,
+        right="call",
+    )
+
+    assert delta == 0.5
+    assert option_source.calls, "Expected OptionsHelper to call broker.option_source.get_quote()"
+    assert option_source.calls[0].get("snapshot_only") is True
+
+
 def test_get_expiration_on_or_after_date_rejects_expiry_without_strikes_near_underlying():
     strategy = _StubStrategy(underlying_price=60.0)
     helper = OptionsHelper(strategy)
@@ -104,3 +142,101 @@ def test_get_expiration_on_or_after_date_accepts_expiry_with_nearby_strikes():
 
     assert expiry == datetime.date(2027, 6, 17)
 
+
+def test_get_expiration_on_or_after_date_skips_quote_validation_temporarily_after_failures():
+    class _RecordingStrategy(_StubStrategy):
+        def __init__(self, *, now, underlying_price=60.0):
+            super().__init__(underlying_price=underlying_price)
+            self._now = now
+            self.messages = []
+
+        def get_datetime(self):
+            return self._now
+
+        def log_message(self, msg, color=None, **_kwargs):
+            self.messages.append((msg, color))
+
+    class _StubBroker:
+        IS_BACKTESTING_BROKER = True
+
+        def __init__(self):
+            self.data_source = None
+
+    strategy = _RecordingStrategy(now=datetime.datetime(2027, 6, 1, 10, 0), underlying_price=60.0)
+    strategy.broker = _StubBroker()
+    helper = OptionsHelper(strategy)
+
+    chains = {
+        "UnderlyingSymbol": "UBER",
+        "Chains": {
+            "CALL": {"2027-06-17": [50.0, 60.0, 70.0]},
+            "PUT": {"2027-06-17": [50.0, 60.0, 70.0]},
+        },
+    }
+
+    # First call: quote validation fails -> no valid expiry -> validation disabled for a short window.
+    with patch.object(helper, "_get_option_mark_from_quote", return_value=(None, None, None)):
+        expiry1 = helper.get_expiration_on_or_after_date(
+            dt=datetime.date(2027, 6, 1),
+            chains=chains,
+            call_or_put="call",
+            underlying_asset=Asset("UBER", asset_type=Asset.AssetType.STOCK),
+            allow_prior=False,
+        )
+
+    assert expiry1 is None
+    assert helper._expiration_validation_disabled_until["UBER"] == datetime.date(2027, 6, 8)
+
+    # Second call (different dt, same as-of date): should skip quote validation and return by-date expiry.
+    with patch.object(helper, "_get_option_mark_from_quote", side_effect=AssertionError("should not validate quotes")):
+        expiry2 = helper.get_expiration_on_or_after_date(
+            dt=datetime.date(2027, 6, 2),
+            chains=chains,
+            call_or_put="call",
+            underlying_asset=Asset("UBER", asset_type=Asset.AssetType.STOCK),
+            allow_prior=False,
+        )
+
+    assert expiry2 == datetime.date(2027, 6, 17)
+
+
+def test_get_expiration_on_or_after_date_disabled_window_still_requires_nearby_strikes():
+    class _RecordingStrategy(_StubStrategy):
+        def __init__(self, *, now, underlying_price=60.0):
+            super().__init__(underlying_price=underlying_price)
+            self._now = now
+
+        def get_datetime(self):
+            return self._now
+
+    class _StubBroker:
+        IS_BACKTESTING_BROKER = True
+
+        def __init__(self):
+            self.data_source = None
+
+    strategy = _RecordingStrategy(now=datetime.datetime(2027, 6, 1, 10, 0), underlying_price=60.0)
+    strategy.broker = _StubBroker()
+    helper = OptionsHelper(strategy)
+
+    chains_far_strikes = {
+        "UnderlyingSymbol": "UBER",
+        "Chains": {
+            "CALL": {"2027-06-17": [120.0, 125.0, 130.0]},
+            "PUT": {"2027-06-17": [120.0, 125.0, 130.0]},
+        },
+    }
+
+    # Force validation-disabled state.
+    helper._expiration_validation_disabled_until = {"UBER": datetime.date(2027, 6, 8)}
+
+    with patch.object(helper, "_get_option_mark_from_quote", side_effect=AssertionError("should not validate quotes")):
+        expiry = helper.get_expiration_on_or_after_date(
+            dt=datetime.date(2027, 6, 2),
+            chains=chains_far_strikes,
+            call_or_put="call",
+            underlying_asset=Asset("UBER", asset_type=Asset.AssetType.STOCK),
+            allow_prior=False,
+        )
+
+    assert expiry is None

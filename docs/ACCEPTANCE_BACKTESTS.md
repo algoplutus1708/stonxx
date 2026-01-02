@@ -1,0 +1,174 @@
+# Acceptance Backtests (ThetaData) — Manual Release Gate
+
+This document is the **canonical manual acceptance suite** for LumiBot backtesting (ThetaData) and release validation.
+
+## Update protocol (read this before editing)
+
+- **Append only**: never overwrite history rows; add a new row per run.
+- **Every speed row must include machine specs** (even if repetitive) so future comparisons are meaningful.
+- **Every row must include the `run_id`** so artifacts remain auditable in `Strategy Library/logs/`.
+- Release gate runs must use **production-like flags** (see below).
+
+## Guardrails
+
+- **Do not modify demo strategy files** under `Strategy Library/Demos/`. Fix issues in **LumiBot** (or the data-downloader if proven root cause).
+- Use the shared downloader endpoint (do not hard-code an IP):
+  - `DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080`
+  - `DATADOWNLOADER_API_KEY` must be set (value lives in env/secrets; do not paste into docs).
+- Wrap long runs with `/Users/robertgrzesik/bin/safe-timeout …`.
+
+## Release time gate (required)
+
+Each acceptance run must finish within **900s (15 minutes)** with **production-like flags**:
+
+- `BACKTESTING_QUIET_LOGS=false`
+- `BACKTESTING_SHOW_PROGRESS_BAR=true`
+- `SHOW_PLOT=True`, `SHOW_INDICATORS=True`, `SHOW_TEARSHEET=True`
+
+Notes:
+- For debugging only, you may temporarily disable artifact generation to isolate compute vs plotting.
+- The release gate is always the production-like run above.
+
+## Recommended command template
+
+Run from `Strategy Library/` so artifacts land in `Strategy Library/logs/`:
+
+```bash
+cd "/Users/robertgrzesik/Documents/Development/Strategy Library"
+/Users/robertgrzesik/bin/safe-timeout 900s env \
+  PYTHONPATH="/Users/robertgrzesik/Documents/Development/lumivest_bot_server/strategies/lumibot" \
+  IS_BACKTESTING=True BACKTESTING_DATA_SOURCE=thetadata \
+  DATADOWNLOADER_BASE_URL="http://data-downloader.lumiwealth.com:8080" \
+  SHOW_PLOT=True SHOW_INDICATORS=True SHOW_TEARSHEET=True \
+  BACKTESTING_QUIET_LOGS=false BACKTESTING_SHOW_PROGRESS_BAR=true \
+  BACKTESTING_START=YYYY-MM-DD BACKTESTING_END=YYYY-MM-DD \
+  python3 "Demos/<strategy>.py"
+```
+
+## Machine specs (required on every speed row)
+
+Example format (repeat this on every speed row):
+
+- `macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8`
+
+## Canonical suite (7 demos)
+
+Each strategy section includes:
+- What to run (file + windows)
+- What to validate (sanity checks)
+- Anchor + history rows (metrics + wall time + machine specs)
+
+### 1) AAPL Deep Dip Calls (GOOG; file name says AAPL)
+
+- File: `Demos/AAPL Deep Dip Calls (Copy 4).py`
+- Window: `2020-01-01 → 2025-12-01`
+- Validate:
+  - trades occur in multiple “dip eras” (2020/2022/2025)
+  - no obvious split-cliff behavior (GOOG mid-2022)
+  - artifacts are produced (`*_trades.csv/html`, `*_stats.csv`, `*_tearsheet.html`, `*_settings.json`)
+
+| run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
+|---|---:|---|---:|---:|---:|---:|---|---|
+| `AAPLDeepDipCalls_2025-12-25_19-08_WHRsPm` | (unknown) | 2020-01-01 → 2025-11-30 | (n/a) | 865% | 48.72% | -33.08% | (unknown) | (unknown) |
+| `AAPLDeepDipCalls_2026-01-02_10-25_3KsjXy` | 4.4.21 | 2020-01-01 → 2025-11-30 | 237.5 | 870% | 48.86% | -34.09% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+
+### 2) Alpha Picks LEAPS (Call Debit Spread)
+
+- File: `Demos/Leaps Buy Hold (Alpha Picks).py`
+- Short window: `2025-10-01 → 2025-10-15` (must trade `UBER, CLS, MFC`)
+- Full-year window: `2025-01-01 → 2025-12-01`
+- Validate:
+  - short window trades include both legs for `UBER`, `CLS`, and `MFC`
+  - full-year run produces artifacts (symbols may vary; log skip reasons)
+
+| run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
+|---|---:|---|---:|---:|---:|---:|---|---|
+| `LeapsCallDebitSpread_2025-12-25_19-14_lLFnSk` | (unknown) | 2025-10-01 → 2025-10-15 | (n/a) | 1% | 17.87% | -1.42% | (unknown) | (unknown) |
+| `LeapsCallDebitSpread_2026-01-02_10-07_OZi6We` | 4.4.21 | 2025-10-01 → 2025-10-14 | 44.5 | 0% | 14.46% | -1.42% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `LeapsCallDebitSpread_2026-01-02_10-48_4UtvLT` | 4.4.21 | 2025-01-01 → 2025-11-30 | 285.5 | -3% | -3.03% | -19.33% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+
+### 3) TQQQ SMA200 (ThetaData vs Yahoo sanity)
+
+- File: `Demos/TQQQ 200-Day MA.py`
+- Window: `2013-01-01 → 2025-12-01`
+- Validate:
+  - ThetaData result is directionally similar to Yahoo (no obvious inflation/deflation)
+  - Run once with `BACKTESTING_DATA_SOURCE=thetadata` and once with `BACKTESTING_DATA_SOURCE=yahoo`
+
+| run_id | lumibot | data_source | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
+|---|---:|---|---|---:|---:|---:|---:|---|---|
+| `TqqqSma200Strategy_2025-12-25_19-22_UoZ2yn` | (unknown) | (unknown) | 2013-01-01 → 2025-11-30 | (n/a) | 8,272% | 40.94% | -48.82% | (unknown) | (unknown) |
+| `TqqqSma200Strategy_2025-12-25_19-20_cQkd1T` | (unknown) | (unknown) | 2013-01-01 → 2025-11-30 | (n/a) | 8,585% | 42.17% | -48.40% | (unknown) | (unknown) |
+| `TqqqSma200Strategy_2026-01-02_10-24_Uus6vb` | 4.4.21 | thetadata | 2013-01-01 → 2025-11-30 | 33.8 | 8,585% | 42.17% | -48.40% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `TqqqSma200Strategy_2026-01-02_10-25_fOI4Ek` | 4.4.21 | yahoo | 2013-01-01 → 2025-11-30 | 8.2 | 8,272% | 40.94% | -48.82% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+
+### 4) Backdoor Butterfly 0DTE (regular fills; index + index options)
+
+- File: `Demos/Backdoor Butterfly 0 DTE (Copy).py`
+- Validate:
+  - no crashes due to index placeholder tails / missing history
+  - artifacts produced
+
+We keep two canonical windows:
+- **Speed baseline**: `2025-01-01 → 2025-11-30` (apples-to-apples for regression tracking)
+- **Full-year acceptance**: `2025-01-01 → 2025-12-01` (release validation)
+
+| run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
+|---|---:|---|---:|---:|---:|---:|---|---|
+| `BackdoorButterfly0DTE_2025-12-25_18-29_KAD4Qk` | (unknown) | 2025-01-01 → 2025-11-30 | (n/a) | -26% | -28.55% | -32.51% | (unknown) | (unknown) |
+| `BackdoorButterfly0DTE_2025-12-31_15-43_TWzKau` | 4.4.20 | 2025-01-01 → 2025-11-30 | 79.8 | -22% | -24.00% | -30.13% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTE_2026-01-02_10-29_HPNuUM` | 4.4.21 | 2025-01-01 → 2025-11-30 | 267.8 | -19% | -20.79% | -25.94% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+
+### 5) MELI Deep Drawdown Calls
+
+- File: `Demos/Meli Deep Drawdown Calls.py`
+- Window: `2013-01-01 → 2025-12-18`
+- Validate:
+  - entry trades occur (drawdown-triggered buys)
+  - no “sawtooth” PV caused by missing option marks (forward-fill behavior remains stable)
+
+This strategy is **under investigation** for baseline mismatch (do not rebaseline without explicit sign-off).
+
+| run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | status | machine |
+|---|---:|---|---:|---:|---:|---:|---|---|
+| `MeliDeepDrawdownCalls_2025-12-25_20-38_33bGtY` | (unknown) | 2013-01-01 → 2025-12-17 | (n/a) | 131% | 7.26% | -97.78% | expected (historical anchor) | (unknown) |
+| `MeliDeepDrawdownCalls_2026-01-02_10-09_7yisFp` | 4.4.21 | 2013-01-01 → 2025-12-17 | 856.3 | -91% | -18.22% | -99.73% | under investigation | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+
+See: `docs/investigations/ACCURACY_AUDIT_2026-01-02.md` for the divergence notes and first-diff audit plan.
+
+### 6) Backdoor Butterfly with SmartLimit
+
+- File: `Demos/Backdoor Butterfly 0 DTE (Copy) - with SMART LIMITS.py`
+- Window: `2025-01-01 → 2025-12-01`
+- Validate:
+  - completes without stalling
+  - artifacts produced
+  - SmartLimit fills behave like “mid + slippage” (net multi-leg), not bid/ask worst-case
+
+| run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
+|---|---:|---|---:|---:|---:|---:|---|---|
+| `BackdoorButterfly0DTESmartLimit_2026-01-02_10-34_UTFoHq` | 4.4.21 | 2025-01-01 → 2025-11-30 | 283.0 | -3% | -2.96% | -13.58% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+
+### 7) SPX Short Straddle Intraday (production stall repro)
+
+- File: `Demos/SPX Short Straddle Intraday (Copy).py`
+- Validate:
+  - no “silent hang” (logs continue via heartbeats while waiting)
+  - run continues progressing; no permanent `download_status.active=true` without logs
+
+We keep two canonical windows:
+- **Speed baseline**: `2025-01-01 → 2025-11-30` (known fast runs exist)
+- **Stall repro / prod parity**: `2025-01-06 → 2025-12-26` (or current canonical repro)
+
+| run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | notes | machine |
+|---|---:|---|---:|---:|---:|---:|---|---|
+| `SPXShortStraddle_2025-12-31_17-16_Ff79Hy` | 4.4.20 | 2025-01-01 → 2025-11-30 | 104.8 | -17% | -18.99% | -28.34% | speed baseline (historical) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `SPXShortStraddle_2026-01-02_10-39_XtAwjW` | 4.4.21 | 2025-01-06 → 2025-12-25 | 516.8 | -17% | -17.81% | -33.51% | stall repro window | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+
+## Optional: Profiling artifact (opt-in)
+
+To capture a profiler output for production-vs-local speed parity investigations, add:
+
+- `BACKTESTING_PROFILE=yappi`
+
+When enabled, LumiBot writes a `*_profile_yappi.csv` artifact next to the other backtest outputs.

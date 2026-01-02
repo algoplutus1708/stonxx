@@ -70,6 +70,10 @@ class OptionsHelper:
         self._per_bar_option_mark_cache: Dict[Asset, Tuple[Optional[float], Optional[float], Optional[float]]] = {}
         self._per_bar_delta_cache: Dict[Tuple[Asset, Optional[float]], Optional[float]] = {}
         self._per_bar_greeks_cache: Dict[Tuple[Asset, Optional[float], Optional[float]], Optional[Dict[str, Any]]] = {}
+
+        # PERF: When quote-based expiration validation fails repeatedly in long-window backtests,
+        # temporarily disable that validation per underlying to avoid day-after-day probe storms.
+        self._expiration_validation_disabled_until: Dict[str, date] = {}
         self.strategy.log_message("OptionsHelper initialized.", color="blue")
 
     def _reset_per_bar_caches_if_needed(self) -> None:
@@ -146,16 +150,44 @@ class OptionsHelper:
     def _get_option_mark_from_quote(
         self,
         option_asset: Asset,
+        *,
+        snapshot: bool = False,
     ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         """Return (mark_price, bid, ask) derived from quotes; never calls get_last_price()."""
         self._reset_per_bar_caches_if_needed()
 
-        cached = self._per_bar_option_mark_cache.get(option_asset)
+        cache_key = (option_asset, bool(snapshot))
+        cached = self._per_bar_option_mark_cache.get(cache_key)
         if cached is not None:
             return cached
 
         try:
-            quote = self.strategy.get_quote(option_asset)
+            # PERF: delta/strike probing can touch many strikes that will never be traded. For those,
+            # we want a point-in-time quote snapshot (1-2 bars), not a full-day prefetch that can
+            # balloon to ~956 minute rows per strike. Use a ThetaData backtesting fast-path when
+            # available; otherwise fall back to the normal Strategy.get_quote().
+            broker = getattr(self.strategy, "broker", None)
+            if snapshot and broker is not None and getattr(broker, "IS_BACKTESTING_BROKER", False) is True:
+                asset_type = getattr(option_asset, "asset_type", None)
+                is_option_asset = asset_type == Asset.AssetType.OPTION or "option" in str(asset_type).lower()
+
+                # Mirror Strategy.get_quote behavior: prefer the broker's option_source when
+                # available; otherwise fall back to the primary data source.
+                source = getattr(broker, "option_source", None) if is_option_asset else None
+                if source is None:
+                    source = getattr(broker, "data_source", None)
+                # Use the data source's snapshot_only fast-path when available so option selection
+                # doesn't trigger full-day minute downloads for strikes that will never be traded.
+                # ThetaDataBacktestingPandas handles daily-cadence quirks internally (forward window).
+                if source is not None:
+                    try:
+                        quote = source.get_quote(option_asset, quote=None, exchange=None, snapshot_only=True)
+                    except TypeError:
+                        quote = source.get_quote(option_asset, quote=None, exchange=None)
+                else:
+                    quote = self.strategy.get_quote(option_asset)
+            else:
+                quote = self.strategy.get_quote(option_asset)
         except Exception:
             return None, None, None
 
@@ -164,20 +196,20 @@ class OptionsHelper:
 
         if bid is not None and ask is not None:
             result = ((bid + ask) / 2.0, bid, ask)
-            self._per_bar_option_mark_cache[option_asset] = result
+            self._per_bar_option_mark_cache[cache_key] = result
             return result
         if bid is not None:
             result = (bid, bid, None)
-            self._per_bar_option_mark_cache[option_asset] = result
+            self._per_bar_option_mark_cache[cache_key] = result
             return result
         if ask is not None:
             result = (ask, None, ask)
-            self._per_bar_option_mark_cache[option_asset] = result
+            self._per_bar_option_mark_cache[cache_key] = result
             return result
 
         price = self._float_positive(getattr(quote, "price", None))
         result = (price, bid, ask)
-        self._per_bar_option_mark_cache[option_asset] = result
+        self._per_bar_option_mark_cache[cache_key] = result
         return result
 
     # ============================================================
@@ -207,206 +239,297 @@ class OptionsHelper:
         Optional[Asset]
             The valid option asset or None if not found.
         """
-        self.strategy.log_message(f"Finding next valid option for {underlying_asset.symbol} at strike {rounded_underlying_price} and expiry {expiry}", color="blue")
+        # Provider compatibility: some chains represent the option expiry as OCC "Saturday".
+        # Our trading model expects the last tradable session (Friday).
+        expiry = self._normalize_to_trading_expiry(expiry)
 
-        expiry_attempts = 0
-        while expiry_attempts < 10:
-            # Check if this expiry was previously marked as invalid
-            for record in self.non_existing_expiry_dates:
-                if (record["underlying_asset_symbol"] == underlying_asset.symbol and
-                    record["expiry"] == expiry):
-                    self.strategy.log_message(f"Expiry {expiry} previously invalid for {underlying_asset.symbol}; trying next day.", color="yellow")
-                    expiry += timedelta(days=1)
-                    expiry_attempts += 1
+        # PERF: When a strategy repeatedly fails to find actionable quotes for a given expiry (common in
+        # long-window backtests with sparse historical option coverage), scanning the chain every bar/day
+        # can dominate runtime. Keep a cooldown so repeated attempts return quickly.
+        current_dt = None
+        try:
+            current_dt = self.strategy.get_datetime()
+        except Exception:
+            current_dt = None
+
+        broker = getattr(self.strategy, "broker", None)
+        is_backtesting = bool(getattr(self.strategy, "is_backtesting", False)) or (
+            broker is not None and getattr(broker, "IS_BACKTESTING_BROKER", False) is True
+        )
+
+        cooldown = getattr(self, "_valid_option_search_cooldown", None)
+        if not isinstance(cooldown, dict):
+            cooldown = {}
+            self._valid_option_search_cooldown = cooldown
+
+        # PERF (backtesting-only): Long-window option strategies can attempt the same "find option"
+        # scan on consecutive days (or every bar) while the provider has no quote history for those
+        # expirations/strikes. Add a short cooldown so missing-data periods don't dominate runtime.
+        #
+        # Keep this disabled for live trading so a transient quote gap never suppresses trading.
+        cooldown_days = 7 if is_backtesting else 0
+        search_key = (underlying_asset.symbol, expiry, put_or_call.upper())
+        if cooldown_days and current_dt is not None:
+            next_retry_at = cooldown.get(search_key)
+            if next_retry_at is not None and current_dt < next_retry_at:
+                return None
+
+        self.strategy.log_message(
+            f"Finding next valid option for {underlying_asset.symbol} at strike {rounded_underlying_price} and expiry {expiry}",
+            color="blue",
+        )
+
+        data_source = getattr(broker, "data_source", None) if broker is not None else None
+        is_theta_backtest = (
+            is_backtesting
+            and data_source is not None
+            and data_source.__class__.__name__ == "ThetaDataBacktestingPandas"
+        )
+        is_daily_cadence = False
+        if is_backtesting:
+            try:
+                sleeptime = getattr(self.strategy, "sleeptime", None)
+                if isinstance(sleeptime, str) and sleeptime.strip().upper().endswith("D"):
+                    is_daily_cadence = True
+            except Exception:
+                pass
+            if getattr(data_source, "_timestep", None) == "day":
+                is_daily_cadence = True
+
+        invalid_expiries = {
+            (record.get("underlying_asset_symbol"), record.get("expiry"))
+            for record in self.non_existing_expiry_dates
+            if isinstance(record, dict)
+        }
+
+        chains = self.strategy.get_chains(underlying_asset)
+        if not chains:
+            self.strategy.log_message("Option chains unavailable; cannot locate a valid option.", color="yellow")
+            return None
+
+        # Use the chain expirations (not "next day") to avoid churn and weekend/non-expiry dates.
+        expirations = self._get_chain_expirations(chains=chains, side=put_or_call)
+        if not expirations:
+            expirations = [expiry]
+        expirations = [exp for exp in expirations if exp >= expiry]
+
+        attempts = 0
+        max_expirations_to_try = 10
+        if is_theta_backtest and is_backtesting:
+            # ThetaData historical options can have sparse coverage; scanning too many expirations
+            # with network-backed quote probes can dominate long-window backtests.
+            max_expirations_to_try = 5
+        for exp_date in expirations:
+            if attempts >= max_expirations_to_try:
+                break
+
+            exp_date = self._normalize_to_trading_expiry(exp_date)
+            if (underlying_asset.symbol, exp_date) in invalid_expiries:
+                continue
+            if cooldown_days and current_dt is not None:
+                exp_key = (underlying_asset.symbol, exp_date, put_or_call.upper())
+                next_retry_at = cooldown.get(exp_key)
+                if next_retry_at is not None and current_dt < next_retry_at:
                     continue
 
-            # Try to get option chain to find available strikes
-            try:
-                chains = self.strategy.get_chains(underlying_asset)
-                self.strategy.log_message(f"Got chains for {underlying_asset.symbol}: {bool(chains)}", color="cyan")
+            attempts += 1
+            available_strikes = chains.strikes(exp_date, put_or_call.upper())
+            if not available_strikes:
+                self.non_existing_expiry_dates.append(
+                    {"underlying_asset_symbol": underlying_asset.symbol, "expiry": exp_date}
+                )
+                continue
 
-                if chains:
-                    # Get available strikes for this expiry
-                    available_strikes = chains.strikes(expiry, put_or_call.upper())
-                    self.strategy.log_message(f"Available strikes for {expiry}: {len(available_strikes) if available_strikes else 0} strikes", color="cyan")
-
-                    if not available_strikes:
-                        self.strategy.log_message(f"No strikes available for {put_or_call.upper()} on {expiry}; trying next expiry.", color="yellow")
-                        self.non_existing_expiry_dates.append({
-                            "underlying_asset_symbol": underlying_asset.symbol,
-                            "expiry": expiry,
-                        })
-                        expiry += timedelta(days=1)
-                        expiry_attempts += 1
+            max_spread_pct = None
+            params = getattr(self.strategy, "parameters", None)
+            if isinstance(params, dict):
+                for key in ("max_option_spread_pct", "max_spread_pct"):
+                    if params.get(key) is None:
                         continue
+                    try:
+                        max_spread_pct = float(params[key])
+                        break
+                    except (TypeError, ValueError):
+                        max_spread_pct = None
 
-                    # In ThetaData day-mode backtests, some strikes can be listed but effectively untradeable
-                    # (e.g., bid==0 with ask>0). To avoid strategies getting "stuck" selecting those strikes,
-                    # prefer the nearest strike that has a usable two-sided quote (bid>0 and ask>0).
-                    prefer_actionable = False
-                    if getattr(self.strategy, "is_backtesting", False):
-                        broker = getattr(self.strategy, "broker", None)
-                        data_source = getattr(broker, "data_source", None) if broker is not None else None
-                        prefer_actionable = (
-                            data_source is not None
-                            and data_source.__class__.__name__ == "ThetaDataBacktestingPandas"
+            strikes_sorted = sorted(
+                [float(s) for s in available_strikes if s is not None],
+                key=lambda s: abs(s - float(rounded_underlying_price)),
+            )
+            if not strikes_sorted:
+                self.non_existing_expiry_dates.append(
+                    {"underlying_asset_symbol": underlying_asset.symbol, "expiry": exp_date}
+                )
+                continue
+
+            if is_theta_backtest:
+                # ThetaData backtests: validate the option has *some* price signal at the current
+                # strategy datetime so strategies don't get stuck selecting contracts with no history
+                # (472 placeholder-only). Use a small bounded scan to keep this fast.
+                if is_daily_cadence:
+                    # Daily-cadence: prefer actionable NBBO from a point-in-time snapshot when
+                    # available, but fall back to the bar-aligned quote path so we can still
+                    # validate tradeable coverage in older historical windows.
+                    #
+                    # NOTE: Strategies that set `max_option_spread_pct` intend to evaluate
+                    # bid/ask width. For those, require bid *and* ask so we don't "validate"
+                    # a contract that cannot be priced for both entry/exit decisions.
+                    max_strikes_to_try = 10
+
+                    for candidate_strike in strikes_sorted[:max_strikes_to_try]:
+                        option = Asset(
+                            underlying_asset.symbol,
+                            asset_type="option",
+                            expiration=exp_date,
+                            strike=candidate_strike,
+                            right=put_or_call,
+                            underlying_asset=underlying_asset,
                         )
 
-                    max_spread_pct = None
-                    params = getattr(self.strategy, "parameters", None)
-                    if isinstance(params, dict):
-                        for key in ("max_option_spread_pct", "max_spread_pct"):
-                            if params.get(key) is None:
+                        mark_price, bid, ask = self._get_option_mark_from_quote(option, snapshot=True)
+                        if mark_price is None:
+                            mark_price, bid, ask = self._get_option_mark_from_quote(option, snapshot=False)
+                        if mark_price is None:
+                            continue
+
+                        if max_spread_pct is not None:
+                            if bid is None or ask is None:
                                 continue
-                            try:
-                                max_spread_pct = float(params[key])
-                                break
-                            except (TypeError, ValueError):
-                                max_spread_pct = None
+                            mid = (bid + ask) / 2.0
+                            if mid <= 0:
+                                continue
+                            spread_pct = (ask - bid) / mid
+                            if spread_pct > max_spread_pct:
+                                continue
 
-                    def _has_actionable_two_sided_quote(q) -> bool:
-                        if q is None:
-                            return False
-                        try:
-                            bid = float(q.bid) if getattr(q, "bid", None) is not None else None
-                            ask = float(q.ask) if getattr(q, "ask", None) is not None else None
-                        except (TypeError, ValueError):
-                            return False
-                        if not (
-                            bid is not None
-                            and ask is not None
-                            and math.isfinite(bid)
-                            and math.isfinite(ask)
-                            and bid > 0
-                            and ask > 0
-                        ):
-                            return False
+                        self.strategy.log_message(
+                            f"Target strike {rounded_underlying_price} -> Using strike with price data: {candidate_strike}",
+                            color="green",
+                        )
+                        return option
 
-                        if max_spread_pct is None:
-                            return True
+                    if cooldown_days and current_dt is not None:
+                        cooldown[(underlying_asset.symbol, exp_date, put_or_call.upper())] = current_dt + timedelta(
+                            days=cooldown_days
+                        )
+                    continue
 
-                        mid = (bid + ask) / 2.0
-                        if mid <= 0:
-                            return False
-                        spread_pct = (ask - bid) / mid
-                        return spread_pct <= max_spread_pct
-
-                    strikes_sorted = sorted(
-                        [float(s) for s in available_strikes if s is not None],
-                        key=lambda s: abs(s - float(rounded_underlying_price)),
-                    )
-
-                    closest_strike = strikes_sorted[0] if strikes_sorted else None
-
-                    if prefer_actionable and strikes_sorted:
-                        for candidate_strike in strikes_sorted[:10]:
-                            option = Asset(
-                                underlying_asset.symbol,
-                                asset_type="option",
-                                expiration=expiry,
-                                strike=candidate_strike,
-                                right=put_or_call,
-                                underlying_asset=underlying_asset,
-                            )
-
-                            try:
-                                quote = self.strategy.get_quote(option)
-                            except Exception:
-                                quote = None
-
-                            if _has_actionable_two_sided_quote(quote):
-                                self.strategy.log_message(
-                                    f"Target strike {rounded_underlying_price} -> Using actionable strike: {candidate_strike}",
-                                    color="green",
-                                )
-                                return option
-
-                    # Default: Find the closest strike to our target
-                    if closest_strike is None:
-                        return None
-
-                    self.strategy.log_message(
-                        f"Target strike {rounded_underlying_price} -> Closest available strike: {closest_strike}",
-                        color="green",
-                    )
-
-                    # Create option with the closest available strike
+                # Intraday strategies: prefer a strike with actionable NBBO snapshot when available.
+                max_strikes_to_try = 10
+                if is_backtesting:
+                    max_strikes_to_try = 5
+                for candidate_strike in strikes_sorted[:max_strikes_to_try]:
                     option = Asset(
                         underlying_asset.symbol,
                         asset_type="option",
-                        expiration=expiry,
-                        strike=closest_strike,
+                        expiration=exp_date,
+                        strike=candidate_strike,
                         right=put_or_call,
                         underlying_asset=underlying_asset,
                     )
+                    mark_price, bid, ask = self._get_option_mark_from_quote(option, snapshot=True)
+                    if mark_price is None:
+                        continue
+                    # Intraday strategies depend on actionable NBBO to select a tradeable contract.
+                    # Prefer strikes that have both bid and ask (two-sided) rather than one-sided quotes.
+                    if bid is None or ask is None:
+                        continue
+                    if max_spread_pct is not None:
+                        if bid is None or ask is None:
+                            continue
+                        mid = (bid + ask) / 2.0
+                        if mid <= 0:
+                            continue
+                        spread_pct = (ask - bid) / mid
+                        if spread_pct > max_spread_pct:
+                            continue
+                    self.strategy.log_message(
+                        f"Target strike {rounded_underlying_price} -> Using actionable strike: {candidate_strike}",
+                        color="green",
+                    )
+                    return option
+                # No strikes had actionable quotes for this expiry. Back off for a few days to
+                # avoid re-scanning the same expiry on every subsequent bar/day.
+                if cooldown_days and current_dt is not None:
+                    cooldown[(underlying_asset.symbol, exp_date, put_or_call.upper())] = current_dt + timedelta(
+                        days=cooldown_days
+                    )
+                continue
 
-                    # Verify this option has price data
-                    try:
-                        mark_price, bid, ask = self._get_option_mark_from_quote(option)
-                        if mark_price is not None:
-                            self.strategy.log_message(
-                                f"Found valid option: {option.symbol} {option.right} {option.strike} exp {option.expiration} (bid={bid}, ask={ask})",
-                                color="green",
-                            )
-                            return option
-                    except Exception as e:
-                        self.strategy.log_message(f"Error getting quote for {option.symbol}: {e}", color="yellow")
-
-                    # Fallback to last price
-                    try:
-                        price = self.strategy.get_last_price(option)
-                        if price is not None:
-                            self.strategy.log_message(f"Found valid option (via last price): {option.symbol} {option.right} {option.strike} exp {option.expiration}", color="green")
-                            return option
-                    except Exception:
-                        pass
-
-                    # If closest strike didn't work, this expiry might be invalid
-                    self.strategy.log_message(f"Could not get price data for strike {closest_strike} on {expiry}; trying next expiry.", color="yellow")
-                    self.non_existing_expiry_dates.append({
-                        "underlying_asset_symbol": underlying_asset.symbol,
-                        "expiry": expiry,
-                    })
-                    expiry += timedelta(days=1)
-                    expiry_attempts += 1
-                    continue
-
-            except Exception as e:
-                self.strategy.log_message(f"Error getting chains for {underlying_asset.symbol}: {e}; falling back to direct strike attempt.", color="yellow")
-                # Fallback: Try the exact strike requested (old behavior)
-                option = Asset(
-                    underlying_asset.symbol,
-                    asset_type="option",
-                    expiration=expiry,
-                    strike=rounded_underlying_price,
-                    right=put_or_call,
-                    underlying_asset=underlying_asset,
-                )
-
-                try:
-                    mark_price, _, _ = self._get_option_mark_from_quote(option)
-                    if mark_price is not None:
-                        return option
-                except Exception:
-                    pass
-                try:
-                    price = self.strategy.get_last_price(option)
-                    if price is not None:
-                        return option
-                except Exception:
-                    pass
-
-            # No valid option found for this expiry, try next day
-            self.strategy.log_message(f"No valid option found for expiry {expiry}; trying next expiry.", color="yellow")
-            self.non_existing_expiry_dates.append({
-                "underlying_asset_symbol": underlying_asset.symbol,
-                "expiry": expiry,
-            })
-            expiry += timedelta(days=1)
-            expiry_attempts += 1
+            closest_strike = strikes_sorted[0]
+            self.strategy.log_message(
+                f"Target strike {rounded_underlying_price} -> Closest available strike: {closest_strike}",
+                color="green",
+            )
+            return Asset(
+                underlying_asset.symbol,
+                asset_type="option",
+                expiration=exp_date,
+                strike=closest_strike,
+                right=put_or_call,
+                underlying_asset=underlying_asset,
+            )
 
         self.strategy.log_message("Exceeded maximum attempts to find a valid option.", color="red")
+        if cooldown_days and current_dt is not None:
+            cooldown[search_key] = current_dt + timedelta(days=cooldown_days)
         return None
+
+    @staticmethod
+    def _normalize_to_trading_expiry(expiry: date) -> date:
+        """Normalize expirations to the last tradable session (Friday).
+
+        Some providers represent expirations using the OCC "Saturday" date.
+        LumiBot backtesting and order routing treat the Friday session as the last tradable day.
+        """
+        try:
+            if isinstance(expiry, datetime):
+                expiry = expiry.date()
+            if expiry.weekday() == 5:
+                return expiry - timedelta(days=1)
+            if expiry.weekday() == 6:
+                return expiry - timedelta(days=2)
+        except Exception:
+            return expiry
+        return expiry
+
+    @staticmethod
+    def _get_chain_expirations(*, chains: Any, side: str) -> List[date]:
+        """Return sorted expiration dates for the given side ("call"/"put")."""
+        side_key = str(side).upper()
+        if side_key.startswith("C"):
+            side_key = "CALL"
+        elif side_key.startswith("P"):
+            side_key = "PUT"
+
+        try:
+            from lumibot.entities.chains import _normalise_expiry
+        except Exception:
+            _normalise_expiry = None
+
+        expirations: List[date] = []
+        chain_map = None
+        if isinstance(chains, dict):
+            chain_map = chains.get("Chains", {}).get(side_key, {})
+        elif hasattr(chains, "get"):
+            try:
+                chain_map = chains.get("Chains", {}).get(side_key, {})
+            except Exception:
+                chain_map = None
+
+        if isinstance(chain_map, dict):
+            for expiry_key in chain_map.keys():
+                try:
+                    if _normalise_expiry is not None:
+                        exp_date = _normalise_expiry(expiry_key)
+                    else:
+                        exp_date = datetime.strptime(str(expiry_key), "%Y-%m-%d").date()
+                except Exception:
+                    continue
+                expirations.append(exp_date)
+
+        expirations = sorted({OptionsHelper._normalize_to_trading_expiry(d) for d in expirations})
+        return expirations
 
     def get_strike_deltas(self, underlying_asset: Asset, expiry: date, strikes: List[float],
                           right: str, stop_greater_than: Optional[float] = None,
@@ -446,7 +569,7 @@ class OptionsHelper:
                 right=right,
                 underlying_asset=underlying_asset,
             )
-            option_price, _, _ = self._get_option_mark_from_quote(option)
+            option_price, _, _ = self._get_option_mark_from_quote(option, snapshot=True)
             if option_price is None:
                 try:
                     option_price = self._float_positive(self.strategy.get_last_price(option))
@@ -534,7 +657,7 @@ class OptionsHelper:
                 return None
             return numeric
 
-        option_price, _, _ = self._get_option_mark_from_quote(option)
+        option_price, _, _ = self._get_option_mark_from_quote(option, snapshot=True)
         if option_price is None:
             try:
                 option_price = _coerce_price(self.strategy.get_last_price(option))
@@ -921,7 +1044,35 @@ class OptionsHelper:
                 bid = self._coerce_price(getattr(quote, "bid", None), "bid", data_quality_flags, sanitization_notes)
             if getattr(quote, "ask", None) is not None:
                 ask = self._coerce_price(getattr(quote, "ask", None), "ask", data_quality_flags, sanitization_notes)
-            has_bid_ask = bid is not None and ask is not None
+
+        if (bid is None or ask is None) and getattr(option_asset, "asset_type", None) == Asset.AssetType.OPTION:
+            broker = getattr(self.strategy, "broker", None)
+            data_source = getattr(broker, "data_source", None) if broker is not None else None
+            is_theta_backtest = (
+                broker is not None
+                and (
+                    getattr(broker, "IS_BACKTESTING_BROKER", False) is True
+                    or getattr(data_source, "IS_BACKTESTING_DATA_SOURCE", False) is True
+                )
+                and data_source is not None
+                and data_source.__class__.__name__ == "ThetaDataBacktestingPandas"
+            )
+
+            # Prefer actionable NBBO from a point-in-time snapshot when bar-aligned quotes omit
+            # bid/ask (common in historical option backtests). Only fall back to `quote.price`
+            # or last-trade pricing when NBBO is unavailable.
+            if is_theta_backtest:
+                _, snap_bid, snap_ask = self._get_option_mark_from_quote(option_asset, snapshot=True)
+                if snap_bid is not None and snap_ask is not None:
+                    bid = snap_bid
+                    ask = snap_ask
+                else:
+                    if bid is None and snap_bid is not None:
+                        bid = snap_bid
+                    if ask is None and snap_ask is not None:
+                        ask = snap_ask
+
+        has_bid_ask = bid is not None and ask is not None
 
         if has_bid_ask and bid is not None and ask is not None:
             buy_price = ask
@@ -1170,6 +1321,18 @@ class OptionsHelper:
         elif not isinstance(dt, date):
             raise TypeError(f"dt must be a datetime.date or datetime.datetime object, got {type(dt)}")
 
+        # Current "as-of" date for quote validation in backtests. This is NOT the same as `dt`,
+        # which is the target expiration date to search for.
+        as_of_date: Optional[date] = None
+        try:
+            as_of_dt = self.strategy.get_datetime()
+            if isinstance(as_of_dt, datetime):
+                as_of_date = as_of_dt.date()
+            elif isinstance(as_of_dt, date):
+                as_of_date = as_of_dt
+        except Exception:
+            as_of_date = None
+
         # Make it all caps and get the specific chain.
         call_or_put_caps = call_or_put.upper()
 
@@ -1196,6 +1359,13 @@ class OptionsHelper:
                 try:
                     from lumibot.entities.chains import _normalise_expiry
                     expiry_date = _normalise_expiry(expiry_str)
+                    # Many providers represent option expirations as the OCC "Saturday" date.
+                    # LumiBot backtesting expects the last tradable session (Friday). Normalize
+                    # weekend expirations to the prior Friday so downstream quote/fill logic works.
+                    if expiry_date.weekday() == 5:
+                        expiry_date -= timedelta(days=1)
+                    elif expiry_date.weekday() == 6:
+                        expiry_date -= timedelta(days=2)
                     expiration_dates.append((expiry_str, expiry_date))
                 except Exception:
                     continue
@@ -1214,6 +1384,34 @@ class OptionsHelper:
         # PERF: Intraday strategies often request the "next valid expiration" on every bar, even
         # though the answer is stable for the trading day. Cache per (underlying, date, side, chain
         # fingerprint) so repeated calls avoid re-validating strikes/quotes.
+        broker = getattr(self.strategy, "broker", None)
+        data_source = getattr(broker, "data_source", None) if broker is not None else None
+        is_backtesting = (
+            getattr(broker, "IS_BACKTESTING_BROKER", False) is True
+            or getattr(data_source, "IS_BACKTESTING_DATA_SOURCE", False) is True
+        )
+
+        skip_quote_validation = False
+        if is_backtesting and underlying_symbol and as_of_date is not None:
+            disabled_until = self._expiration_validation_disabled_until.get(underlying_symbol)
+            if isinstance(disabled_until, date) and as_of_date < disabled_until:
+                skip_quote_validation = True
+
+        # PERF: Quote-based expiration validation can be very expensive in long-window backtests,
+        # especially when far-dated expirations are not listed yet (or quote history is sparse).
+        #
+        # Cache validation outcomes per (underlying, expiration, side) with a small TTL for
+        # negative results so we don't re-probe the same expirations day after day.
+        as_of_date_for_cache: Optional[date] = None
+        quote_validation_cache: Optional[Dict[Tuple[str, date, str], Dict[str, Any]]] = None
+        if is_backtesting and underlying_symbol and as_of_date is not None:
+            as_of_date_for_cache = as_of_date
+            existing_cache = getattr(self, "_expiration_quote_validation_cache", None)
+            if not isinstance(existing_cache, dict):
+                existing_cache = {}
+                setattr(self, "_expiration_quote_validation_cache", existing_cache)
+            quote_validation_cache = existing_cache
+
         cache_dt = getattr(self, "_expiration_cache_dt", None)
         if cache_dt != dt:
             self._expiration_cache_dt = dt
@@ -1223,6 +1421,55 @@ class OptionsHelper:
             chain_fingerprint = (len(specific_chain), min(specific_chain.keys()), max(specific_chain.keys()))
         except Exception:
             chain_fingerprint = (len(specific_chain) if isinstance(specific_chain, dict) else 0, None, None)
+
+        # PERF: Many strategies pick expirations relative to "today" (as_of_date) using a fixed horizon
+        # (e.g., 270D out). In that pattern, `dt` changes every day but the resolved expiration is
+        # typically stable until the chain itself changes. Cache resolution by horizon-days with a
+        # short TTL and invalidate automatically when the chain fingerprint changes.
+        horizon_cache: Optional[Dict[Tuple[str, str, int, bool], Dict[str, Any]]] = None
+        horizon_cache_key: Optional[Tuple[str, str, int, bool]] = None
+        horizon_cache_ttl_future_days = 180
+        horizon_cache_ttl_fallback_days = 30
+        if is_backtesting and underlying_symbol and as_of_date is not None:
+            horizon_days = None
+            try:
+                horizon_days = (dt - as_of_date).days
+            except Exception:
+                horizon_days = None
+            if isinstance(horizon_days, int) and horizon_days >= 0:
+                existing_horizon_cache = getattr(self, "_expiration_horizon_cache", None)
+                if not isinstance(existing_horizon_cache, dict):
+                    existing_horizon_cache = {}
+                    setattr(self, "_expiration_horizon_cache", existing_horizon_cache)
+                horizon_cache = existing_horizon_cache
+                horizon_cache_key = (underlying_symbol, call_or_put_caps, horizon_days, bool(allow_prior))
+
+                cached = horizon_cache.get(horizon_cache_key)
+                if isinstance(cached, dict):
+                    cached_until = cached.get("valid_until")
+                    if isinstance(cached_until, date) and as_of_date < cached_until:
+                        cached_expiry = cached.get("expiry")
+                        if cached_expiry is None:
+                            return None
+                        if isinstance(cached_expiry, date) and cached_expiry >= as_of_date and cached_expiry >= dt:
+                            # Prefer the fast path when the chain fingerprint matches, but be resilient to
+                            # benign chain growth/shrink (max expiry changes frequently in long backtests).
+                            if cached.get("chain_fingerprint") == chain_fingerprint:
+                                return cached_expiry
+
+                            # If the fingerprint changed, still reuse the cached expiry when it is still
+                            # present in the chain (handles Friday/Saturday expiry representations).
+                            try:
+                                expiry_key = cached_expiry.strftime("%Y-%m-%d")
+                                if expiry_key in specific_chain:
+                                    return cached_expiry
+                                # OCC Saturday representation (provider uses Saturday, trading model uses Friday).
+                                if (cached_expiry + timedelta(days=1)).strftime("%Y-%m-%d") in specific_chain:
+                                    return cached_expiry
+                                if (cached_expiry - timedelta(days=1)).strftime("%Y-%m-%d") in specific_chain:
+                                    return cached_expiry
+                            except Exception:
+                                pass
 
         cache_underlying = underlying_symbol or getattr(underlying_asset, "symbol", None) or "<unknown>"
         expiration_cache_key = (cache_underlying, dt, call_or_put_caps, bool(allow_prior), chain_fingerprint)
@@ -1266,6 +1513,25 @@ class OptionsHelper:
                 )
                 return None
 
+        def _is_standard_monthly(exp_date: date) -> bool:
+            try:
+                return exp_date.weekday() == 4 and 15 <= exp_date.day <= 21
+            except Exception:
+                return False
+
+        # In long-horizon backtests, chains can include many weekly expirations that were not
+        # listed historically that far out. Prefer standard monthly expirations (3rd Friday) to
+        # reduce expensive validation probes and improve hit rate.
+        if is_backtesting and as_of_date is not None:
+            try:
+                horizon_days = (dt - as_of_date).days
+            except Exception:
+                horizon_days = None
+            if horizon_days is not None and horizon_days >= 60 and future_candidates:
+                monthly_candidates = [(s, d) for s, d in future_candidates if _is_standard_monthly(d)]
+                if monthly_candidates:
+                    future_candidates = monthly_candidates
+
         # =====================================================================================
         # POINT-OF-USE VALIDATION (2025-12-07)
         # =====================================================================================
@@ -1298,8 +1564,45 @@ class OptionsHelper:
             except Exception:
                 underlying_price = None
 
-        def _validate_candidates(candidates: List[Tuple[str, date]]) -> Optional[date]:
-            for exp_str, exp_date in candidates:
+        quote_validation_attempted = False
+
+        def _validate_candidates(
+            candidates: List[Tuple[str, date]],
+            *,
+            validate_quotes: bool = True,
+            scan_mode: str = "future",
+        ) -> Optional[date]:
+            # In historical backtests (especially long windows), validating tradeable quote data
+            # for every expiration can be extremely expensive when the provider has sparse quote
+            # history. Keep a bounded validation budget (quote probes) and fall back to "closest by date"
+            # selection in backtesting mode so strategies can proceed (and handle missing pricing
+            # via their own price checks).
+            max_checks = 30
+            checks = 0
+
+            candidates_to_check = candidates
+            if is_backtesting and scan_mode == "future" and len(candidates) > 8:
+                # PERF: Long-horizon strategies can have hundreds of expirations. Validating them
+                # strictly sequentially can be extremely slow when the downloader queue is under
+                # load (each probe is a network round-trip). Use a sparse, exponentially spaced
+                # probe order so we can quickly reach far-dated expirations that may be the first
+                # historically listed contracts, while still checking the nearest expiries.
+                try:
+                    indices: List[int] = list(range(min(3, len(candidates))))
+                    idx = 4
+                    while idx < len(candidates) and len(indices) < max_checks:
+                        indices.append(idx)
+                        idx *= 2
+                    for i in range(3, len(candidates)):
+                        if len(indices) >= max_checks:
+                            break
+                        if i not in indices:
+                            indices.append(i)
+                    candidates_to_check = [candidates[i] for i in indices]
+                except Exception:
+                    candidates_to_check = candidates
+
+            for exp_str, exp_date in candidates_to_check:
                 strikes = specific_chain.get(exp_str)
                 if not strikes:
                     continue
@@ -1328,42 +1631,136 @@ class OptionsHelper:
                     ]
                     if not near_strikes:
                         continue
-                    test_strike = min(near_strikes, key=lambda s: abs(s - underlying_price))
+                    # Validate the expiration using a small set of strikes likely to be traded.
+                    #
+                    # Why: Some providers have sparse historical quote/trade coverage per strike,
+                    # especially for long-dated options. Validating only the nearest-to-underlying
+                    # strike can produce false negatives (expiry rejected even though an OTM strike
+                    # has data). Probe a small ATM+OTM set to reduce churn.
+                    atm_strike = min(near_strikes, key=lambda s: abs(s - underlying_price))
+                    strike_probe_candidates: List[float] = []
+
+                    target_mult = 1.2 if call_or_put_caps == "CALL" else 0.8
+                    target_strike = underlying_price * target_mult
+                    try:
+                        otm_strike = min(near_strikes, key=lambda s: abs(s - target_strike))
+                    except Exception:
+                        otm_strike = None
+                    # Prefer the OTM probe first so we validate the kind of strikes many strategies
+                    # actually trade (e.g., deep-drawdown call buys at ~1.2x underlying).
+                    if otm_strike is not None and otm_strike not in strike_probe_candidates:
+                        strike_probe_candidates.append(otm_strike)
+                    if atm_strike not in strike_probe_candidates:
+                        strike_probe_candidates.append(atm_strike)
                 else:
-                    test_strike = strike_candidates[len(strike_candidates) // 2]
+                    strike_probe_candidates = [strike_candidates[len(strike_candidates) // 2]]
 
                 if underlying_symbol:
-                    # Build a test option contract to check for data availability
-                    test_option = Asset(
-                        underlying_symbol,
-                        asset_type="option",
-                        expiration=exp_date,
-                        strike=float(test_strike),
-                        right=call_or_put,
-                    )
+                    if not validate_quotes:
+                        return exp_date
 
-                    # First try: Check for quote data (bid/ask) - most reliable signal
-                    try:
-                        quote = self.strategy.get_quote(test_option)
-                        has_valid_quote = quote and (quote.bid is not None or quote.ask is not None)
-                        if has_valid_quote:
-                            self.strategy.log_message(
-                                f"Found valid expiry {exp_date} with quote data for {call_or_put_caps}",
-                                color="blue",
-                            )
-                            return exp_date
-                    except Exception:
-                        pass  # Quote not available, try price data
+                    cache_key: Optional[Tuple[str, date, str]] = None
+                    if (
+                        quote_validation_cache is not None
+                        and as_of_date_for_cache is not None
+                        and underlying_symbol
+                    ):
+                        cache_key = (underlying_symbol, exp_date, call_or_put_caps)
+                        cached = quote_validation_cache.get(cache_key)
+                        if isinstance(cached, dict):
+                            cached_available_from = cached.get("available_from")
+                            if isinstance(cached_available_from, date) and as_of_date_for_cache >= cached_available_from:
+                                return exp_date
+                            cached_disabled_until = cached.get("disabled_until")
+                            if isinstance(cached_disabled_until, date) and as_of_date_for_cache < cached_disabled_until:
+                                continue
 
-                    # Fallback: Check for last traded price data
-                    try:
-                        mark_price, _, _ = self._get_option_mark_from_quote(test_option)
-                        if mark_price is not None:
+                    checks += 1
+                    if checks > max_checks:
+                        if is_backtesting:
                             self.strategy.log_message(
-                                f"Found valid expiry {exp_date} with quote-derived price data for {call_or_put_caps}",
-                                color="blue",
+                                f"Expiration validation exceeded {max_checks} candidates; no tradeable expiry found "
+                                f"for {call_or_put_caps} (dt={dt}).",
+                                color="yellow",
                             )
-                            return exp_date
+                        return None
+
+                    # Use a point-in-time quote probe for validation.
+                    #
+                    # NOTE: Intraday quote history is often more complete than day-level NBBO
+                    # for historical options (ThetaData can omit bid/ask on day bars). For
+                    # performance and robustness we use the quote-derived mark path, which can
+                    # use a snapshot-only implementation in backtesting data sources.
+                    #
+                    # IMPORTANT: Even for daily-cadence backtests, we intentionally validate expirations
+                    # using intraday quote snapshots when available. ThetaData's historical option day
+                    # quotes can omit bid/ask (or be placeholder-only) even when minute NBBO exists.
+                    #
+                    # This validation is used only to determine whether a contract is tradeable on the
+                    # current simulation date; it should not introduce lookahead into fill prices.
+                    try:
+                        nonlocal quote_validation_attempted
+                        quote_validation_attempted = True
+                        for test_strike in strike_probe_candidates[:2]:
+                            test_option = Asset(
+                                underlying_symbol,
+                                asset_type="option",
+                                expiration=exp_date,
+                                strike=float(test_strike),
+                                right=call_or_put,
+                            )
+
+                            mark_price, bid, ask = self._get_option_mark_from_quote(
+                                test_option,
+                                # Validate expirations using a point-in-time quote probe. For ThetaData,
+                                # intraday quote snapshots are often the most reliable way to detect
+                                # tradeable historical contracts without pulling full-day data.
+                                snapshot=True,
+                            )
+                            # Some providers (and some historical contracts) have sparse intraday NBBO
+                            # coverage but still expose a usable day-level quote/price. If the snapshot
+                            # probe returns no price signal at all, fall back to the normal quote path
+                            # so we don't incorrectly skip otherwise tradeable expirations.
+                            if bid is None and ask is None and mark_price is None:
+                                mark_price, bid, ask = self._get_option_mark_from_quote(
+                                    test_option,
+                                    snapshot=False,
+                                )
+                            has_bid_ask = bid is not None or ask is not None
+
+                            if has_bid_ask:
+                                self.strategy.log_message(
+                                    f"Found valid expiry {exp_date} with quote data for {call_or_put_caps}",
+                                    color="blue",
+                                )
+                                if cache_key is not None and as_of_date_for_cache is not None and quote_validation_cache is not None:
+                                    existing = quote_validation_cache.get(cache_key)
+                                    if isinstance(existing, dict) and isinstance(existing.get("available_from"), date):
+                                        available_from = existing["available_from"]
+                                    else:
+                                        available_from = as_of_date_for_cache
+                                    quote_validation_cache[cache_key] = {"available_from": available_from}
+                                return exp_date
+                            if mark_price is not None:
+                                self.strategy.log_message(
+                                    f"Found valid expiry {exp_date} with quote-derived price data for {call_or_put_caps}",
+                                    color="blue",
+                                )
+                                if cache_key is not None and as_of_date_for_cache is not None and quote_validation_cache is not None:
+                                    existing = quote_validation_cache.get(cache_key)
+                                    if isinstance(existing, dict) and isinstance(existing.get("available_from"), date):
+                                        available_from = existing["available_from"]
+                                    else:
+                                        available_from = as_of_date_for_cache
+                                    quote_validation_cache[cache_key] = {"available_from": available_from}
+                                return exp_date
+
+                        if cache_key is not None and as_of_date_for_cache is not None and quote_validation_cache is not None:
+                            existing = quote_validation_cache.get(cache_key)
+                            if not (isinstance(existing, dict) and isinstance(existing.get("available_from"), date)):
+                                quote_validation_cache[cache_key] = {
+                                    "disabled_until": as_of_date_for_cache + timedelta(days=7),
+                                }
                     except Exception:
                         pass
                 else:
@@ -1377,25 +1774,28 @@ class OptionsHelper:
 
             return None
 
-        resolved = _validate_candidates(future_candidates)
+        resolved = _validate_candidates(future_candidates, validate_quotes=not skip_quote_validation)
         if resolved is not None:
             try:
                 self._expiration_cache[expiration_cache_key] = resolved
             except Exception:
                 pass
+            if horizon_cache is not None and horizon_cache_key is not None and as_of_date is not None:
+                try:
+                    ttl_days = horizon_cache_ttl_future_days if resolved >= dt else horizon_cache_ttl_fallback_days
+                    horizon_cache[horizon_cache_key] = {
+                        "expiry": resolved,
+                        "valid_until": as_of_date + timedelta(days=ttl_days),
+                        "chain_fingerprint": chain_fingerprint,
+                    }
+                except Exception:
+                    pass
             return resolved
-
-        broker = getattr(self.strategy, "broker", None)
-        data_source = getattr(broker, "data_source", None) if broker is not None else None
-        is_backtesting = (
-            getattr(broker, "IS_BACKTESTING_BROKER", False) is True
-            or getattr(data_source, "IS_BACKTESTING_DATA_SOURCE", False) is True
-        )
 
         if allow_prior or is_backtesting:
             prior_candidates = [(s, d) for s, d in expiration_dates if d < dt]
             prior_candidates.sort(key=lambda x: x[1], reverse=True)
-            resolved = _validate_candidates(prior_candidates)
+            resolved = _validate_candidates(prior_candidates, validate_quotes=not skip_quote_validation, scan_mode="prior")
             if resolved is not None:
                 self.strategy.log_message(
                     f"Falling back to prior valid expiry {resolved} (< {dt}) for {call_or_put_caps}.",
@@ -1405,7 +1805,29 @@ class OptionsHelper:
                     self._expiration_cache[expiration_cache_key] = resolved
                 except Exception:
                     pass
+                if horizon_cache is not None and horizon_cache_key is not None and as_of_date is not None:
+                    try:
+                        ttl_days = horizon_cache_ttl_future_days if resolved >= dt else horizon_cache_ttl_fallback_days
+                        horizon_cache[horizon_cache_key] = {
+                            "expiry": resolved,
+                            "valid_until": as_of_date + timedelta(days=ttl_days),
+                            "chain_fingerprint": chain_fingerprint,
+                        }
+                    except Exception:
+                        pass
                 return resolved
+
+        if (
+            is_backtesting
+            and underlying_symbol
+            and as_of_date is not None
+            and quote_validation_attempted
+            and not skip_quote_validation
+        ):
+            disabled_until = as_of_date + timedelta(days=7)
+            existing_until = self._expiration_validation_disabled_until.get(underlying_symbol)
+            if not isinstance(existing_until, date) or disabled_until > existing_until:
+                self._expiration_validation_disabled_until[underlying_symbol] = disabled_until
 
         msg = f"No valid expirations on or after {dt} with tradeable data for {call_or_put_caps}; skipping."
         self.strategy.log_message(msg, color="yellow")
@@ -1413,6 +1835,15 @@ class OptionsHelper:
             self._expiration_cache[expiration_cache_key] = None
         except Exception:
             pass
+        if horizon_cache is not None and horizon_cache_key is not None and as_of_date is not None:
+            try:
+                horizon_cache[horizon_cache_key] = {
+                    "expiry": None,
+                    "valid_until": as_of_date + timedelta(days=horizon_cache_ttl_fallback_days),
+                    "chain_fingerprint": chain_fingerprint,
+                }
+            except Exception:
+                pass
         return None
 
     # ============================================================

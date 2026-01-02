@@ -284,10 +284,25 @@ class BacktestCacheManager:
     def _create_s3_client(self):
         try:
             import boto3  # type: ignore
+            from botocore.config import Config  # type: ignore
         except ImportError as exc:  # pragma: no cover - exercised when boto3 missing
             raise RuntimeError(
                 "S3 cache backend requires boto3. Install it or disable the remote cache."
             ) from exc
+
+        # IMPORTANT: boto3/urllib3 defaults can appear to "hang forever" under certain network
+        # failure modes (stalled DNS, stalled TCP, etc). In production backtests we prefer bounded
+        # waits + retries so a single cache upload cannot wedge an entire backtest.
+        #
+        # These defaults are conservative for intra-region S3 (small parquet chunks, many calls):
+        # - 5s connect timeout, 60s read timeout per request/part
+        # - standard retry with capped attempts
+        client_config = Config(
+            connect_timeout=5,
+            read_timeout=60,
+            retries={"max_attempts": 8, "mode": "standard"},
+            max_pool_connections=50,
+        )
 
         session = boto3.session.Session(
             aws_access_key_id=self._settings.access_key_id,
@@ -295,7 +310,7 @@ class BacktestCacheManager:
             aws_session_token=self._settings.session_token,
             region_name=self._settings.region,
         )
-        return session.client("s3")
+        return session.client("s3", config=client_config)
 
     @staticmethod
     def _is_not_found_error(exc: Exception) -> bool:

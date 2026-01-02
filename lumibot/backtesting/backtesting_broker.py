@@ -980,7 +980,13 @@ class BacktestingBroker(Broker):
         if is_multileg:
             # Each leg uses a different option asset, just use the base symbol.
             symbol = orders[0].asset.symbol
-            parent_asset = Asset(symbol=symbol)
+            # Multileg parents are scheduling containers (they do not represent a real tradable).
+            #
+            # Using a concrete asset_type like STOCK here causes subtle issues for index option
+            # combos (e.g. SPX): the parent would be a "stock" symbol with no OHLC/quotes, which
+            # can trigger SMART_LIMIT timeouts/cancellations and block strategies that wait for
+            # orders to fully complete. Use the dedicated MULTILEG asset_type instead.
+            parent_asset = Asset(symbol=symbol, asset_type=Asset.AssetType.MULTILEG)
             parent_order_type = kwargs.get("order_type", orders[0].order_type)
             parent_smart_limit = None
 
@@ -1629,6 +1635,30 @@ class BacktestingBroker(Broker):
                 if ask is not None and self._is_invalid_price(ask):
                     ask = None
 
+                # ThetaData daily-cadence backtests frequently return day-aligned option quotes without
+                # NBBO (bid/ask). For execution (especially MARKET exits), prefer a point-in-time
+                # quote snapshot so we can fill against realistic bid/ask instead of falling through
+                # to sparse trade-only OHLC (which can leave orders unfilled and canceled at EOD).
+                if (
+                    (bid is None or ask is None)
+                    and getattr(order.asset, "asset_type", None) == Asset.AssetType.OPTION
+                    and self.data_source is not None
+                    and self.data_source.__class__.__name__ == "ThetaDataBacktestingPandas"
+                ):
+                    try:
+                        snap = self.data_source.get_quote(order.asset, quote=order.quote, snapshot_only=True)
+                    except TypeError:
+                        snap = None
+                    except Exception:
+                        snap = None
+                    if snap is not None:
+                        snap_bid = self._coerce_price(getattr(snap, "bid", None))
+                        snap_ask = self._coerce_price(getattr(snap, "ask", None))
+                        if bid is None and snap_bid is not None and not self._is_invalid_price(snap_bid):
+                            bid = snap_bid
+                        if ask is None and snap_ask is not None and not self._is_invalid_price(snap_ask):
+                            ask = snap_ask
+
                 is_buy = order.is_buy_order()
 
                 if order.order_type == Order.OrderType.MARKET:
@@ -1810,13 +1840,24 @@ class BacktestingBroker(Broker):
                                 continue
 
                 # This is a hack to get around the fact that we need to get the previous day's data to prevent lookahead bias.
-                ohlc = self.data_source.get_historical_prices(
-                    asset=asset,
-                    length=2,
-                    quote=order.quote,
-                    timeshift=-2,
-                    timestep=self.data_source._timestep,
-                )
+                # Multileg parent orders are placeholders and often have no backing OHLC stream
+                # (especially for ThetaData where multileg assets are unsupported). For package
+                # SMART_LIMIT orders, we fill from the child legs' quotes instead of attempting
+                # to fetch OHLC for the parent.
+                if (
+                    order.order_class == Order.OrderClass.MULTILEG
+                    and order.child_orders
+                    and getattr(order, "smart_limit", None) is not None
+                ):
+                    ohlc = None
+                else:
+                    ohlc = self.data_source.get_historical_prices(
+                        asset=asset,
+                        length=2,
+                        quote=order.quote,
+                        timeshift=-2,
+                        timestep=self.data_source._timestep,
+                    )
                 # Check if we got any ohlc data
                 if ohlc is None or ohlc.empty:
                     # SmartLimit should attempt quote-based fills regardless of asset type or data source.
@@ -1837,7 +1878,27 @@ class BacktestingBroker(Broker):
                             and getattr(order, "smart_limit", None) is not None
                         ):
                             if smart_price is None or self._is_invalid_price(smart_price):
-                                # Not executable yet; keep the order open.
+                                # If we can't compute a net quote (and the parent asset has no OHLC),
+                                # downgrade to a market-style fill for each leg instead of silently
+                                # timing out and canceling the entire combo.
+                                filled = self._fill_multileg_children_at_market_open(order, strategy)
+                                if filled:
+                                    parent_qty = sum(abs(o.quantity) for o in order.child_orders)
+                                    child_prices = [
+                                        o.get_fill_price() if o.is_buy_order() else -o.get_fill_price()
+                                        for o in order.child_orders
+                                    ]
+                                    parent_price = sum(child_prices)
+                                    parent_multiplier = getattr(getattr(order, "asset", None), "multiplier", 1) or 1
+
+                                    self.stream.dispatch(
+                                        self.FILLED_ORDER,
+                                        wait_until_complete=True,
+                                        order=order,
+                                        price=parent_price,
+                                        filled_quantity=parent_qty,
+                                        multiplier=parent_multiplier,
+                                    )
                                 continue
 
                             filled = self._fill_multileg_smart_limit_children(order, strategy, float(smart_price))
@@ -2325,8 +2386,11 @@ class BacktestingBroker(Broker):
         if bid is None or ask is None or self._is_invalid_price(bid) or self._is_invalid_price(ask):
             if not state.get("missing_quote_warned", False):
                 if strategy is not None:
+                    missing_target = order.asset
+                    if order.order_class == Order.OrderClass.MULTILEG and order.child_orders:
+                        missing_target = "one or more multileg legs"
                     strategy.log_message(
-                        f"[SMART_LIMIT] Missing bid/ask for {order.asset}; downgrading to market.",
+                        f"[SMART_LIMIT] Missing bid/ask for {missing_target}; downgrading to market.",
                         color="yellow",
                     )
                 state["missing_quote_warned"] = True

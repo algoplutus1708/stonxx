@@ -139,7 +139,17 @@ class QueueClient:
         self.timeout = timeout
         self.max_concurrent = max_concurrent
         self.client_id = client_id
-        self._session = requests.Session()
+        # NOTE: requests.Session is not thread-safe. ThetaData backtests can execute multiple
+        # concurrent downloader requests (e.g., chunked history fetches), so we must not share a
+        # single Session across threads. Use thread-local sessions and a generation counter so we
+        # can invalidate all sessions on recovery (network wedges, timeouts).
+        self._session_local = threading.local()
+        self._session_generation = 0
+        self._session_generation_lock = threading.Lock()
+        self._last_session_reset_log = 0.0
+        self._last_status_refresh_error: Optional[str] = None
+        self._last_status_refresh_error_time = 0.0
+        self._status_refresh_error_streak = 0
 
         # Semaphore to limit concurrent requests
         self._concurrency_semaphore = threading.Semaphore(max_concurrent)
@@ -150,6 +160,33 @@ class QueueClient:
         self._pending_requests: Dict[str, QueuedRequestInfo] = {}  # correlation_id -> info
         self._request_id_to_correlation: Dict[str, str] = {}  # request_id -> correlation_id
         self._lock = threading.RLock()
+
+    def _build_session(self) -> requests.Session:
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=max(10, self.max_concurrent),
+            pool_maxsize=max(10, self.max_concurrent),
+            max_retries=0,
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
+
+    def _get_session(self) -> requests.Session:
+        session = getattr(self._session_local, "session", None)
+        generation = getattr(self._session_local, "generation", None)
+        if session is None or generation != self._session_generation:
+            self._session_local.session = self._build_session()
+            self._session_local.generation = self._session_generation
+        return self._session_local.session
+
+    def _invalidate_sessions(self, reason: str) -> None:
+        with self._session_generation_lock:
+            self._session_generation += 1
+        now = time.time()
+        if now - self._last_session_reset_log > 30:
+            logger.info("[THETA][QUEUE] Reset HTTP sessions (reason=%s)", reason)
+            self._last_session_reset_log = now
 
     def _build_correlation_id(
         self,
@@ -240,7 +277,7 @@ class QueueClient:
             Server-side queue statistics
         """
         try:
-            resp = self._session.get(
+            resp = self._get_session().get(
                 f"{self.base_url}/queue/stats",
                 headers={self.api_key_header: self.api_key},
                 timeout=(5, QUEUE_STATUS_HTTP_TIMEOUT),
@@ -258,6 +295,7 @@ class QueueClient:
         query_params: Dict[str, Any],
         headers: Optional[Dict[str, str]] = None,
         body: Optional[bytes] = None,
+        correlation_id_override: Optional[str] = None,
     ) -> Tuple[str, str, bool]:
         """Check if request exists in queue, submit if not.
 
@@ -274,7 +312,7 @@ class QueueClient:
         Returns:
             Tuple of (request_id, status, was_already_pending)
         """
-        correlation_id = self._build_correlation_id(method, path, query_params)
+        correlation_id = correlation_id_override or self._build_correlation_id(method, path, query_params)
 
         with self._lock:
             # Check if we already have this request tracked
@@ -369,7 +407,7 @@ class QueueClient:
                 ) from last_error
 
             try:
-                resp = self._session.post(
+                resp = self._get_session().post(
                     submit_url,
                     json=payload,
                     headers={self.api_key_header: self.api_key},
@@ -381,6 +419,7 @@ class QueueClient:
                 requests_exceptions.ConnectionError,
             ) as exc:
                 last_error = exc
+                self._invalidate_sessions("submit network error")
                 delay = self._compute_backoff_delay(
                     attempt=attempt,
                     base_delay=QUEUE_SUBMIT_BACKOFF_BASE,
@@ -474,12 +513,25 @@ class QueueClient:
             correlation_id,
             queue_position,
         )
+        # Best-effort: surface request_id into the progress UI so a "stall" is diagnosable.
+        try:  # pragma: no cover - UI plumbing
+            from lumibot.tools.thetadata_helper import update_download_status_queue_info
+
+            update_download_status_queue_info(
+                request_id=request_id,
+                correlation_id=correlation_id,
+                queue_status=status,
+                queue_position=queue_position,
+                submitted_at=time.time(),
+            )
+        except Exception:
+            pass
         return request_id, status
 
     def _refresh_status(self, request_id: str) -> Optional[QueuedRequestInfo]:
         """Refresh status of a request from the server."""
         try:
-            resp = self._session.get(
+            resp = self._get_session().get(
                 f"{self.base_url}/queue/status/{request_id}",
                 headers={self.api_key_header: self.api_key},
                 timeout=(5, QUEUE_STATUS_HTTP_TIMEOUT),
@@ -506,16 +558,38 @@ class QueueClient:
                     info.attempts = data.get("attempts", info.attempts)
                     info.error = data.get("last_error")
                     info.last_checked = time.time()
+                    # Best-effort: surface queue status into the progress UI.
+                    try:  # pragma: no cover - UI plumbing
+                        from lumibot.tools.thetadata_helper import update_download_status_queue_info
+
+                        update_download_status_queue_info(
+                            request_id=info.request_id,
+                            correlation_id=info.correlation_id,
+                            queue_status=info.status,
+                            queue_position=info.queue_position,
+                            estimated_wait=info.estimated_wait,
+                            attempts=info.attempts,
+                            last_error=info.error,
+                        )
+                    except Exception:
+                        pass
+                    self._status_refresh_error_streak = 0
                     return info
             return None
         except Exception as exc:
+            self._last_status_refresh_error = str(exc)
+            self._last_status_refresh_error_time = time.time()
+            self._status_refresh_error_streak += 1
+            if self._status_refresh_error_streak >= 3:
+                self._invalidate_sessions("status refresh failures")
+                self._status_refresh_error_streak = 0
             logger.debug("Failed to refresh status for %s: %s", request_id, exc)
             return None
 
     def get_result(self, request_id: str) -> Tuple[Optional[Any], int, str]:
         """Get the result of a request."""
         try:
-            resp = self._session.get(
+            resp = self._get_session().get(
                 f"{self.base_url}/queue/{request_id}/result",
                 headers={self.api_key_header: self.api_key},
                 timeout=(5, QUEUE_RESULT_HTTP_TIMEOUT),
@@ -559,6 +633,8 @@ class QueueClient:
         last_log_time = 0
         last_position = None
         last_status = None
+        last_info_time = 0.0
+        missing_info_streak = 0
 
         while True:
             elapsed = time.time() - start_time
@@ -594,9 +670,23 @@ class QueueClient:
             info = self._refresh_status(request_id)
 
             if info:
+                missing_info_streak = 0
                 status = info.status
                 position = info.queue_position
                 last_status = status
+
+                # Emit a low-rate heartbeat at INFO so "no logs for an hour" is diagnosable in prod.
+                if elapsed >= 10 and time.time() - last_info_time > 30:
+                    logger.info(
+                        "[THETA][QUEUE] Still waiting: request_id=%s status=%s position=%s attempts=%s est_wait=%.1fs elapsed=%.1fs",
+                        request_id,
+                        status,
+                        position,
+                        info.attempts,
+                        info.estimated_wait or 0,
+                        elapsed,
+                    )
+                    last_info_time = time.time()
 
                 # Log position changes or periodic updates
                 if position != last_position or time.time() - last_log_time > 10:
@@ -637,6 +727,20 @@ class QueueClient:
                         if info.correlation_id in self._pending_requests:
                             self._pending_requests[info.correlation_id].status = "dead"
                     raise Exception(f"Request {request_id} permanently failed: {info.error}")
+            else:
+                # If we lose connectivity to the downloader status endpoint, waiting can look like a
+                # "silent stall". Emit a low-rate heartbeat and opportunistically reset sessions so
+                # the request can recover without user intervention.
+                missing_info_streak += 1
+                if elapsed >= 10 and time.time() - last_info_time > 30:
+                    logger.info(
+                        "[THETA][QUEUE] Still waiting: request_id=%s (status refresh failing, streak=%d, last_error=%s) elapsed=%.1fs",
+                        request_id,
+                        missing_info_streak,
+                        self._last_status_refresh_error,
+                        elapsed,
+                    )
+                    last_info_time = time.time()
 
             # Still pending/processing, wait before next poll
             time.sleep(poll_interval)
@@ -668,18 +772,28 @@ class QueueClient:
         Returns:
             Tuple of (result_data, status_code)
         """
-        # Acquire semaphore - this blocks if we already have max_concurrent in flight
-        # This ensures we never have more than max_concurrent requests at once
-        with self._in_flight_lock:
-            current = self._in_flight_count
-        if current >= self.max_concurrent:
-            logger.debug(
-                "At max concurrent requests (%d/%d), waiting for slot...",
-                current,
-                self.max_concurrent,
-            )
-
-        self._concurrency_semaphore.acquire()
+        # Acquire semaphore - this blocks if we already have max_concurrent in flight.
+        #
+        # Production backtests can appear to "go silent" when the concurrency gate blocks (e.g.,
+        # if other in-flight requests are wedged). Use a timed acquire so we can emit a low-rate
+        # heartbeat at INFO and avoid silent stalls.
+        start_wait = time.monotonic()
+        last_wait_log = 0.0
+        while True:
+            if self._concurrency_semaphore.acquire(timeout=1.0):
+                break
+            waited = time.monotonic() - start_wait
+            if waited >= 10 and (time.monotonic() - last_wait_log) > 30:
+                with self._in_flight_lock:
+                    current = self._in_flight_count
+                logger.info(
+                    "[THETA][QUEUE] Waiting for request slot (in_flight=%d/%d) waited=%.1fs path=%s",
+                    current,
+                    self.max_concurrent,
+                    waited,
+                    path,
+                )
+                last_wait_log = time.monotonic()
         with self._in_flight_lock:
             self._in_flight_count += 1
             in_flight = self._in_flight_count
@@ -687,18 +801,78 @@ class QueueClient:
         logger.debug("Acquired request slot (%d/%d in flight)", in_flight, self.max_concurrent)
 
         try:
-            request_id, status, was_pending = self.check_or_submit(
-                method=method,
-                path=path,
-                query_params=query_params,
-                headers=headers,
-                body=body,
-            )
+            # Self-healing retry loop:
+            # - Never "go silent" when downloader status polling fails.
+            # - Recover from wedged requests via timeouts/session resets/resubmits.
+            # - Do not fail-fast: keep retrying with backoff and session resets. Backtest
+            #   wall-clock enforcement belongs to the outer orchestrator (ECS/task timeouts).
+            base_correlation_id = self._build_correlation_id(method, path, query_params)
 
-            if was_pending:
-                logger.debug("Request already in queue, waiting for existing: %s", request_id)
+            # Choose a finite per-attempt timeout even if the caller requests "forever" waits.
+            if timeout is not None and timeout > 0:
+                attempt_timeout = timeout
+            elif self.timeout and self.timeout > 0:
+                attempt_timeout = self.timeout
+            else:
+                attempt_timeout = 900.0
 
-            return self.wait_for_result(request_id=request_id, timeout=timeout)
+            timeout_count = 0
+            correlation_override: Optional[str] = None
+
+            while True:
+                request_id, status, was_pending = self.check_or_submit(
+                    method=method,
+                    path=path,
+                    query_params=query_params,
+                    headers=headers,
+                    body=body,
+                    correlation_id_override=correlation_override,
+                )
+
+                if was_pending:
+                    logger.debug("Request already in queue, waiting for existing: %s", request_id)
+
+                try:
+                    return self.wait_for_result(request_id=request_id, timeout=attempt_timeout)
+                except TimeoutError as exc:
+                    timeout_count += 1
+                    self._invalidate_sessions("wait timeout")
+
+                    # Best-effort: surface the failure into the backtest status payload so the UI
+                    # can show what we're stuck on.
+                    try:  # pragma: no cover - UI plumbing
+                        from lumibot.tools.thetadata_helper import update_download_status_queue_info
+
+                        update_download_status_queue_info(
+                            request_id=request_id,
+                            correlation_id=correlation_override or base_correlation_id,
+                            last_error=str(exc),
+                        )
+                    except Exception:
+                        pass
+
+                    # First few timeouts: keep waiting on the same logical request (idempotent).
+                    # After repeated timeouts, force a resubmit with a new correlation id so we can
+                    # recover from a wedged downloader queue entry.
+                    if timeout_count >= 3:
+                        correlation_override = (
+                            f"{base_correlation_id}-retry-{timeout_count}-{int(time.time())}"
+                        )
+                        logger.warning(
+                            "[THETA][QUEUE] Request %s timed out repeatedly; forcing resubmit (attempt=%d)",
+                            request_id,
+                            timeout_count,
+                        )
+                    else:
+                        correlation_override = None
+
+                    delay = self._compute_backoff_delay(
+                        attempt=timeout_count,
+                        base_delay=1.0,
+                        max_delay=30.0,
+                        jitter_pct=0.2,
+                    )
+                    time.sleep(delay)
         finally:
             # Release semaphore when done (success or failure)
             with self._in_flight_lock:

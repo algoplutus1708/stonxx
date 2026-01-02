@@ -34,7 +34,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setuptools.setup(
     name="lumibot",
-    version="4.4.20",
+    version="4.4.21",
     author="Robert Grzesik",
     author_email="rob@lumiwealth.com",
     description="Backtesting and Trading Library, Made by Lumiwealth",
@@ -62,6 +62,7 @@ setuptools.setup(
         "sqlalchemy",
         "bcrypt",
         "pytest",
+        "yappi>=1.6.0",
         # SciPy 1.14.0+ supports NumPy 2.x
         "scipy>=1.14.0",
         "quantstats-lumi>=1.1.0",
