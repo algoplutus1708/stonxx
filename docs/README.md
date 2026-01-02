@@ -8,6 +8,7 @@ Start here:
 Additional docs:
 - Handoffs: `docs/handoffs/`
 - Investigations: `docs/investigations/`
+- Release gate: `docs/ACCEPTANCE_BACKTESTS.md`
 
 Public documentation site:
 - `docsrc/` contains the Sphinx source.

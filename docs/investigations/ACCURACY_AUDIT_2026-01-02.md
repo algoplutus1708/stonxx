@@ -10,6 +10,8 @@ Scope:
 
 These notes are intentionally “what to look for” + “what I observed”, not hard assertions.
 
+Acceptance gate definition lives in: `docs/ACCEPTANCE_BACKTESTS.md`.
+
 ## AAPL Deep Dip Calls (Copy 4)
 
 - Run id: `AAPLDeepDipCalls_2026-01-02_10-25_3KsjXy`

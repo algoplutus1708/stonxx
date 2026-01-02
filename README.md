@@ -13,6 +13,7 @@ Lumibot is a backtesting and trading library for stocks, options, crypto, future
 ## Architecture Documentation
 
 - `docs/BACKTESTING_ARCHITECTURE.md` - Detailed documentation of the backtesting data flow (Yahoo, ThetaData, Polygon data sources, caching, and data flow diagrams)
+- `docs/ACCEPTANCE_BACKTESTS.md` - Manual end-to-end acceptance backtest suite + performance gate (ThetaData)
 - `CLAUDE.md` - AI assistant instructions for working with the codebase
 - `AGENTS.md` - Critical rules for ThetaData and production safety
 
