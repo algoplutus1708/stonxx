@@ -362,6 +362,40 @@ class OptionsHelper:
                 )
                 continue
 
+            # PERF (intraday index strategies):
+            # For liquid index underlyings, the nearest strike is almost always tradeable. Doing
+            # snapshot-only quote probes for every candidate strike adds per-day remote requests
+            # (dominating runtime in long-window backtests). Keep the strict quote validation for
+            # non-index underlyings and for far-OTM index selections where liquidity is less certain.
+            if (
+                is_theta_backtest
+                and not is_daily_cadence
+                and self._is_index_like_underlying(underlying_asset, getattr(underlying_asset, "symbol", None))
+            ):
+                try:
+                    underlying_price = None
+                    price_value = self.strategy.get_last_price(underlying_asset)
+                    if price_value is not None:
+                        underlying_price = float(price_value)
+                    if underlying_price and math.isfinite(underlying_price) and underlying_price > 0:
+                        distance = abs(float(rounded_underlying_price) - underlying_price) / underlying_price
+                        if distance <= 0.05:
+                            closest_strike = strikes_sorted[0]
+                            self.strategy.log_message(
+                                f"Target strike {rounded_underlying_price} -> Using closest strike without quote probe (index fast-path): {closest_strike}",
+                                color="green",
+                            )
+                            return Asset(
+                                underlying_asset.symbol,
+                                asset_type="option",
+                                expiration=exp_date,
+                                strike=closest_strike,
+                                right=put_or_call,
+                                underlying_asset=underlying_asset,
+                            )
+                except Exception:
+                    pass
+
             if is_theta_backtest:
                 # ThetaData backtests: validate the option has *some* price signal at the current
                 # strategy datetime so strategies don't get stuck selecting contracts with no history
@@ -1284,6 +1318,45 @@ class OptionsHelper:
 
         return _ChainHintContext(data_source, min_expiration_date)
 
+    @staticmethod
+    def _is_index_like_underlying(underlying_asset: Optional[Asset], symbol: Optional[str]) -> bool:
+        """Return True when the underlying behaves like an index for option-liquidity heuristics.
+
+        Some strategies represent indices as plain stock Assets (asset_type="stock"). We treat a
+        small allowlist of known index symbols as "index-like" so intraday backtests can avoid
+        excessively expensive validation probes that are unnecessary for highly liquid index options.
+        """
+
+        try:
+            if underlying_asset is not None and getattr(underlying_asset, "asset_type", None) == Asset.AssetType.INDEX:
+                return True
+        except Exception:
+            pass
+
+        symbol_upper = None
+        try:
+            symbol_upper = (symbol or getattr(underlying_asset, "symbol", None) or "").upper()
+        except Exception:
+            symbol_upper = None
+
+        if not symbol_upper:
+            return False
+
+        return symbol_upper in {
+            "SPX",
+            "SPXW",
+            "NDX",
+            "NDXP",
+            "RUT",
+            "RUTW",
+            "VIX",
+            "VIXW",
+            "XSP",
+            "DJX",
+            "OEX",
+            "XEO",
+        }
+
     def get_expiration_on_or_after_date(
         self,
         dt: Union[date, datetime],
@@ -1480,6 +1553,25 @@ class OptionsHelper:
         # Convert string expiries to dates for comparison
         expiration_dates: List[Tuple[str, date]] = _try_resolve_expiration(specific_chain)
         future_candidates = [(s, d) for s, d in expiration_dates if d >= dt]
+
+        # PERF (intraday 0DTE index strategies):
+        # For highly liquid index options (SPX/SPXW/etc), validating the *expiration itself* via
+        # per-day snapshot quote probes adds a guaranteed remote round-trip (and dominates runtime
+        # in long-window backtests) while rarely changing the outcome. The strike-selection step
+        # still validates actionable NBBO for the actual contracts we intend to trade.
+        if (
+            is_backtesting
+            and as_of_date is not None
+            and dt == as_of_date
+            and self._is_index_like_underlying(underlying_asset, underlying_symbol)
+        ):
+            for _exp_str, exp_date in expiration_dates:
+                if exp_date == dt:
+                    try:
+                        self._expiration_cache[expiration_cache_key] = exp_date
+                    except Exception:
+                        pass
+                    return exp_date
 
         # Log chain search (DEBUG level for details)
         logger.debug("[OptionsHelper] Finding expiration >= %s: %d candidates from %d total expirations",
