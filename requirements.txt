@@ -14,6 +14,7 @@ plotly>=5.18.0
 sqlalchemy
 bcrypt
 pytest
+yappi>=1.6.0
 scipy>=1.14.0
 quantstats-lumi>=1.1.0
 python-dotenv  # Secret Storage

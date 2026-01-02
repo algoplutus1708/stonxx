@@ -62,6 +62,7 @@ setuptools.setup(
         "sqlalchemy",
         "bcrypt",
         "pytest",
+        "yappi>=1.6.0",
         # SciPy 1.14.0+ supports NumPy 2.x
         "scipy>=1.14.0",
         "quantstats-lumi>=1.1.0",
