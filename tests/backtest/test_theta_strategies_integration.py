@@ -63,10 +63,11 @@ def _ensure_env_loaded() -> None:
 
     backend = (os.environ.get("LUMIBOT_CACHE_BACKEND") or "").strip().lower()
     mode = (os.environ.get("LUMIBOT_CACHE_MODE") or "").strip().lower()
-    if backend != "s3" or mode not in {"readwrite", "rw", "s3_readwrite"}:
+    allowed_modes = {"readwrite", "rw", "s3_readwrite", "readonly", "ro", "s3_readonly"}
+    if backend != "s3" or mode not in allowed_modes:
         message = (
-            "Acceptance smokes must run with the prod-like S3 cache configuration "
-            f"(backend=s3, mode=readwrite). Got LUMIBOT_CACHE_BACKEND={backend!r} LUMIBOT_CACHE_MODE={mode!r}"
+            "Acceptance smokes must run with the S3 cache enabled. "
+            f"Got LUMIBOT_CACHE_BACKEND={backend!r} LUMIBOT_CACHE_MODE={mode!r}"
         )
         if _is_ci():
             pytest.fail(message)
