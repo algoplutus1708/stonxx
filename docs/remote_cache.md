@@ -60,7 +60,9 @@ prod/cache/v1/thetadata/stock/minute/ohlc/stock_SPY_minute_ohlc.parquet
 This format aligns with the intended IAM policy layout (provider → asset class →
 timespan → datastyle) and keeps migration straightforward for other data sources
 such as Polygon or DataBento. Option-chain caches now live at
-`thetadata/option/option_chains/<symbol>_<date>.parquet`.
+`thetadata/<asset-folder>/option_chains/<symbol>_<date>.parquet`, where
+`<asset-folder>` matches `thetadata_helper._resolve_asset_folder(...)` (for
+example `stock` or `index`).
 
 ## Implementation Overview
 
@@ -72,6 +74,9 @@ such as Polygon or DataBento. Option-chain caches now live at
 * `thetadata_helper.get_price_data` calls the manager before attempting to read
   from disk, and again after successful cache updates. Payload metadata captures
   provider, symbol, asset type, and option attributes for future auditing.
+* `thetadata_helper.get_chains_cached` also hydrates/uploads option-chain parquet
+  files so production backtest containers can reuse warm chains from S3 instead
+  of rebuilding them from ThetaData on every run.
 * Remote uploads run only in `s3_readwrite` mode. The read-only path returns
   early, leaving a TODO hook (`BacktestCacheManager.on_local_update`) for the
   Lambda-triggered workflow.

@@ -747,6 +747,46 @@ class TestOptionsHelper(unittest.TestCase):
         self.assertTrue(evaluation.missing_bid_ask)
         self.assertFalse(OptionsHelper.has_actionable_price(evaluation))
 
+    def test_has_actionable_price_requires_sell_price(self):
+        """Ask-only quotes should be treated as non-actionable to prevent crashes."""
+        option_asset = Asset(
+            "TEST",
+            asset_type=Asset.AssetType.OPTION,
+            expiration=date.today() + timedelta(days=7),
+            strike=200,
+            right="call",
+            underlying_asset=Asset("TEST", asset_type=Asset.AssetType.STOCK),
+        )
+
+        self.mock_strategy.get_quote.return_value = Mock(bid=None, ask=0.05)
+        self.mock_strategy.broker.data_source.option_quote_fallback_allowed = False
+
+        evaluation = self.options_helper.evaluate_option_market(option_asset, max_spread_pct=0.25)
+
+        self.assertEqual(evaluation.buy_price, 0.05)
+        self.assertIsNone(evaluation.sell_price)
+        self.assertFalse(OptionsHelper.has_actionable_price(evaluation))
+
+    def test_has_actionable_price_requires_buy_price(self):
+        """Bid-only quotes should be treated as non-actionable to prevent crashes."""
+        option_asset = Asset(
+            "TEST",
+            asset_type=Asset.AssetType.OPTION,
+            expiration=date.today() + timedelta(days=7),
+            strike=200,
+            right="call",
+            underlying_asset=Asset("TEST", asset_type=Asset.AssetType.STOCK),
+        )
+
+        self.mock_strategy.get_quote.return_value = Mock(bid=0.05, ask=None)
+        self.mock_strategy.broker.data_source.option_quote_fallback_allowed = False
+
+        evaluation = self.options_helper.evaluate_option_market(option_asset, max_spread_pct=0.25)
+
+        self.assertIsNone(evaluation.buy_price)
+        self.assertEqual(evaluation.sell_price, 0.05)
+        self.assertFalse(OptionsHelper.has_actionable_price(evaluation))
+
     def test_has_actionable_price_requires_positive_finite_value(self):
         """has_actionable_price returns False for zero or negative values."""
         evaluation = OptionMarketEvaluation(

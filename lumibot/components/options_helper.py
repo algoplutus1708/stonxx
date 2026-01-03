@@ -122,20 +122,32 @@ class OptionsHelper:
 
     @staticmethod
     def has_actionable_price(evaluation: Optional["OptionMarketEvaluation"]) -> bool:
-        """Return True when the evaluation contains a usable buy price."""
+        """Return True when the evaluation contains usable buy and sell prices.
+
+        A quote can be "one-sided" (ask-only or bid-only). In that case we cannot
+        safely execute both buy and sell actions, so treat it as non-actionable.
+        """
         if evaluation is None:
             return False
 
-        price = evaluation.buy_price
-        if price is None:
+        buy_price = evaluation.buy_price
+        sell_price = evaluation.sell_price
+        if buy_price is None or sell_price is None:
             return False
 
         try:
-            price = float(price)
+            buy_price = float(buy_price)
+            sell_price = float(sell_price)
         except (TypeError, ValueError):
             return False
 
-        return math.isfinite(price) and price > 0 and not evaluation.spread_too_wide
+        return (
+            math.isfinite(buy_price)
+            and buy_price > 0
+            and math.isfinite(sell_price)
+            and sell_price > 0
+            and not evaluation.spread_too_wide
+        )
 
     @staticmethod
     def _float_positive(value: Any) -> Optional[float]:
