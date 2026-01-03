@@ -5132,6 +5132,29 @@ def get_chains_cached(
     # 2) Build cache folder path
     chain_folder = Path(LUMIBOT_CACHE_FOLDER) / "thetadata" / _resolve_asset_folder(asset) / "option_chains"
     chain_folder.mkdir(parents=True, exist_ok=True)
+    cache_file = chain_folder / f"{asset.symbol}_{current_date.isoformat()}.parquet"
+
+    # If the S3 remote cache is enabled, opportunistically hydrate the chain cache file for this
+    # exact date. Production backtest containers start with empty disks; without this step every
+    # run rebuilds chains from ThetaData even when S3 is warm, which keeps hitting the downloader
+    # and makes prod much slower than local warm-cache runs.
+    #
+    # We intentionally only attempt the exact-date file here:
+    # - It is deterministic and keeps the S3 key stable.
+    # - Reuse across days is still handled by the local folder scan (tolerance window) once at
+    #   least one file exists on disk during the current run.
+    try:
+        from lumibot.tools.backtest_cache import get_backtest_cache
+
+        if not cache_file.exists():
+            get_backtest_cache().ensure_local_file(cache_file)
+    except Exception:
+        logger.debug(
+            "[THETA][CHAIN_CACHE] Remote cache hydrate failed for %s on %s",
+            asset.symbol,
+            current_date,
+            exc_info=True,
+        )
 
     constraints = chain_constraints or {}
     hint_present = any(
@@ -5244,9 +5267,19 @@ def get_chains_cached(
         }
 
     # 5) Save to cache file for future reuse
-    cache_file = chain_folder / f"{asset.symbol}_{current_date.isoformat()}.parquet"
     df_to_cache = pd.DataFrame({"data": [chains_dict]})
     df_to_cache.to_parquet(cache_file, compression='snappy', engine='pyarrow')
     logger.debug(f"Saved chain cache: {cache_file}")
+    try:
+        from lumibot.tools.backtest_cache import get_backtest_cache
+
+        get_backtest_cache().on_local_update(cache_file)
+    except Exception:
+        logger.debug(
+            "[THETA][CHAIN_CACHE] Remote cache upload failed for %s on %s",
+            asset.symbol,
+            current_date,
+            exc_info=True,
+        )
 
     return chains_dict
