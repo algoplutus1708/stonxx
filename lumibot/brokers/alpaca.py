@@ -654,8 +654,10 @@ class Alpaca(Broker):
         - The sign of the limit price (positive/negative) is not used by Alpaca to distinguish credit/debit.
         - Alpaca requires that the leg ratio quantities are relatively prime (GCD == 1).
         """
+        requested_multileg_type = order_type if order_type in ("credit", "debit", "even") else None
+
         # Convert Tradier-specific order types to Alpaca-supported types
-        if order_type in ("credit", "debit", "even"):
+        if requested_multileg_type is not None:
             order_type = "limit"
         # All legs must have the same underlying symbol
         symbol = orders[0].asset.symbol
@@ -671,30 +673,33 @@ class Alpaca(Broker):
                 option_symbol = f"{order.asset.symbol}{date}{order.asset.right[0]}{strike_formatted}"
             else:
                 option_symbol = order.asset.symbol
-            # Determine position_intent (buy_to_open, sell_to_open, etc.)
+            # Determine leg side + position intent for Alpaca's mleg payload.
+            # - leg.side must be "buy" or "sell"
+            # - leg.position_intent must be one of: buy_to_open, buy_to_close, sell_to_open, sell_to_close
             position_intent = getattr(order, "position_intent", None)
-            if not position_intent:
-                # Check if we have an open position in this option
-                pos = self.get_tracked_position(order.strategy, order.asset)
-                if pos is not None and pos.quantity != 0:
-                    # Closing position
-                    if order.side == "buy":
-                        position_intent = "buy_to_close"
-                    elif order.side == "sell":
-                        position_intent = "sell_to_close"
-                else:
-                    # Opening position
-                    if order.side == "buy":
-                        position_intent = "buy_to_open"
-                    elif order.side == "sell":
-                        position_intent = "sell_to_open"
+            raw_side = order.side
+            if raw_side in ("buy_to_open", "buy_to_close"):
+                leg_side = "buy"
+                position_intent = position_intent or raw_side
+            elif raw_side in ("sell_to_open", "sell_to_close"):
+                leg_side = "sell"
+                position_intent = position_intent or raw_side
+            else:
+                leg_side = "buy" if order.is_buy_order() else "sell"
+                if not position_intent:
+                    # Fall back to position-based intent inference when the side doesn't encode open/close.
+                    pos = self.get_tracked_position(order.strategy, order.asset)
+                    if pos is not None and pos.quantity != 0:
+                        position_intent = "buy_to_close" if leg_side == "buy" else "sell_to_close"
+                    else:
+                        position_intent = "buy_to_open" if leg_side == "buy" else "sell_to_open"
             # Collect leg quantities for GCD check
             leg_qty = int(abs(order.quantity))
             leg_quantities.append(leg_qty)
             legs.append({
                 "symbol": option_symbol,
                 "ratio_qty": str(order.quantity),
-                "side": order.side,
+                "side": leg_side,
                 "position_intent": position_intent
             })
         # Ensure leg ratio quantities are relatively prime (GCD == 1)
@@ -712,12 +717,19 @@ class Alpaca(Broker):
         # For multi-leg orders, we need to set the primary asset info from the first leg
         first_order = orders[0]
         
-        # Map extended side values to simple buy/sell for Alpaca API
-        side = first_order.side
-        if side in ("buy_to_open", "buy_to_close"):
+        # Determine top-level side for Alpaca.
+        # Alpaca mleg orders require a primary side; for debit/credit packages, this should
+        # reflect the net debit/credit rather than the first leg ordering.
+        if requested_multileg_type == "debit":
             side = "buy"
-        elif side in ("sell_to_open", "sell_to_close"):
+        elif requested_multileg_type == "credit":
             side = "sell"
+        else:
+            side = first_order.side
+            if side in ("buy_to_open", "buy_to_close"):
+                side = "buy"
+            elif side in ("sell_to_open", "sell_to_close"):
+                side = "sell"
         
         # multileg is not a valid order_class for Alpaca. It is mleg now, and cannot be combined with a symbol.
 
@@ -1038,10 +1050,24 @@ class Alpaca(Broker):
 
             # Try to replace the order on Alpaca, handle APIError for accepted status
             try:
-                self.api.replace_order_by_id(
+                replaced = self.api.replace_order_by_id(
                     order_id=order.identifier,
                     order_data=replace_req,
                 )
+                # Alpaca can return a *new* order id when replacing. Keep LumiBot's order object
+                # aligned so SMART_LIMIT can continue repricing/canceling reliably.
+                new_id = getattr(replaced, "id", None)
+                if new_id:
+                    order.identifier = new_id
+                    try:
+                        for child in getattr(order, "child_orders", []) or []:
+                            child.parent_identifier = new_id
+                    except Exception:
+                        pass
+                    try:
+                        order.update_raw(replaced)
+                    except Exception:
+                        pass
             except Exception as e:
                 # If error is "cannot replace order in accepted status", just log and skip
                 if hasattr(e, "args") and e.args and "cannot replace order in accepted status" in str(e.args[0]):

@@ -21,7 +21,14 @@ from lumibot.constants import LUMIBOT_DEFAULT_PYTZ
 from lumibot.entities import Asset, Order
 from lumibot.entities import Asset
 from lumibot.tools import append_locals, get_trading_days, staticdecorator
-from lumibot.tools.smart_limit_utils import build_price_ladder, compute_final_price, compute_mid, infer_tick_size, round_to_tick
+from lumibot.tools.smart_limit_utils import (
+    build_price_ladder,
+    compute_final_price,
+    compute_final_price_from_mid,
+    compute_mid,
+    infer_tick_size,
+    round_to_tick,
+)
 
 
 class StrategyExecutor(Thread):
@@ -644,7 +651,10 @@ class StrategyExecutor(Thread):
             final_hold_start = state["step_seconds"] * (state["steps"] - 1)
 
             if step_index == state["steps"] - 1 and elapsed >= final_hold_start + state["final_hold_seconds"]:
-                self.broker.cancel_order(order)
+                try:
+                    self.broker.cancel_order(order)
+                except Exception as exc:
+                    self.strategy.logger.error(f"SMART_LIMIT cancel failed for {order.identifier}: {exc}")
                 continue
 
             if step_index == state["step_index"]:
@@ -652,40 +662,94 @@ class StrategyExecutor(Thread):
 
             state["step_index"] = step_index
 
-            side = "buy" if order.is_buy_order() else "sell"
-            bid = ask = None
             if order.order_class == Order.OrderClass.MULTILEG and order.child_orders:
-                net_bid = 0.0
-                net_ask = 0.0
+                quote_data: list[tuple[Order, float | None, float | None]] = []
                 for leg in order.child_orders:
                     quote = self.strategy.get_quote(leg.asset, quote=leg.quote, exchange=leg.exchange)
                     leg_bid = getattr(quote, "bid", None)
                     leg_ask = getattr(quote, "ask", None)
-                    if leg_bid is None or leg_ask is None:
-                        net_bid = net_ask = None
-                        break
-                    if side == "buy":
-                        if leg.is_buy_order():
-                            net_bid += leg_bid
-                            net_ask += leg_ask
-                        else:
-                            net_bid -= leg_ask
-                            net_ask -= leg_bid
-                    else:
-                        if leg.is_buy_order():
-                            net_bid -= leg_ask
-                            net_ask -= leg_bid
-                        else:
-                            net_bid += leg_bid
-                            net_ask += leg_ask
-                bid = net_bid
-                ask = net_ask
-            else:
-                quote = self.strategy.get_quote(order.asset, quote=order.quote, exchange=order.exchange)
-                bid = getattr(quote, "bid", None)
-                ask = getattr(quote, "ask", None)
+                    quote_data.append((leg, leg_bid, leg_ask))
 
-            if bid is None or ask is None or bid <= 0 or ask <= 0:
+                if any(b is None or a is None or b < 0 or a <= 0 for _, b, a in quote_data):
+                    if not getattr(order, "_smart_limit_missing_quote_logged", False):
+                        self.strategy.log_message(
+                            f"[SMART_LIMIT] Missing bid/ask for {order.asset}; keeping last limit.",
+                            color="yellow",
+                        )
+                        order._smart_limit_missing_quote_logged = True
+                    continue
+
+                net_best = 0.0
+                net_fastest = 0.0
+                for leg, leg_bid, leg_ask in quote_data:
+                    if leg.is_buy_order():
+                        net_best += float(leg_bid)
+                        net_fastest += float(leg_ask)
+                    else:
+                        net_best -= float(leg_ask)
+                        net_fastest -= float(leg_bid)
+
+                tick = infer_tick_size(net_best, net_fastest)
+                mid = compute_mid(net_best, net_fastest)
+                final_signed = compute_final_price_from_mid(mid, net_fastest, smart_limit.final_price_pct)
+                ladder = build_price_ladder(mid, final_signed, smart_limit.get_step_count())
+                target_signed = round_to_tick(ladder[step_index], tick, side="buy")
+
+                target_type = "even" if abs(target_signed) < 1e-9 else ("debit" if target_signed > 0 else "credit")
+                target_price = abs(target_signed) if target_type != "even" else 0.0
+                if target_type == "even" and getattr(self.broker, "name", "").lower() == "tradier":
+                    target_price = None
+
+                current_type = state.get("multileg_order_type")
+                if current_type is None:
+                    current_type = target_type
+                    state["multileg_order_type"] = current_type
+
+                if current_type == target_type and target_price is not None and order.limit_price is not None:
+                    if abs(float(order.limit_price) - float(target_price)) < 1e-9:
+                        continue
+                if current_type == target_type and target_type == "even":
+                    continue
+
+                should_replace = current_type != target_type
+                if not should_replace:
+                    try:
+                        if target_price is None:
+                            should_replace = True
+                        else:
+                            self.broker.modify_order(order, limit_price=float(target_price))
+                            order.limit_price = float(target_price)
+                            continue
+                    except Exception:
+                        should_replace = True
+
+                if should_replace:
+                    try:
+                        self.broker.cancel_order(order)
+                        submitted = self.broker.submit_orders(
+                            order.child_orders,
+                            is_multileg=True,
+                            order_type=target_type,
+                            price=target_price,
+                        )
+                        new_parent = submitted[0] if isinstance(submitted, list) and submitted else submitted
+                        if new_parent is not None:
+                            new_parent.smart_limit = smart_limit
+                            new_parent.order_type = Order.OrderType.SMART_LIMIT
+                            new_parent._smart_limit_state = state
+                            state["multileg_order_type"] = target_type
+                            new_parent.limit_price = 0.0 if target_price is None else float(target_price)
+                    except Exception as exc:
+                        self.strategy.logger.error(f"SMART_LIMIT reprice failed for {order.identifier}: {exc}")
+
+                continue
+
+            side = "buy" if order.is_buy_order() else "sell"
+            quote = self.strategy.get_quote(order.asset, quote=order.quote, exchange=order.exchange)
+            bid = getattr(quote, "bid", None)
+            ask = getattr(quote, "ask", None)
+
+            if bid is None or ask is None or bid < 0 or ask <= 0:
                 if not getattr(order, "_smart_limit_missing_quote_logged", False):
                     self.strategy.log_message(
                         f"[SMART_LIMIT] Missing bid/ask for {order.asset}; keeping last limit.",

@@ -20,7 +20,14 @@ from termcolor import colored, COLORS
 from ..data_sources import DataSource
 from ..entities import Asset, Data, Order, Position, Quote, TradingFee, TradingSlippage, SmartLimitConfig
 from ..tools import get_risk_free_rate
-from ..tools.smart_limit_utils import build_price_ladder, compute_final_price, compute_mid, infer_tick_size, round_to_tick
+from ..tools.smart_limit_utils import (
+    build_price_ladder,
+    compute_final_price,
+    compute_final_price_from_mid,
+    compute_mid,
+    infer_tick_size,
+    round_to_tick,
+)
 from ..tools.polars_utils import PolarsResampleError, resample_polars_ohlc
 from ..traders import Trader
 from ..credentials import IS_BACKTESTING
@@ -1592,6 +1599,88 @@ class Strategy(_Strategy):
             if 'is_multileg' not in kwargs:
                 kwargs['is_multileg'] = default_multileg
 
+            is_multileg = bool(kwargs.get("is_multileg"))
+            wants_smart_limit = any(
+                o.order_type == Order.OrderType.SMART_LIMIT or getattr(o, "smart_limit", None) is not None for o in order
+            )
+            if wants_smart_limit:
+                cfg = next((getattr(o, "smart_limit", None) for o in order if getattr(o, "smart_limit", None) is not None), None)
+                if cfg is None:
+                    cfg = SmartLimitConfig()
+
+                if any(getattr(o, "smart_limit", None) not in (None, cfg) for o in order):
+                    self.log_message(
+                        "[SMART_LIMIT] Multi-leg SMART_LIMIT requires a single SmartLimitConfig; using the first config for all legs.",
+                        color="yellow",
+                    )
+
+                for o in order:
+                    o.order_type = Order.OrderType.SMART_LIMIT
+                    o.smart_limit = cfg
+
+                if is_multileg:
+                    if self.broker.IS_BACKTESTING_BROKER:
+                        return self.broker.submit_orders(order, **kwargs)
+                    return self._submit_multileg_smart_limit_orders(order, cfg, **kwargs)
+
+                # Multiple independent SMART_LIMIT orders.
+                submitted_orders = []
+                for o in order:
+                    submitted_orders.append(self.submit_order(o))
+                return submitted_orders
+
+            # Broker-agnostic multi-leg LIMIT UX:
+            # If the caller requests a package LIMIT (`order_type='limit'`) on a broker that uses
+            # debit/credit/even semantics (Tradier) or needs net-side hints (Alpaca mleg),
+            # infer the net sign from quotes and map internally so strategies remain portable.
+            if (
+                is_multileg
+                and not self.broker.IS_BACKTESTING_BROKER
+                and str(kwargs.get("order_type", "")).lower() == str(Order.OrderType.LIMIT)
+                and str(getattr(self.broker, "name", "")).lower() in {"tradier", "alpaca"}
+            ):
+                inferred = self._infer_multileg_type_and_mid(order)
+                if inferred is not None:
+                    inferred_type, inferred_mid_abs = inferred
+                else:
+                    inferred_type, inferred_mid_abs = None, None
+
+                raw_price = kwargs.get("price")
+                price_abs = None
+                if raw_price is not None:
+                    try:
+                        price_abs = abs(float(raw_price))
+                    except Exception:
+                        price_abs = None
+
+                if inferred_type is None:
+                    # Fall back to interpreting a signed price (negative=credit) if quotes are missing.
+                    if raw_price is not None:
+                        try:
+                            signed = float(raw_price)
+                            inferred_type = "even" if abs(signed) < 1e-9 else ("debit" if signed > 0 else "credit")
+                            if price_abs is None:
+                                price_abs = abs(signed)
+                            self.log_message(
+                                "[MULTILEG][LIMIT] Missing quotes; inferring debit/credit from price sign. "
+                                "For net credits, pass a negative price or explicit order_type='credit'.",
+                                color="yellow",
+                            )
+                        except Exception:
+                            inferred_type = None
+
+                if inferred_type is not None:
+                    kwargs["order_type"] = inferred_type
+                    if price_abs is None and inferred_mid_abs is not None:
+                        price_abs = float(inferred_mid_abs)
+
+                    broker_name = str(getattr(self.broker, "name", "")).lower()
+                    if inferred_type == "even" and broker_name == "tradier":
+                        kwargs["price"] = None
+                    else:
+                        # Alpaca requires a limit_price for mleg orders; treat even as 0.0 and let the broker decide.
+                        kwargs["price"] = 0.0 if price_abs is None else float(price_abs)
+
             return self.broker.submit_orders(order, **kwargs)
 
         else:
@@ -1612,7 +1701,7 @@ class Strategy(_Strategy):
                 quote = self.get_quote(order.asset, quote=order.quote, exchange=order.exchange)
                 bid = getattr(quote, "bid", None)
                 ask = getattr(quote, "ask", None)
-                if bid is None or ask is None or bid <= 0 or ask <= 0:
+                if bid is None or ask is None or bid < 0 or ask <= 0:
                     self.log_message(
                         f"[SMART_LIMIT] Missing bid/ask for {order.asset}; downgrading to market.",
                         color="yellow",
@@ -1648,65 +1737,128 @@ class Strategy(_Strategy):
             return self.broker.submit_order(order)
 
     def _submit_multileg_smart_limit(self, order: Order):
-        quote_data = []
-        for leg in order.child_orders:
+        return self._submit_multileg_smart_limit_orders(order.child_orders, order.smart_limit)
+
+    def _compute_multileg_net_best_fastest(self, child_orders: List[Order]) -> tuple[float, float] | None:
+        """Compute signed net best/fastest prices for a multi-leg options package.
+
+        Convention (matches OptionsHelper and SMART_LIMIT logic):
+        - For buy legs: best=bid, fastest=ask (positive contribution)
+        - For sell legs: best=-ask, fastest=-bid (negative contribution)
+        """
+
+        quote_data: list[tuple[Order, float | None, float | None]] = []
+        for leg in child_orders:
             quote = self.get_quote(leg.asset, quote=leg.quote, exchange=leg.exchange)
             bid = getattr(quote, "bid", None)
             ask = getattr(quote, "ask", None)
             quote_data.append((leg, bid, ask))
 
-        if any(bid is None or ask is None or bid <= 0 or ask <= 0 for _, bid, ask in quote_data):
+        if any(bid is None or ask is None or bid < 0 or ask <= 0 for _, bid, ask in quote_data):
+            return None
+
+        net_best = 0.0
+        net_fastest = 0.0
+        for leg, bid, ask in quote_data:
+            if leg.is_buy_order():
+                net_best += float(bid)
+                net_fastest += float(ask)
+            else:
+                net_best -= float(ask)
+                net_fastest -= float(bid)
+
+        return net_best, net_fastest
+
+    def _infer_multileg_type_and_mid(self, child_orders: List[Order]) -> tuple[str, float] | None:
+        """Infer package type (debit/credit/even) and return abs(net_mid)."""
+
+        computed = self._compute_multileg_net_best_fastest(child_orders)
+        if computed is None:
+            return None
+
+        net_best, net_fastest = computed
+        mid_signed = compute_mid(net_best, net_fastest)
+        if abs(mid_signed) < 1e-9:
+            return "even", 0.0
+        if mid_signed > 0:
+            return "debit", float(abs(mid_signed))
+        return "credit", float(abs(mid_signed))
+
+    def _submit_multileg_smart_limit_orders(self, child_orders: List[Order], smart_limit: SmartLimitConfig, **kwargs):
+        if self.broker.IS_BACKTESTING_BROKER:
+            kwargs.setdefault("is_multileg", True)
+            return self.broker.submit_orders(child_orders, **kwargs)
+
+        if smart_limit is None:
+            smart_limit = SmartLimitConfig()
+
+        computed = self._compute_multileg_net_best_fastest(child_orders)
+        if computed is None:
             self.log_message(
-                f"[SMART_LIMIT] Missing bid/ask for multileg order; downgrading to market.",
+                "[SMART_LIMIT] Missing bid/ask for multileg order; downgrading to market.",
                 color="yellow",
             )
-            order.smart_limit = None
-            return self.broker.submit_orders(order.child_orders, is_multileg=True, order_type=Order.OrderType.MARKET)
+            return self.broker.submit_orders(child_orders, is_multileg=True, order_type=Order.OrderType.MARKET)
+        net_best, net_fastest = computed
 
-        net_bid = 0.0
-        net_ask = 0.0
-        side = "buy" if order.is_buy_order() else "sell"
-        for leg, bid, ask in quote_data:
-            if side == "buy":
-                if leg.is_buy_order():
-                    net_bid += bid
-                    net_ask += ask
-                else:
-                    net_bid -= ask
-                    net_ask -= bid
-            else:
-                if leg.is_buy_order():
-                    net_bid -= ask
-                    net_ask -= bid
-                else:
-                    net_bid += bid
-                    net_ask += ask
-        tick = infer_tick_size(net_bid, net_ask)
-        mid = compute_mid(net_bid, net_ask)
-        final_price = compute_final_price(net_bid, net_ask, side, order.smart_limit.final_price_pct)
-        ladder = build_price_ladder(mid, final_price, order.smart_limit.get_step_count())
-        initial_price = round_to_tick(ladder[0], tick, side=side)
+        tick = infer_tick_size(net_best, net_fastest)
+        mid = compute_mid(net_best, net_fastest)
+        final_signed = compute_final_price_from_mid(mid, net_fastest, smart_limit.final_price_pct)
+        ladder = build_price_ladder(mid, final_signed, smart_limit.get_step_count())
+        initial_signed = round_to_tick(ladder[0], tick, side="buy")
 
-        order.limit_price = initial_price
-        order._smart_limit_state = {
+        initial_type = "even" if abs(initial_signed) < 1e-9 else ("debit" if initial_signed > 0 else "credit")
+        initial_price: float | None = abs(initial_signed) if initial_type != "even" else 0.0
+        broker_name = str(getattr(self.broker, "name", "")).lower()
+        if initial_type == "even" and broker_name == "tradier":
+            initial_price = None
+
+        duration = kwargs.get("duration") or kwargs.get("time_in_force")
+        if not duration:
+            duration = "day" if all(o.asset.asset_type == "option" for o in child_orders) else (
+                getattr(child_orders[0], "time_in_force", None) or "day"
+            )
+
+        state = {
             "created_at": time.monotonic(),
             "step_index": 0,
-            "steps": order.smart_limit.get_step_count(),
-            "step_seconds": order.smart_limit.get_step_seconds(),
-            "final_hold_seconds": order.smart_limit.get_final_hold_seconds(),
+            "steps": smart_limit.get_step_count(),
+            "step_seconds": smart_limit.get_step_seconds(),
+            "final_hold_seconds": smart_limit.get_final_hold_seconds(),
+            "multileg_order_type": initial_type,
         }
 
-        parent_order = self.broker.submit_orders(
-            order.child_orders,
-            is_multileg=True,
-            order_type=Order.OrderType.LIMIT,
-            price=initial_price,
-        )
+        submit_price = 0.0 if initial_price is None else float(initial_price)
+        submit_price_or_none = None if (initial_type == "even" and broker_name == "tradier") else submit_price
+
+        try:
+            submitted = self.broker.submit_orders(
+                child_orders,
+                is_multileg=True,
+                order_type=initial_type,
+                duration=duration,
+                price=submit_price_or_none,
+            )
+        except Exception as exc:
+            self.log_message(
+                f"[SMART_LIMIT] Multi-leg submit failed for type={initial_type} ({exc}); retrying as limit.",
+                color="yellow",
+            )
+            submitted = self.broker.submit_orders(
+                child_orders,
+                is_multileg=True,
+                order_type=Order.OrderType.LIMIT,
+                duration=duration,
+                price=submit_price,
+            )
+
+        parent_order = submitted[0] if isinstance(submitted, list) and submitted else submitted
         if parent_order is not None:
-            parent_order.smart_limit = order.smart_limit
+            parent_order.smart_limit = smart_limit
             parent_order.order_type = Order.OrderType.SMART_LIMIT
-            parent_order._smart_limit_state = order._smart_limit_state
-        return parent_order
+            parent_order._smart_limit_state = state
+            parent_order.limit_price = 0.0 if initial_price is None else float(initial_price)
+        return submitted
 
     def submit_orders(self, orders: List[Order], **kwargs):
         """[Deprecated] Submit a list of orders

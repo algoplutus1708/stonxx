@@ -118,6 +118,7 @@ We keep two canonical windows:
 | `BackdoorButterfly0DTE_2025-12-25_18-29_KAD4Qk` | (unknown) | 2025-01-01 → 2025-11-30 | (n/a) | -26% | -28.55% | -32.51% | (unknown) | (unknown) |
 | `BackdoorButterfly0DTE_2025-12-31_15-43_TWzKau` | 4.4.20 | 2025-01-01 → 2025-11-30 | 79.8 | -22% | -24.00% | -30.13% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `BackdoorButterfly0DTE_2026-01-02_10-29_HPNuUM` | 4.4.21 | 2025-01-01 → 2025-11-30 | 267.8 | -19% | -20.79% | -25.94% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTE_2026-01-02_18-52_XdYcWQ` | 4.4.21 | 2025-01-01 → 2025-11-29 | 121.6 | -21% | -23.12% | -26.42% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 5) MELI Deep Drawdown Calls
 
@@ -133,6 +134,7 @@ This strategy is **under investigation** for baseline mismatch (do not rebaselin
 |---|---:|---|---:|---:|---:|---:|---|---|
 | `MeliDeepDrawdownCalls_2025-12-25_20-38_33bGtY` | (unknown) | 2013-01-01 → 2025-12-17 | (n/a) | 131% | 7.26% | -97.78% | expected (historical anchor) | (unknown) |
 | `MeliDeepDrawdownCalls_2026-01-02_10-09_7yisFp` | 4.4.21 | 2013-01-01 → 2025-12-17 | 856.3 | -91% | -18.22% | -99.73% | under investigation | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `MeliDeepDrawdownCalls_2026-01-02_19-24_kZELl5` | 4.4.21 | 2013-01-01 → 2025-12-17 | 350.4 | 14% | 1.08% | -98.26% | under investigation (daily snapshot NBBO override) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 See: `docs/investigations/ACCURACY_AUDIT_2026-01-02.md` for the divergence notes and first-diff audit plan.
 
@@ -148,6 +150,7 @@ See: `docs/investigations/ACCURACY_AUDIT_2026-01-02.md` for the divergence notes
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
 | `BackdoorButterfly0DTESmartLimit_2026-01-02_10-34_UTFoHq` | 4.4.21 | 2025-01-01 → 2025-11-30 | 283.0 | -3% | -2.96% | -13.58% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTESmartLimit_2026-01-02_19-49_QXkWuB` | 4.4.21 | 2025-01-01 → 2025-11-29 | 107.1 | -6% | -6.2% | -13.39% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 7) SPX Short Straddle Intraday (production stall repro)
 
@@ -164,6 +167,7 @@ We keep two canonical windows:
 |---|---:|---|---:|---:|---:|---:|---|---|
 | `SPXShortStraddle_2025-12-31_17-16_Ff79Hy` | 4.4.20 | 2025-01-01 → 2025-11-30 | 104.8 | -17% | -18.99% | -28.34% | speed baseline (historical) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `SPXShortStraddle_2026-01-02_10-39_XtAwjW` | 4.4.21 | 2025-01-06 → 2025-12-25 | 516.8 | -17% | -17.81% | -33.51% | stall repro window | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `SPXShortStraddle_2026-01-02_18-51_1JvQro` | 4.4.21 | 2025-01-06 → 2025-12-24 | 63.8 | -17% | -17.5% | -33.51% | stall repro window (perf fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ## Optional: Profiling artifact (opt-in)
 

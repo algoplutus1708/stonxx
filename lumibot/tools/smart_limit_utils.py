@@ -39,10 +39,36 @@ def compute_mid(bid: float, ask: float) -> float:
 
 
 def compute_final_price(bid: float, ask: float, side: str, final_price_pct: float) -> float:
-    spread = ask - bid
+    """Compute the SMART_LIMIT final price.
+
+    `final_price_pct` is interpreted as the fraction of the bid/ask spread (from the midpoint
+    toward the aggressive edge) we're willing to traverse.
+
+    - pct=0.0 -> final stays at the midpoint (least aggressive).
+    - pct=1.0 -> final reaches the aggressive edge (buy: ask, sell: bid).
+    """
+
+    pct = float(final_price_pct)
+    if pct < 0:
+        pct = 0.0
+    elif pct > 1:
+        pct = 1.0
+
+    mid = compute_mid(bid, ask)
     if side == "buy":
-        return bid + spread * final_price_pct
-    return ask - spread * final_price_pct
+        return mid + (ask - mid) * pct
+    return mid + (bid - mid) * pct
+
+
+def compute_final_price_from_mid(mid: float, aggressive_price: float, final_price_pct: float) -> float:
+    """Final price from a midpoint toward an 'aggressive' edge price."""
+
+    pct = float(final_price_pct)
+    if pct < 0:
+        pct = 0.0
+    elif pct > 1:
+        pct = 1.0
+    return mid + (aggressive_price - mid) * pct
 
 
 def build_price_ladder(mid: float, final_price: float, step_count: int) -> List[float]:

@@ -52,12 +52,23 @@ Yahoo (parity check):
 - Fill sanity:
   - Option marks/quotes appear bid/ask-driven; no mid-price “cheating” observed for market fills.
 
+Perf regression follow-up:
+- Run id: `BackdoorButterfly0DTE_2026-01-02_18-52_XdYcWQ`
+- Strategy CAGR ≈ `-23.12%` (same “regular fill punishment” story).
+- Runtime: ~2m (regression fixed; prior 4.4.21 run was ~4m+ on the same window).
+
 ## Backdoor Butterfly 0DTE (SmartLimit)
 
 - Run id: `BackdoorButterfly0DTESmartLimit_2026-01-02_10-34_UTFoHq`
 - Strategy CAGR ≈ `-2.96%` (SmartLimit improves results vs regular fills, as expected).
 - Fill sanity:
   - SmartLimit behavior appears to use quote-derived mid + slippage (net multi-leg), not bid/ask worst-case.
+
+Perf regression follow-up:
+- Run id: `BackdoorButterfly0DTESmartLimit_2026-01-02_19-49_QXkWuB`
+- Strategy CAGR ≈ `-6.2%` (still materially better than regular fills; exact value can vary run-to-run).
+- Runtime: ~1m50 (regression fixed vs the earlier ~4m+ SmartLimit run).
+- Notable: late-window SPX minute bars around the Thanksgiving/half-day period can be missing; the strategy logs “no SPX data available” for signal computation, but completes and produces artifacts.
 
 ## MELI Deep Drawdown Calls
 
@@ -72,7 +83,14 @@ Yahoo (parity check):
   - Prior “known-good” artifact `MeliDeepDrawdownCalls_2025-12-25_20-38_33bGtY_tearsheet.csv` reports Strategy CAGR ≈ `+7.26%`.
   - This run reports Strategy CAGR ≈ `-18.22%`.
   - Trade list diverges materially starting in 2021 (expiration selection differs for some entries).
-  - Hypothesis: expiration validation now prefers actionable intraday NBBO snapshots, changing which expirations are considered tradeable at historical dates. This should improve realism, but it changes results and should be explicitly re-baselined if accepted.
+- Hypothesis: expiration validation now prefers actionable intraday NBBO snapshots, changing which expirations are considered tradeable at historical dates. This should improve realism, but it changes results and should be explicitly re-baselined if accepted.
+
+Daily-cadence pricing realism follow-up:
+- Run id: `MeliDeepDrawdownCalls_2026-01-02_19-24_kZELl5`
+- Strategy CAGR ≈ `+1.08%` (improved vs the “bad” run; still below the historical anchor).
+- Runtime: ~6m
+- Key finding: the historical anchor enters a ~3-month call (e.g., `2021-06-18`) even though the strategy targets ~270-day expirations; the newer behavior selects longer-dated expirations (e.g., `2022-01-21`), which is more consistent with the strategy’s intent.
+- This is treated as **under investigation** until we decide whether to rebaseline MELI metrics.
 
 ## SPX Short Straddle Intraday
 
@@ -81,3 +99,7 @@ Yahoo (parity check):
 - Stall sanity:
   - No “silent” wedges observed locally.
   - Queue client emits submit/result logs continuously; in production, the same codepath emits heartbeat logs during longer waits (to avoid silent stalls).
+
+Perf regression follow-up:
+- Run id: `SPXShortStraddle_2026-01-02_18-51_1JvQro`
+- Runtime: ~1m04 on the stall repro window (speed parity restored locally).
