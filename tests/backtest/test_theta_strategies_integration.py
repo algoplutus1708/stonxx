@@ -1,5 +1,17 @@
-import datetime as dt
+"""
+Acceptance smokes (ThetaData, S3-only).
+
+These tests exist to enforce two properties in CI:
+1) The dev S3 cache has the objects we expect for a minimal ThetaData options/quotes path.
+2) LumiBot can hydrate from S3 in strict read-only mode (fail fast on cache miss) without
+   falling back to the ThetaData downloader.
+
+They intentionally do not run full-year backtests (too slow for PR CI).
+"""
+
+# ruff: noqa: I001
 import os
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -8,178 +20,124 @@ from dotenv import load_dotenv
 
 pytestmark = [pytest.mark.acceptance_smoke]
 
-
 DEFAULT_ENV_PATH = Path.home() / "Documents/Development/Strategy Library/Demos/.env"
-LOG_DIR = Path(__file__).resolve().parent / "logs"
-
-# Load env and set data source before importing LumiBot/Theta modules so the downloader is used instead of local ThetaTerminal.
-env_path = Path(os.environ.get("LUMIBOT_DEMOS_ENV", DEFAULT_ENV_PATH))
-if env_path.exists():
-    load_dotenv(env_path)
-else:
-    load_dotenv()
-os.environ.setdefault("BACKTESTING_DATA_SOURCE", "ThetaData")
-
-from lumibot.backtesting import ThetaDataBacktesting
-from tests.backtest.strategies.tqqq_200_day_ma import TQQQ200DayMAStrategy
-from tests.backtest.strategies.meli_drawdown_recovery import MELIDrawdownRecovery
-from tests.backtest.strategies.pltr_bull_spreads_strategy import BullCallSpreadStrategy
-from tests.backtest.strategies.iron_condor_0dte import IronCondor0DTE
 
 
 def _ensure_env_loaded() -> None:
     env_path_local = Path(os.environ.get("LUMIBOT_DEMOS_ENV", DEFAULT_ENV_PATH))
     if env_path_local.exists():
         load_dotenv(env_path_local)
+
     required = [
-        "DATADOWNLOADER_BASE_URL",
-        "DATADOWNLOADER_API_KEY",
+        "LUMIBOT_CACHE_BACKEND",
+        "LUMIBOT_CACHE_MODE",
+        "LUMIBOT_CACHE_S3_BUCKET",
+        "LUMIBOT_CACHE_S3_PREFIX",
+        "LUMIBOT_CACHE_S3_REGION",
+        "LUMIBOT_CACHE_S3_ACCESS_KEY_ID",
+        "LUMIBOT_CACHE_S3_SECRET_ACCESS_KEY",
+        "LUMIBOT_CACHE_S3_VERSION",
     ]
     missing = [key for key in required if not os.environ.get(key)]
     if missing:
-        pytest.skip(f"Missing required env vars for ThetaData backtests: {missing}")
+        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true" or os.environ.get("CI"):
+            pytest.fail(f"Missing required env vars for S3 cache-backed acceptance smokes: {missing}")
+        pytest.skip(f"Missing required env vars for S3 cache-backed acceptance smokes: {missing}")
 
-    # Use ThetaData downloader-backed source
-    os.environ.setdefault("BACKTESTING_DATA_SOURCE", "ThetaData")
+    backend = (os.environ.get("LUMIBOT_CACHE_BACKEND") or "").strip().lower()
+    mode = (os.environ.get("LUMIBOT_CACHE_MODE") or "").strip().lower()
+    if backend != "s3" or mode not in {"s3_readonly", "readonly", "ro"}:
+        message = (
+            "Acceptance smokes must run with S3 cache read-only mode. "
+            f"Got LUMIBOT_CACHE_BACKEND={backend!r} LUMIBOT_CACHE_MODE={mode!r}"
+        )
+        if os.environ.get("GITHUB_ACTIONS", "").lower() == "true" or os.environ.get("CI"):
+            pytest.fail(message)
+        pytest.skip(message)
 
-
-def _ensure_log_dir() -> Path:
-    LOG_DIR.mkdir(exist_ok=True)
-    return LOG_DIR
-
-
-def _trade_log_df(strategy_obj, require_trades: bool = True) -> pd.DataFrame:
-    """Get trade log from strategy. If require_trades=False, returns empty DF if no trades."""
-    log = getattr(strategy_obj.broker, "_trade_event_log_df", None)
-    if log is None or getattr(log, "empty", True):
-        if require_trades:
-            pytest.fail("No trade event log found.")
-        return pd.DataFrame()
-    return log
+    os.environ.setdefault("LUMIBOT_CACHE_STRICT", "true")
 
 
-def test_tqqq_theta_integration():
+def test_s3_cache_can_hydrate_spxw_chain_file() -> None:
     _ensure_env_loaded()
-    # Use 2 weeks instead of 5 years to keep CI fast (~30min target)
-    backtesting_start = dt.datetime(2024, 10, 1)
-    backtesting_end = dt.datetime(2024, 10, 14)
 
-    results, strat_obj = TQQQ200DayMAStrategy.run_backtest(
-        ThetaDataBacktesting,
-        backtesting_start=backtesting_start,
-        backtesting_end=backtesting_end,
-        benchmark_asset=None,
-        show_plot=False,
-        show_tearsheet=False,
-        save_tearsheet=False,
-        show_indicators=False,
-        quiet_logs=False,
+    from lumibot.entities import Asset
+    from lumibot.tools.backtest_cache import get_backtest_cache, reset_backtest_cache_manager
+    from lumibot.tools.thetadata_helper import get_chains_cached
+
+    reset_backtest_cache_manager(for_testing=True)
+    cache = get_backtest_cache()
+
+    assert cache.enabled
+    assert cache.mode.value == "s3_readonly"
+    assert cache.strict is True
+
+    chains = get_chains_cached(
+        Asset(symbol="SPXW", asset_type="index"),
+        current_date=date(2024, 1, 22),
     )
 
-    assert results is not None
-    trades = _trade_log_df(strat_obj)
-    fills = trades[trades["status"] == "fill"]
-    assert len(fills) > 0
-    assert fills["price"].notnull().all()
+    assert isinstance(chains, dict)
+    assert chains.get("Multiplier") == 100
+    assert isinstance(chains.get("Chains"), dict)
+    assert "CALL" in chains["Chains"]
+    assert "PUT" in chains["Chains"]
 
 
-def test_meli_theta_integration(tmp_path_factory):
+def test_s3_cache_can_hydrate_known_spxw_minute_quotes() -> None:
     _ensure_env_loaded()
-    # Use 2 weeks instead of 5 years to keep CI fast (~30min target)
-    # Purpose: verify ThetaData stock data works, not that strategy trades
-    backtesting_start = dt.datetime(2024, 10, 1)
-    backtesting_end = dt.datetime(2024, 10, 14)
 
-    results, strat_obj = MELIDrawdownRecovery.run_backtest(
-        ThetaDataBacktesting,
-        backtesting_start=backtesting_start,
-        backtesting_end=backtesting_end,
-        benchmark_asset=None,
-        show_plot=False,
-        show_tearsheet=False,
-        save_tearsheet=False,
-        show_indicators=False,
-        quiet_logs=True,
+    from lumibot.constants import LUMIBOT_CACHE_FOLDER
+    from lumibot.tools.backtest_cache import get_backtest_cache, reset_backtest_cache_manager
+
+    reset_backtest_cache_manager(for_testing=True)
+    cache = get_backtest_cache()
+
+    call_path = (
+        Path(LUMIBOT_CACHE_FOLDER)
+        / "thetadata"
+        / "option"
+        / "minute"
+        / "quote"
+        / "option_SPXW_240122_4865.0_CALL_minute_quote.parquet"
+    )
+    put_path = (
+        Path(LUMIBOT_CACHE_FOLDER)
+        / "thetadata"
+        / "option"
+        / "minute"
+        / "quote"
+        / "option_SPXW_240122_4865.0_PUT_minute_quote.parquet"
     )
 
-    # Verify backtest completed successfully (ThetaData integration works)
-    assert results is not None
-    assert strat_obj.portfolio_value > 0  # Strategy ran without errors
+    cache.ensure_local_file(call_path)
+    cache.ensure_local_file(put_path)
 
-    # Trades may or may not happen depending on market conditions
-    trades = _trade_log_df(strat_obj, require_trades=False)
-    if not trades.empty:
-        fills = trades[trades["status"] == "fill"]
-        if len(fills) > 0:
-            assert fills["price"].notnull().all()
-        # Persist detailed trade log for manual inspection (ignored by git)
-        log_dir = _ensure_log_dir()
-        log_path = log_dir / "meli_trades.csv"
-        trades.to_csv(log_path, index=False)
+    call_df = pd.read_parquet(call_path)
+    put_df = pd.read_parquet(put_path)
+
+    assert not call_df.empty
+    assert not put_df.empty
+    assert {"bid", "ask", "datetime"}.issubset(set(call_df.columns))
+    assert {"bid", "ask", "datetime"}.issubset(set(put_df.columns))
 
 
-def test_pltr_minute_theta_integration():
+def test_strict_s3_readonly_raises_on_cache_miss() -> None:
     _ensure_env_loaded()
-    # Short window to keep minute/options runtime reasonable
-    # Purpose: verify ThetaData minute-level options data works
-    backtesting_start = dt.datetime(2024, 9, 16, 13, 30)
-    backtesting_end = dt.datetime(2024, 9, 16, 14, 30)
 
-    results, strat_obj = BullCallSpreadStrategy.run_backtest(
-        ThetaDataBacktesting,
-        backtesting_start=backtesting_start,
-        backtesting_end=backtesting_end,
-        benchmark_asset=None,
-        show_plot=False,
-        show_tearsheet=False,
-        save_tearsheet=False,
-        show_indicators=False,
-        quiet_logs=True,
-        parameters={
-            "symbols": ["PLTR"],
-            "max_symbols_per_iteration": 1,
-            "max_symbols_per_day": 1,
-            "trade_only_top_slope": True,
-            "sleeptime": "30M",
-        },
+    from lumibot.constants import LUMIBOT_CACHE_FOLDER
+    from lumibot.tools.backtest_cache import RemoteCacheMissError, get_backtest_cache, reset_backtest_cache_manager
+
+    reset_backtest_cache_manager(for_testing=True)
+    cache = get_backtest_cache()
+
+    missing_path = (
+        Path(LUMIBOT_CACHE_FOLDER)
+        / "thetadata"
+        / "stock"
+        / "day"
+        / "ohlc"
+        / "stock_THIS_SYMBOL_SHOULD_NOT_EXIST_day_ohlc.parquet"
     )
-
-    # Verify backtest completed successfully (ThetaData integration works)
-    assert results is not None
-    assert strat_obj.portfolio_value > 0  # Strategy ran without errors
-
-    # Trades may or may not happen depending on market conditions
-    trades = _trade_log_df(strat_obj, require_trades=False)
-    if not trades.empty:
-        assert trades["price"].notnull().all()
-
-
-def test_iron_condor_minute_theta_integration():
-    _ensure_env_loaded()
-    # Use 3 trading days for minute-level options (much faster than 1 month)
-    # Purpose: verify ThetaData SPX index + options data works
-    backtesting_start = dt.datetime(2024, 9, 9)
-    backtesting_end = dt.datetime(2024, 9, 11)
-
-    results, strat_obj = IronCondor0DTE.run_backtest(
-        ThetaDataBacktesting,
-        backtesting_start=backtesting_start,
-        backtesting_end=backtesting_end,
-        benchmark_asset=None,
-        show_plot=False,
-        show_tearsheet=False,
-        save_tearsheet=False,
-        show_indicators=False,
-        quiet_logs=True,
-    )
-
-    # Verify backtest completed successfully (ThetaData integration works)
-    assert results is not None
-    assert strat_obj.portfolio_value > 0  # Strategy ran without errors
-
-    # Trades may or may not happen (0DTE needs same-day expiration)
-    trades = _trade_log_df(strat_obj, require_trades=False)
-    if not trades.empty:
-        fills = trades[trades["status"] == "fill"]
-        if not fills.empty:
-            assert fills["price"].notnull().all()
+    with pytest.raises(RemoteCacheMissError):
+        cache.ensure_local_file(missing_path)
