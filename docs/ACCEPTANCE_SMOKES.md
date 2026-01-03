@@ -1,12 +1,12 @@
-# Acceptance Smoke Tests (ThetaData, S3-only)
+# Acceptance Smoke Tests (ThetaData, warm-cache gate)
 
 This repo contains a small set of **fast ThetaData smokes** that serve as a release gate.
 
 These are intentionally **not** the full Strategy Library acceptance suite (manual, long-window).
 The CI smokes are designed to be:
-- **S3-only** (read from the dev cache bucket)
-- **read-only** (never write to S3 in CI)
-- **strict** (fail fast on cache miss; no fallback to downloader/ThetaData)
+- **warm-cache gate**: they should be fully served from the dev S3 cache
+- **prod-like config**: downloader creds are configured (as in production), but the tests must fail
+  if they actually try to use the downloader queue (cache miss / fallback)
 
 They exist to catch obvious regressions in:
 - S3 cache hydration path (parquet downloads + schema expectations)
@@ -27,20 +27,22 @@ cd "/Users/robertgrzesik/Documents/Development/lumivest_bot_server/strategies/lu
 
 /Users/robertgrzesik/bin/safe-timeout 1800s env \\
   LUMIBOT_CACHE_BACKEND=s3 \\
-  LUMIBOT_CACHE_MODE=s3_readonly \\
-  LUMIBOT_CACHE_STRICT=true \\
+  LUMIBOT_CACHE_MODE=s3_readwrite \\
   LUMIBOT_CACHE_S3_BUCKET="..." \\
   LUMIBOT_CACHE_S3_PREFIX="..." \\
   LUMIBOT_CACHE_S3_REGION="..." \\
   LUMIBOT_CACHE_S3_VERSION="..." \\
   LUMIBOT_CACHE_S3_ACCESS_KEY_ID="..." \\
   LUMIBOT_CACHE_S3_SECRET_ACCESS_KEY="..." \\
+  DATADOWNLOADER_BASE_URL="http://data-downloader.lumiwealth.com:8080" \\
+  DATADOWNLOADER_API_KEY="..." \\
   python3 -m pytest -q -m acceptance_smoke tests/backtest/test_theta_strategies_integration.py
 ```
 
 Tip: if you already have these set in `Strategy Library/Demos/.env`, you can run:
 `LUMIBOT_DEMOS_ENV="/Users/robertgrzesik/Documents/Development/Strategy Library/Demos/.env"`.
-If your local `.env` uses `LUMIBOT_CACHE_MODE=readwrite`, override it to `s3_readonly` for smokes.
+If you prefer, you can use `LUMIBOT_CACHE_MODE=s3_readonly` in CI; the smokes are expected to not
+write when the cache is warm.
 
 ## CI
 
