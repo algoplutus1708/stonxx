@@ -1938,6 +1938,11 @@ def get_price_data(
 
     if cache_manager.enabled:
         try:
+            from lumibot.tools.backtest_cache import RemoteCacheMissError
+        except Exception:
+            RemoteCacheMissError = None  # type: ignore[assignment]
+
+        try:
             fetched_remote = cache_manager.ensure_local_file(cache_file, payload=remote_payload)
             if fetched_remote:
                 logger.debug(
@@ -1948,6 +1953,9 @@ def get_price_data(
                     cache_file,
                 )
         except Exception as exc:
+            # In strict cache mode, a miss must fail the run instead of falling back to the downloader.
+            if RemoteCacheMissError is not None and isinstance(exc, RemoteCacheMissError):
+                raise
             logger.debug(
                 "[THETA][DEBUG][CACHE][REMOTE_DOWNLOAD_ERROR] asset=%s cache_file=%s error=%s",
                 asset,
@@ -2383,7 +2391,33 @@ def get_price_data(
             result_frame = _align_day_index_to_market_close_utc(result_frame)
         return result_frame
 
-    logger.info("ThetaData cache MISS for %s %s %s; fetching %d interval(s) from ThetaTerminal.", asset, timespan, datastyle, len(missing_dates))
+    # STRICT CACHE MODE: In CI acceptance smokes we want to prove the S3 cache is complete and
+    # avoid hammering the downloader. If anything is missing, fail fast with a clear message.
+    try:
+        from lumibot.tools.backtest_cache import CacheMode
+    except Exception:
+        CacheMode = None  # type: ignore[assignment]
+
+    if (
+        CacheMode is not None
+        and cache_manager.enabled
+        and cache_manager.strict
+        and cache_manager.mode == CacheMode.S3_READONLY
+    ):
+        first_missing = missing_dates[0] if missing_dates else None
+        last_missing = missing_dates[-1] if missing_dates else None
+        raise RuntimeError(
+            f"[THETA][CACHE][STRICT] Cache miss for {asset} {timespan} {datastyle}; "
+            f"missing_intervals={len(missing_dates)} first={first_missing} last={last_missing}"
+        )
+
+    logger.info(
+        "ThetaData cache MISS for %s %s %s; fetching %d interval(s) from ThetaTerminal.",
+        asset,
+        timespan,
+        datastyle,
+        len(missing_dates),
+    )
 
     # DEBUG-LOG: Cache miss
     logger.debug(
@@ -5191,17 +5225,26 @@ def get_chains_cached(
     # - Reuse across days is still handled by the local folder scan (tolerance window) once at
     #   least one file exists on disk during the current run.
     try:
-        from lumibot.tools.backtest_cache import get_backtest_cache
+        from lumibot.tools.backtest_cache import RemoteCacheMissError, get_backtest_cache
 
+        cache_manager = get_backtest_cache()
         if not cache_file.exists():
-            get_backtest_cache().ensure_local_file(cache_file)
+            try:
+                cache_manager.ensure_local_file(cache_file)
+            except RemoteCacheMissError:
+                raise
+            except Exception:
+                logger.debug(
+                    "[THETA][CHAIN_CACHE] Remote cache hydrate failed for %s on %s",
+                    asset.symbol,
+                    current_date,
+                    exc_info=True,
+                )
+    except RemoteCacheMissError:
+        raise
     except Exception:
-        logger.debug(
-            "[THETA][CHAIN_CACHE] Remote cache hydrate failed for %s on %s",
-            asset.symbol,
-            current_date,
-            exc_info=True,
-        )
+        # Ignore remote cache hydrate failures in non-strict mode.
+        pass
 
     constraints = chain_constraints or {}
     hint_present = any(
@@ -5288,6 +5331,27 @@ def get_chains_cached(
             return data
 
     # 4) No suitable file => fetch from ThetaData using exp=0 chain builder
+    #
+    # STRICT CACHE MODE: In CI acceptance smokes we want to prove S3 cache coverage and avoid
+    # hitting the downloader. If no suitable chain file exists locally after S3 hydration,
+    # fail fast instead of building from Theta.
+    try:
+        from lumibot.tools.backtest_cache import CacheMode, get_backtest_cache
+    except Exception:
+        CacheMode = None  # type: ignore[assignment]
+        get_backtest_cache = None  # type: ignore[assignment]
+
+    if CacheMode is not None and get_backtest_cache is not None:  # type: ignore[truthy-bool]
+        cache_manager = get_backtest_cache()
+        if (
+            cache_manager.enabled
+            and cache_manager.strict
+            and cache_manager.mode == CacheMode.S3_READONLY
+        ):
+            raise RuntimeError(
+                f"[THETA][CHAIN_CACHE][STRICT] Missing chain cache for {asset.symbol} on {current_date}"
+            )
+
     logger.debug(
         f"No suitable cache file found for {asset.symbol} on {current_date}; building historical chain."
     )

@@ -25,6 +25,7 @@ class CacheMode(str, Enum):
 class BacktestCacheSettings:
     backend: str
     mode: CacheMode
+    strict: bool = False
     bucket: Optional[str] = None
     prefix: str = ""
     region: Optional[str] = None
@@ -37,6 +38,8 @@ class BacktestCacheSettings:
     def from_env(env: Dict[str, Optional[str]]) -> Optional["BacktestCacheSettings"]:
         backend = (env.get("backend") or "local").strip().lower()
         mode_raw = (env.get("mode") or "disabled").strip().lower()
+        strict_raw = (env.get("strict") or os.environ.get("LUMIBOT_CACHE_STRICT") or "false").strip().lower()
+        strict = strict_raw in ("1", "true", "yes", "y", "on")
 
         if backend != "s3":
             return None
@@ -71,6 +74,7 @@ class BacktestCacheSettings:
         return BacktestCacheSettings(
             backend=backend,
             mode=mode,
+            strict=strict,
             bucket=bucket,
             prefix=prefix,
             region=region,
@@ -83,6 +87,14 @@ class BacktestCacheSettings:
 
 class _StubbedS3ErrorCodes:
     NOT_FOUND = {"404", "400", "NoSuchKey", "NotFound"}
+
+
+class RemoteCacheMissError(FileNotFoundError):
+    def __init__(self, *, bucket: str, remote_key: str, local_path: Path) -> None:
+        super().__init__(f"Remote cache miss: s3://{bucket}/{remote_key} -> {local_path.as_posix()}")
+        self.bucket = bucket
+        self.remote_key = remote_key
+        self.local_path = local_path
 
 
 class BacktestCacheManager:
@@ -127,6 +139,10 @@ class BacktestCacheManager:
         if not self.enabled:
             return CacheMode.DISABLED
         return self._settings.mode  # type: ignore[return-value]
+
+    @property
+    def strict(self) -> bool:
+        return bool(self._settings and self._settings.strict)
 
     def ensure_local_file(
         self,
@@ -243,6 +259,13 @@ class BacktestCacheManager:
                     pass
                 with self._stats_lock:
                     self._stats["misses"] += 1.0
+                # STRICT MODE: In CI we want to *fail fast* instead of falling back to the downloader.
+                if self.mode == CacheMode.S3_READONLY and self.strict and self._settings:
+                    raise RemoteCacheMissError(
+                        bucket=self._settings.bucket or "unknown",
+                        remote_key=remote_key,
+                        local_path=local_path,
+                    ) from exc
                 return False
             raise
 
