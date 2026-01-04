@@ -2,6 +2,16 @@
 
 These rules are mandatory whenever you work on ThetaData integrations.
 
+## Multi-Agent Collaboration (CRITICAL)
+This repo is frequently edited by **multiple AI sessions**. To avoid lost work:
+
+- **Stay on the release branch:** work only on branch `4.4.25` for this release; do not create new branches/PRs.
+- **Never run `git checkout`.** Avoid other destructive operations (`git reset --hard`, `git clean -f`, `git stash`).
+- **Before committing:** `git status` must be clean/understood; read diffs for any changes you didn’t personally create.
+- **Avoid stepping on the CI agent:** if `tests/backtest/`, baselines, or CI workflows are in-flight, coordinate via `docs/handoffs/` and keep edits non-overlapping.
+- **Document + test behavioral changes:** update the relevant docs in `docs/` and add regression tests in the same commit; add comments explaining “why/invariants” for non-obvious logic.
+- **Cache safety:** never delete shared caches. Use S3 namespace versioning (e.g., `LUMIBOT_CACHE_S3_VERSION=...`) for cold-cache simulations; only delete cache objects when explicitly requested and tightly scoped (symbol/version-specific).
+
 1. **Never launch ThetaTerminal locally WITH PRODUCTION CREDENTIALS.** Production has the only licensed session for that account. Starting the jar with prod credentials (even briefly or via Docker) instantly terminates the prod connection and halts all customers.
 2. **Use the shared downloader endpoint for backtests.** All tests/backtests must set `DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080` and `DATADOWNLOADER_API_KEY=<secret>`. Do not short-cut by hitting Theta directly (and avoid hard-coded IPs—they can change on redeploy).
 

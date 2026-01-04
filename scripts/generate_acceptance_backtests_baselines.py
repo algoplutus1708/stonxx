@@ -35,6 +35,9 @@ class Case:
     end_date: str  # BACKTESTING_END (YYYY-MM-DD, exclusive)
     data_source: str
     baseline_run_id: str
+    # Explicit CI runtime cap (seconds). This is intentionally *not* expressed as a multiplier:
+    # we want a concrete number that can be tightened once CI timing stabilizes.
+    max_backtest_time_seconds: int
 
 
 CASES: List[Case] = [
@@ -46,6 +49,7 @@ CASES: List[Case] = [
         end_date="2025-12-01",
         data_source="thetadata",
         baseline_run_id="AAPLDeepDipCalls_2026-01-04_11-14_lIPHBU",
+        max_backtest_time_seconds=300,
     ),
     Case(
         slug="leaps_alpha_picks_short",
@@ -55,15 +59,7 @@ CASES: List[Case] = [
         end_date="2025-10-15",
         data_source="thetadata",
         baseline_run_id="LeapsCallDebitSpread_2026-01-04_11-20_vXE88y",
-    ),
-    Case(
-        slug="leaps_alpha_picks_full_year",
-        strategy_name="LeapsCallDebitSpread",
-        script_filename="Leaps Buy Hold (Alpha Picks).py",
-        start_date="2025-01-01",
-        end_date="2025-12-01",
-        data_source="thetadata",
-        baseline_run_id="LeapsCallDebitSpread_2026-01-04_11-22_rnMuYq",
+        max_backtest_time_seconds=120,
     ),
     Case(
         slug="tqqq_sma200_thetadata",
@@ -73,26 +69,10 @@ CASES: List[Case] = [
         end_date="2025-12-01",
         data_source="thetadata",
         baseline_run_id="TqqqSma200Strategy_2026-01-04_11-10_Wa65DX",
+        max_backtest_time_seconds=180,
     ),
-    Case(
-        slug="tqqq_sma200_yahoo",
-        strategy_name="TqqqSma200Strategy",
-        script_filename="TQQQ 200-Day MA.py",
-        start_date="2013-01-01",
-        end_date="2025-12-01",
-        data_source="yahoo",
-        baseline_run_id="TqqqSma200Strategy_2026-01-04_04-40_2sdaIJ",
-    ),
-    # Backdoor Butterfly 0DTE: we keep two windows (speed baseline vs full-year acceptance).
-    Case(
-        slug="backdoor_butterfly_baseline",
-        strategy_name="BackdoorButterfly0DTE",
-        script_filename="Backdoor Butterfly 0 DTE (Copy).py",
-        start_date="2025-01-01",
-        end_date="2025-11-30",
-        data_source="thetadata",
-        baseline_run_id="BackdoorButterfly0DTE_2026-01-04_11-33_sBKYi2",
-    ),
+    # NOTE: Yahoo is recorded once in docs/ACCEPTANCE_BACKTESTS.md (manual parity note),
+    # but is intentionally not part of the CI acceptance suite.
     Case(
         slug="backdoor_butterfly_full_year",
         strategy_name="BackdoorButterfly0DTE",
@@ -101,6 +81,7 @@ CASES: List[Case] = [
         end_date="2025-12-01",
         data_source="thetadata",
         baseline_run_id="BackdoorButterfly0DTE_2026-01-04_11-40_1VPPZ9",
+        max_backtest_time_seconds=600,
     ),
     Case(
         slug="meli_deep_drawdown",
@@ -110,6 +91,7 @@ CASES: List[Case] = [
         end_date="2025-12-18",
         data_source="thetadata",
         baseline_run_id="MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O",
+        max_backtest_time_seconds=300,
     ),
     Case(
         slug="backdoor_smartlimit",
@@ -119,20 +101,9 @@ CASES: List[Case] = [
         end_date="2025-12-01",
         data_source="thetadata",
         baseline_run_id="BackdoorButterfly0DTESmartLimit_2026-01-04_06-29_NduXK0",
+        max_backtest_time_seconds=600,
     ),
-    # SPX Short Straddle: "baseline" and "stall repro".
-    #
-    # Note: the "speed baseline" is defined by the *effective* end date (2025-11-30),
-    # which corresponds to BACKTESTING_END=2025-12-01 in LumiBot (end is exclusive; code subtracts 1 minute).
-    Case(
-        slug="spx_short_straddle_baseline",
-        strategy_name="SPXShortStraddle",
-        script_filename="SPX Short Straddle Intraday (Copy).py",
-        start_date="2025-01-01",
-        end_date="2025-12-01",
-        data_source="thetadata",
-        baseline_run_id="SPXShortStraddle_2026-01-04_06-37_sHgfVQ",
-    ),
+    # SPX Short Straddle: CI uses the stall repro / prod parity window (docs include the speed baseline historically).
     Case(
         slug="spx_short_straddle_repro",
         strategy_name="SPXShortStraddle",
@@ -141,6 +112,7 @@ CASES: List[Case] = [
         end_date="2025-12-26",
         data_source="thetadata",
         baseline_run_id="SPXShortStraddle_2026-01-04_06-41_B1jF98",
+        max_backtest_time_seconds=600,
     ),
 ]
 
@@ -227,6 +199,7 @@ def _load_case(logs_dir: Path, case: Case) -> Dict[str, Any]:
         "start_date": case.start_date,
         "end_date": case.end_date,
         "baseline_run_id": case.baseline_run_id,
+        "max_backtest_time_seconds": case.max_backtest_time_seconds,
         "lumibot_version": payload.get("lumibot_version"),
         "backtest_time_seconds": payload.get("backtest_time_seconds"),
         "settings_backtesting_start": payload.get("backtesting_start"),

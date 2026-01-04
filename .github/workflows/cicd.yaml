@@ -166,58 +166,15 @@ jobs:
           timeout 1500 python -m pytest -m "${PYTEST_MARKERS}" --tb=short -q --durations=30 -x $(cat shard_files.txt)
 
   backtest-tests:
-    name: Backtest Tests
+    name: Backtest Tests (shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-    environment: unit-tests
-    needs: lint
-
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Set up Python 3.10
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.10"
-          cache: pip
-
-      - name: Install dependencies
-        run: |
-          echo "Set AIOHTTP_NO_EXTENSIONS=$AIOHTTP_NO_EXTENSIONS so that aiohttp doesn't try to install C extensions"
-          python -m pip install --upgrade pip
-          pip install requests
-          pip install -r requirements_dev.txt
-
-      - name: Run backtest tests
-        run: |
-          set -euo pipefail
-          PYTEST_MARKERS='not apitest and not downloader and not acceptance_backtest'
-          timeout 1500 python -m pytest tests/backtest/ -m "${PYTEST_MARKERS}" --tb=short -q --durations=30 -x
-
-  acceptance-backtests:
-    name: Acceptance Backtests (${{ matrix.case.slug }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 30
     environment: unit-tests
     needs: lint
     strategy:
       fail-fast: false
       matrix:
-        case:
-          - slug: aapl_deep_dip_calls
-            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_aapl_deep_dip_calls
-          - slug: leaps_alpha_picks
-            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_leaps_alpha_picks
-          - slug: tqqq_sma200
-            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_tqqq_sma200
-          - slug: backdoor_butterfly
-            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_backdoor_butterfly
-          - slug: meli_deep_drawdown
-            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_meli_deep_drawdown
-          - slug: backdoor_smartlimit
-            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_backdoor_smartlimit
-          - slug: spx_short_straddle
-            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_spx_short_straddle
+        shard: [0, 1, 2, 3]
 
     steps:
       - uses: actions/checkout@v3
@@ -235,19 +192,12 @@ jobs:
           pip install requests
           pip install -r requirements_dev.txt
 
-      - name: Run acceptance backtest (Strategy Library demo)
+      - name: Run backtest tests (sharded)
         env:
-          # Match the local/manual acceptance env: ThetaData + S3 cache enabled + downloader configured.
-          IS_BACKTESTING: "true"
-          BACKTESTING_DATA_SOURCE: thetadata
-          SHOW_PLOT: "True"
-          SHOW_INDICATORS: "True"
-          SHOW_TEARSHEET: "True"
-          BACKTESTING_QUIET_LOGS: "false"
-          BACKTESTING_SHOW_PROGRESS_BAR: "true"
-          SAVE_LOGFILE: "true"
-          LUMIBOT_CACHE_BACKEND: s3
-          LUMIBOT_CACHE_MODE: readwrite
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: "4"
+          # Acceptance backtests (in tests/backtest/) require the same ThetaData + S3 secrets used locally.
+          # These env var names intentionally match Strategy Library/Demos/.env.
           LUMIBOT_CACHE_S3_BUCKET: ${{ secrets.LUMIBOT_CACHE_S3_BUCKET }}
           LUMIBOT_CACHE_S3_PREFIX: ${{ secrets.LUMIBOT_CACHE_S3_PREFIX }}
           LUMIBOT_CACHE_S3_REGION: ${{ secrets.LUMIBOT_CACHE_S3_REGION }}
@@ -256,29 +206,62 @@ jobs:
           LUMIBOT_CACHE_S3_SECRET_ACCESS_KEY: ${{ secrets.LUMIBOT_CACHE_S3_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          timeout 10800 python -m pytest -q "${{ matrix.case.nodeid }}" --tb=short --durations=30 -x
 
-      - name: Upload acceptance artifacts (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: acceptance-${{ matrix.case.slug }}-${{ github.run_id }}
-          path: |
-            tests/backtest/_acceptance_runs/**
-            tests/backtest/acceptance_backtests_baselines.json
+          PYTEST_MARKERS='not apitest and not downloader'
+          export PYTEST_MARKERS
+
+          echo "Shard ${SHARD_INDEX}/${SHARD_TOTAL} markers=${PYTEST_MARKERS}"
+
+          python - <<'PY'
+          import os
+          import subprocess
+          import sys
+
+          shard_index = int(os.environ["SHARD_INDEX"])
+          shard_total = int(os.environ["SHARD_TOTAL"])
+          markers = os.environ.get("PYTEST_MARKERS", "not apitest and not downloader")
+
+          collect_cmd = [
+              "pytest",
+              "tests/backtest/",
+              "-m",
+              markers,
+              "--collect-only",
+              "-q",
+          ]
+          proc = subprocess.run(collect_cmd, capture_output=True, text=True)
+          if proc.returncode != 0:
+              sys.stdout.write(proc.stdout)
+              sys.stderr.write(proc.stderr)
+              raise SystemExit(proc.returncode)
+
+          nodeids = [line.strip() for line in proc.stdout.splitlines() if "::" in line]
+          bins = [[] for _ in range(shard_total)]
+          for idx, nodeid in enumerate(nodeids):
+              bins[idx % shard_total].append(nodeid)
+
+          selected = bins[shard_index]
+          with open("shard_nodeids.txt", "w", encoding="utf-8") as handle:
+              handle.write("\n".join(selected))
+              handle.write("\n")
+
+          print(f"selected_nodeids={len(selected)} total_nodeids={len(nodeids)}")
+          PY
+
+          echo "Running $(wc -l shard_nodeids.txt | awk '{print $1}') nodeids"
+          timeout 1500 python -m pytest -m "${PYTEST_MARKERS}" --tb=short -q --durations=30 -x $(cat shard_nodeids.txt)
 
   LintAndTest:
     name: LintAndTest
     runs-on: ubuntu-latest
     if: always()
-    needs: [lint, unit-tests, backtest-tests, acceptance-backtests]
+    needs: [lint, unit-tests, backtest-tests]
     steps:
       - name: Check results
         run: |
           echo "lint: ${{ needs.lint.result }}"
           echo "unit-tests: ${{ needs.unit-tests.result }}"
           echo "backtest-tests: ${{ needs.backtest-tests.result }}"
-          echo "acceptance-backtests: ${{ needs.acceptance-backtests.result }}"
 
           if [ "${{ needs.lint.result }}" != "success" ]; then
             exit 1
@@ -287,8 +270,5 @@ jobs:
             exit 1
           fi
           if [ "${{ needs.backtest-tests.result }}" != "success" ]; then
-            exit 1
-          fi
-          if [ "${{ needs.acceptance-backtests.result }}" != "success" ]; then
             exit 1
           fi

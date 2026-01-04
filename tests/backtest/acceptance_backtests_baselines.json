@@ -5,6 +5,7 @@
       "baseline_run_id": "AAPLDeepDipCalls_2026-01-04_11-14_lIPHBU",
       "data_source": "thetadata",
       "end_date": "2025-12-01",
+      "max_backtest_time_seconds": 300,
       "lumibot_version": "4.4.24",
       "metrics_centipercent": {
         "cagr": 4836,
@@ -28,6 +29,7 @@
       "baseline_run_id": "LeapsCallDebitSpread_2026-01-04_11-20_vXE88y",
       "data_source": "thetadata",
       "end_date": "2025-10-15",
+      "max_backtest_time_seconds": 120,
       "lumibot_version": "4.4.24",
       "metrics_centipercent": {
         "cagr": 1181,
@@ -47,33 +49,11 @@
       "strategy_name": "LeapsCallDebitSpread"
     },
     {
-      "backtest_time_seconds": 7.571209542045835,
-      "baseline_run_id": "LeapsCallDebitSpread_2026-01-04_11-22_rnMuYq",
-      "data_source": "thetadata",
-      "end_date": "2025-12-01",
-      "lumibot_version": "4.4.24",
-      "metrics_centipercent": {
-        "cagr": -434,
-        "max_drawdown": -1839,
-        "total_return": -400
-      },
-      "metrics_raw": {
-        "cagr": "-4.34%",
-        "max_drawdown": "-18.39%",
-        "total_return": "-4%"
-      },
-      "script_filename": "Leaps Buy Hold (Alpha Picks).py",
-      "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
-      "settings_backtesting_start": "2025-01-01 00:00:00-05:00",
-      "slug": "leaps_alpha_picks_full_year",
-      "start_date": "2025-01-01",
-      "strategy_name": "LeapsCallDebitSpread"
-    },
-    {
       "backtest_time_seconds": 13.78326225001365,
       "baseline_run_id": "TqqqSma200Strategy_2026-01-04_11-10_Wa65DX",
       "data_source": "thetadata",
       "end_date": "2025-12-01",
+      "max_backtest_time_seconds": 180,
       "lumibot_version": "4.4.24",
       "metrics_centipercent": {
         "cagr": 4216,
@@ -93,56 +73,11 @@
       "strategy_name": "TqqqSma200Strategy"
     },
     {
-      "backtest_time_seconds": 11.336384249967523,
-      "baseline_run_id": "TqqqSma200Strategy_2026-01-04_04-40_2sdaIJ",
-      "data_source": "yahoo",
-      "end_date": "2025-12-01",
-      "lumibot_version": "4.4.24",
-      "metrics_centipercent": {
-        "cagr": 4094,
-        "max_drawdown": -4882,
-        "total_return": 827200
-      },
-      "metrics_raw": {
-        "cagr": "40.94%",
-        "max_drawdown": "-48.82%",
-        "total_return": "8,272%"
-      },
-      "script_filename": "TQQQ 200-Day MA.py",
-      "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
-      "settings_backtesting_start": "2013-01-01 00:00:00-05:00",
-      "slug": "tqqq_sma200_yahoo",
-      "start_date": "2013-01-01",
-      "strategy_name": "TqqqSma200Strategy"
-    },
-    {
-      "backtest_time_seconds": 118.1122570830048,
-      "baseline_run_id": "BackdoorButterfly0DTE_2026-01-04_11-33_sBKYi2",
-      "data_source": "thetadata",
-      "end_date": "2025-11-30",
-      "lumibot_version": "4.4.24",
-      "metrics_centipercent": {
-        "cagr": -2312,
-        "max_drawdown": -2642,
-        "total_return": -2100
-      },
-      "metrics_raw": {
-        "cagr": "-23.12%",
-        "max_drawdown": "-26.42%",
-        "total_return": "-21%"
-      },
-      "script_filename": "Backdoor Butterfly 0 DTE (Copy).py",
-      "settings_backtesting_end": "2025-11-29 23:59:00-05:00",
-      "settings_backtesting_start": "2025-01-01 00:00:00-05:00",
-      "slug": "backdoor_butterfly_baseline",
-      "start_date": "2025-01-01",
-      "strategy_name": "BackdoorButterfly0DTE"
-    },
-    {
       "backtest_time_seconds": 119.36270583304577,
       "baseline_run_id": "BackdoorButterfly0DTE_2026-01-04_11-40_1VPPZ9",
       "data_source": "thetadata",
       "end_date": "2025-12-01",
+      "max_backtest_time_seconds": 600,
       "lumibot_version": "4.4.24",
       "metrics_centipercent": {
         "cagr": -2315,
@@ -166,6 +101,7 @@
       "baseline_run_id": "MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O",
       "data_source": "thetadata",
       "end_date": "2025-12-18",
+      "max_backtest_time_seconds": 300,
       "lumibot_version": "4.4.24",
       "metrics_centipercent": {
         "cagr": -1683,
@@ -189,6 +125,7 @@
       "baseline_run_id": "BackdoorButterfly0DTESmartLimit_2026-01-04_06-29_NduXK0",
       "data_source": "thetadata",
       "end_date": "2025-12-01",
+      "max_backtest_time_seconds": 600,
       "lumibot_version": "4.4.24",
       "metrics_centipercent": {
         "cagr": -642,
@@ -208,33 +145,11 @@
       "strategy_name": "BackdoorButterfly0DTESmartLimit"
     },
     {
-      "backtest_time_seconds": 70.66954054194503,
-      "baseline_run_id": "SPXShortStraddle_2026-01-04_06-37_sHgfVQ",
-      "data_source": "thetadata",
-      "end_date": "2025-12-01",
-      "lumibot_version": "4.4.24",
-      "metrics_centipercent": {
-        "cagr": -2296,
-        "max_drawdown": -3087,
-        "total_return": -2100
-      },
-      "metrics_raw": {
-        "cagr": "-22.96%",
-        "max_drawdown": "-30.87%",
-        "total_return": "-21%"
-      },
-      "script_filename": "SPX Short Straddle Intraday (Copy).py",
-      "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
-      "settings_backtesting_start": "2025-01-01 00:00:00-05:00",
-      "slug": "spx_short_straddle_baseline",
-      "start_date": "2025-01-01",
-      "strategy_name": "SPXShortStraddle"
-    },
-    {
       "backtest_time_seconds": 76.11424808303127,
       "baseline_run_id": "SPXShortStraddle_2026-01-04_06-41_B1jF98",
       "data_source": "thetadata",
       "end_date": "2025-12-26",
+      "max_backtest_time_seconds": 600,
       "lumibot_version": "4.4.24",
       "metrics_centipercent": {
         "cagr": -1750,

@@ -11,7 +11,8 @@ This document is the **canonical manual acceptance suite** for LumiBot backtesti
 
 ## CI acceptance gate (source of truth)
 
-- GitHub CI runs the real Strategy Library demos via `tests/backtest/test_acceptance_backtests_ci.py`.
+- GitHub CI runs the real Strategy Library demos via `tests/backtest/test_acceptance_backtests_ci.py` as part of the
+  normal `tests/backtest/` pytest run (these are not a special workflow/job).
 - CI assertions are **strict** and driven by `tests/backtest/acceptance_backtests_baselines.json` (generated from
   `Strategy Library/logs/` via `scripts/generate_acceptance_backtests_baselines.py`).
 - When updating expected outputs: append rows here *and* update the baseline JSON from the chosen baseline `run_id`s.
@@ -73,11 +74,20 @@ Each strategy section includes:
 ### 1) AAPL Deep Dip Calls (GOOG; file name says AAPL)
 
 - File: `Demos/AAPL Deep Dip Calls (Copy 4).py`
-- Window: `2020-01-01 → 2025-12-01`
+- CI window (`BACKTESTING_START/END`): `2020-01-01 → 2025-12-01`
 - Validate:
   - trades occur in multiple “dip eras” (2020/2022/2025)
   - no obvious split-cliff behavior (GOOG mid-2022)
   - artifacts are produced (`*_trades.csv/html`, `*_stats.csv`, `*_tearsheet.html`, `*_settings.json`)
+
+#### Expected Results (ThetaData / S3 v44)
+
+- Correct Total Return = 853.00%
+- Correct CAGR = 48.36%
+- Correct Max DD = -34.30%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 75.7s
+- CI cap (seconds) <= 300
+- Baseline `run_id` = `AAPLDeepDipCalls_2026-01-04_11-14_lIPHBU`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -89,11 +99,20 @@ Each strategy section includes:
 ### 2) Alpha Picks LEAPS (Call Debit Spread)
 
 - File: `Demos/Leaps Buy Hold (Alpha Picks).py`
-- Short window: `2025-10-01 → 2025-10-15` (must trade `UBER, CLS, MFC`)
-- Full-year window: `2025-01-01 → 2025-12-01`
+- CI window (`BACKTESTING_START/END`): `2025-10-01 → 2025-10-15` (must trade `UBER, CLS, MFC`)
+- Historical / optional longer window (not in CI): `2025-01-01 → 2025-12-01`
 - Validate:
   - short window trades include both legs for `UBER`, `CLS`, and `MFC`
-  - full-year run produces artifacts (symbols may vary; log skip reasons)
+  - full-year run (when used manually) produces artifacts (symbols may vary; log skip reasons)
+
+#### Expected Results (ThetaData / S3 v44)
+
+- Correct Total Return = 0.00%
+- Correct CAGR = 11.81%
+- Correct Max DD = -1.16%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 5.4s
+- CI cap (seconds) <= 120
+- Baseline `run_id` = `LeapsCallDebitSpread_2026-01-04_11-20_vXE88y`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -108,10 +127,23 @@ Each strategy section includes:
 ### 3) TQQQ SMA200 (ThetaData vs Yahoo sanity)
 
 - File: `Demos/TQQQ 200-Day MA.py`
-- Window: `2013-01-01 → 2025-12-01`
+- CI window (`BACKTESTING_START/END`): `2013-01-01 → 2025-12-01`
 - Validate:
-  - ThetaData result is directionally similar to Yahoo (no obvious inflation/deflation)
-  - Run once with `BACKTESTING_DATA_SOURCE=thetadata` and once with `BACKTESTING_DATA_SOURCE=yahoo`
+  - ThetaData result is stable and deterministic for this window
+  - Yahoo is used only as an occasional manual parity sanity check (not run in CI)
+
+#### Expected Results (ThetaData / S3 v44)
+
+- Correct Total Return = 8,585.00%
+- Correct CAGR = 42.16%
+- Correct Max DD = -48.40%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 13.8s
+- CI cap (seconds) <= 180
+- Baseline `run_id` = `TqqqSma200Strategy_2026-01-04_11-10_Wa65DX`
+
+Yahoo one-time baseline (manual note; do not run in CI):
+- `run_id` = `TqqqSma200Strategy_2026-01-04_04-40_2sdaIJ`
+- Total Return = 8,272.00%; CAGR = 40.94%; Max DD = -48.82%; `backtest_time_seconds` = 11.3s
 
 | run_id | lumibot | data_source | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---|---:|---:|---:|---:|---|---|
@@ -130,9 +162,18 @@ Each strategy section includes:
   - no crashes due to index placeholder tails / missing history
   - artifacts produced
 
-We keep two canonical windows:
-- **Speed baseline**: `2025-01-01 → 2025-11-30` (apples-to-apples for regression tracking)
-- **Full-year acceptance**: `2025-01-01 → 2025-12-01` (release validation)
+CI uses the full-year window; the shorter window is retained only as historical speed context:
+- CI window (`BACKTESTING_START/END`): `2025-01-01 → 2025-12-01`
+- Historical / speed baseline (not in CI): `2025-01-01 → 2025-11-30`
+
+#### Expected Results (ThetaData / S3 v44)
+
+- Correct Total Return = -21.00%
+- Correct CAGR = -23.15%
+- Correct Max DD = -26.45%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 119.4s
+- CI cap (seconds) <= 600
+- Baseline `run_id` = `BackdoorButterfly0DTE_2026-01-04_11-40_1VPPZ9`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -149,12 +190,21 @@ We keep two canonical windows:
 ### 5) MELI Deep Drawdown Calls
 
 - File: `Demos/Meli Deep Drawdown Calls.py`
-- Window: `2013-01-01 → 2025-12-18`
+- CI window (`BACKTESTING_START/END`): `2013-01-01 → 2025-12-18`
 - Validate:
   - entry trades occur (drawdown-triggered buys)
   - no “sawtooth” PV caused by missing option marks (forward-fill behavior remains stable)
 
 This strategy was previously **under investigation** for baseline mismatch; CI uses the row marked `expected baseline`.
+
+#### Expected Results (ThetaData / S3 v44)
+
+- Correct Total Return = -89.00%
+- Correct CAGR = -16.83%
+- Correct Max DD = -98.96%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 38.3s
+- CI cap (seconds) <= 300
+- Baseline `run_id` = `MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | status | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -169,11 +219,20 @@ See: `docs/investigations/ACCURACY_AUDIT_2026-01-02.md` for the divergence notes
 ### 6) Backdoor Butterfly with SmartLimit
 
 - File: `Demos/Backdoor Butterfly 0 DTE (Copy) - with SMART LIMITS.py`
-- Window: `2025-01-01 → 2025-12-01`
+- CI window (`BACKTESTING_START/END`): `2025-01-01 → 2025-12-01`
 - Validate:
   - completes without stalling
   - artifacts produced
   - SmartLimit fills behave like “mid + slippage” (net multi-leg), not bid/ask worst-case
+
+#### Expected Results (ThetaData / S3 v44)
+
+- Correct Total Return = -6.00%
+- Correct CAGR = -6.42%
+- Correct Max DD = -14.88%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 120.4s
+- CI cap (seconds) <= 600
+- Baseline `run_id` = `BackdoorButterfly0DTESmartLimit_2026-01-04_06-29_NduXK0`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -188,9 +247,18 @@ See: `docs/investigations/ACCURACY_AUDIT_2026-01-02.md` for the divergence notes
   - no “silent hang” (logs continue via heartbeats while waiting)
   - run continues progressing; no permanent `download_status.active=true` without logs
 
-We keep two canonical windows:
-- **Speed baseline**: `2025-01-01 → 2025-11-30` (known fast runs exist)
-- **Stall repro / prod parity**: `2025-01-06 → 2025-12-26` (or current canonical repro)
+CI uses the stall repro / prod parity window; the shorter window is retained only as historical speed context:
+- CI window (`BACKTESTING_START/END`): `2025-01-06 → 2025-12-26`
+- Historical / speed baseline (not in CI): `2025-01-01 → 2025-12-01`
+
+#### Expected Results (ThetaData / S3 v44)
+
+- Correct Total Return = -17.00%
+- Correct CAGR = -17.50%
+- Correct Max DD = -33.51%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 76.1s
+- CI cap (seconds) <= 600
+- Baseline `run_id` = `SPXShortStraddle_2026-01-04_06-41_B1jF98`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | notes | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|

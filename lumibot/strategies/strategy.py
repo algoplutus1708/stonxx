@@ -3745,6 +3745,40 @@ class Strategy(_Strategy):
             settings["profiling_format"] = getattr(self, "_backtest_profiling_format", None)
             settings["profiling_clock"] = getattr(self, "_backtest_profiling_clock", None)
             settings["profiling_artifact"] = getattr(self, "_backtest_profiling_artifact", None)
+
+        # Non-secret telemetry (best-effort; must never crash a backtest).
+        #
+        # These fields are intentionally safe to share in artifacts:
+        # - do NOT include API keys or AWS secret keys
+        # - include only config identifiers + counters
+        try:
+            settings["datadownloader_base_url"] = os.environ.get("DATADOWNLOADER_BASE_URL")
+            settings["datadownloader_skip_local_start"] = os.environ.get("DATADOWNLOADER_SKIP_LOCAL_START")
+        except Exception:
+            pass
+
+        try:
+            from lumibot.tools.backtest_cache import get_backtest_cache
+
+            cache = get_backtest_cache()
+            settings["remote_cache"] = {
+                "backend": os.environ.get("LUMIBOT_CACHE_BACKEND"),
+                "mode": os.environ.get("LUMIBOT_CACHE_MODE"),
+                "s3_bucket": os.environ.get("LUMIBOT_CACHE_S3_BUCKET"),
+                "s3_prefix": os.environ.get("LUMIBOT_CACHE_S3_PREFIX"),
+                "s3_region": os.environ.get("LUMIBOT_CACHE_S3_REGION"),
+                "s3_version": os.environ.get("LUMIBOT_CACHE_S3_VERSION"),
+            }
+            settings["remote_cache_stats"] = cache.stats_snapshot()
+        except Exception:
+            pass
+
+        try:
+            from lumibot.tools.thetadata_queue_client import queue_telemetry_snapshot
+
+            settings["thetadata_queue_telemetry"] = queue_telemetry_snapshot()
+        except Exception:
+            pass
         os.makedirs(os.path.dirname(settings_file), exist_ok=True)
         with open(settings_file, "w") as outfile:
             json = jsonpickle.encode(settings)

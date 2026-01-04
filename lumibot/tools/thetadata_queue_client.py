@@ -32,6 +32,48 @@ from requests import exceptions as requests_exceptions
 
 logger = logging.getLogger(__name__)
 
+# Lightweight, non-secret telemetry for backtest audit/debugging.
+#
+# These counters are intended to be recorded into `*_settings.json` at the end of a backtest
+# (see Strategy.write_backtest_settings) so we can answer questions like:
+# - Did this run touch the Data Downloader at all?
+# - How many submit/status/result calls were made?
+#
+# IMPORTANT: This must never include secret values (API keys). Query params are safe to record
+# as key names only.
+_TELEMETRY_LOCK = threading.Lock()
+_TELEMETRY: Dict[str, Any] = {
+    "requests_total": 0,
+    "submit_requests": 0,
+    "status_requests": 0,
+    "result_requests": 0,
+    "stats_requests": 0,
+    "first_request_at_unix": None,
+    "first_request_kind": None,
+    "first_request_path": None,
+    "first_request_param_keys": None,
+}
+
+
+def _record_telemetry(kind: str, path: str, query_params: Optional[Dict[str, Any]] = None) -> None:
+    with _TELEMETRY_LOCK:
+        _TELEMETRY["requests_total"] = int(_TELEMETRY.get("requests_total") or 0) + 1
+        key = f"{kind}_requests"
+        if key in _TELEMETRY:
+            _TELEMETRY[key] = int(_TELEMETRY.get(key) or 0) + 1
+        if _TELEMETRY.get("first_request_at_unix") is None:
+            _TELEMETRY["first_request_at_unix"] = float(time.time())
+            _TELEMETRY["first_request_kind"] = str(kind)
+            _TELEMETRY["first_request_path"] = str(path)
+            if query_params:
+                _TELEMETRY["first_request_param_keys"] = sorted(str(k) for k in query_params.keys())
+
+
+def queue_telemetry_snapshot() -> Dict[str, Any]:
+    """Return a copy of current queue client telemetry (numbers only; safe for settings/logs)."""
+    with _TELEMETRY_LOCK:
+        return dict(_TELEMETRY)
+
 # Configuration from environment
 # Queue mode is ALWAYS enabled - it's the only way to connect to ThetaData
 # NOTE: Extremely fast polling can overwhelm the downloader (and CloudWatch) when many requests
@@ -277,6 +319,7 @@ class QueueClient:
             Server-side queue statistics
         """
         try:
+            _record_telemetry("stats", "/queue/stats")
             resp = self._get_session().get(
                 f"{self.base_url}/queue/stats",
                 headers={self.api_key_header: self.api_key},
@@ -407,6 +450,7 @@ class QueueClient:
                 ) from last_error
 
             try:
+                _record_telemetry("submit", path, query_params=query_params)
                 resp = self._get_session().post(
                     submit_url,
                     json=payload,
@@ -540,6 +584,7 @@ class QueueClient:
     def _refresh_status(self, request_id: str) -> Optional[QueuedRequestInfo]:
         """Refresh status of a request from the server."""
         try:
+            _record_telemetry("status", f"/queue/status/{request_id}")
             resp = self._get_session().get(
                 f"{self.base_url}/queue/status/{request_id}",
                 headers={self.api_key_header: self.api_key},
@@ -598,6 +643,7 @@ class QueueClient:
     def get_result(self, request_id: str) -> Tuple[Optional[Any], int, str]:
         """Get the result of a request."""
         try:
+            _record_telemetry("result", f"/queue/{request_id}/result")
             resp = self._get_session().get(
                 f"{self.base_url}/queue/{request_id}/result",
                 headers={self.api_key_header: self.api_key},

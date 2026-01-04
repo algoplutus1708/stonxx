@@ -92,6 +92,78 @@ Daily-cadence pricing realism follow-up:
 - Key finding: the historical anchor enters a ~3-month call (e.g., `2021-06-18`) even though the strategy targets ~270-day expirations; the newer behavior selects longer-dated expirations (e.g., `2022-01-21`), which is more consistent with the strategy’s intent.
 - This is treated as **under investigation** until we decide whether to rebaseline MELI metrics.
 
+### 2026-01-04 — Warm-cache baseline decision (why two MELI results exist)
+
+We observed two `4.4.24` MELI runs on the same window with materially different outcomes:
+
+- **Cold-cache / downloader-used run** (NOT valid for acceptance): `MeliDeepDrawdownCalls_2026-01-04_07-47_eHhYxI`
+  - Headline metrics: Total Return `82%`, CAGR `5.12%`, Max DD `-98.2%`
+  - Evidence of downloader usage: logs contain `Submitted to queue:` and `[THETA][QUEUE]` lines (warm-cache invariant violated)
+  - Runtime: `backtest_time_seconds ≈ 1909.9s` (slow)
+- **Warm-cache / queue-free run** (chosen baseline for acceptance/CI): `MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O`
+  - Headline metrics: Total Return `-89%`, CAGR `-16.83%`, Max DD `-98.96%`
+  - Evidence of warm-cache: logs contain **no** `Submitted to queue:` / `[THETA][QUEUE]` patterns (queue-free)
+  - Runtime: `backtest_time_seconds ≈ 38.3s` (fast)
+
+Conclusion:
+- Acceptance backtests require a **fully warm S3 cache** and must **fail** if they touch the Data Downloader.
+- Therefore, `..._y7Ap6O` is the correct baseline for CI and for the `docs/ACCEPTANCE_BACKTESTS.md` “Expected Results”.
+
+Trade-by-trade fill audit (fills only; excludes `new` order rows):
+
+#### Chosen warm-cache baseline (queue-free): MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O
+
+| time | side | qty | strike | expiration | price | type |
+|---|---|---:|---:|---|---:|---|
+| 2014-01-07 09:30:00-05:00 | buy | 25 | 120 | 2016-01-15 | 18.90 | limit |
+| 2014-01-09 09:30:00-05:00 | buy | 25 | 120 | 2016-01-15 | 18.80 | limit |
+| 2015-09-14 09:30:00-04:00 | buy | 4 | 125 | 2017-01-20 | 13.50 | limit |
+| 2016-01-08 16:00:00-05:00 | sell | 50 | 120 | 2016-01-15 | 0.25 | market |
+| 2017-01-13 09:30:00-05:00 | sell | 4 | 125 | 2017-01-20 | 47.40 | market |
+| 2018-06-07 09:30:00-04:00 | buy | 1 | 340 | 2020-01-17 | 64.30 | limit |
+| 2018-06-08 09:30:00-04:00 | buy | 1 | 340 | 2020-01-17 | 52.50 | limit |
+| 2019-11-06 09:30:00-05:00 | buy | 1 | 580 | 2021-01-15 | 71.50 | limit |
+| 2020-01-10 09:30:00-05:00 | sell | 2 | 340 | 2020-01-17 | 283.00 | market |
+| 2020-03-12 16:00:00-04:00 | buy | 4 | 600 | 2021-01-15 | 72.70 | limit |
+| 2021-01-08 09:30:00-05:00 | sell | 1 | 580 | 2021-01-15 | 1011.60 | market |
+| 2021-01-08 09:30:00-05:00 | sell | 4 | 600 | 2021-01-15 | 991.60 | market |
+| 2021-03-08 09:30:00-05:00 | buy | 13 | 1640 | 2022-01-21 | 192.90 | limit |
+| 2021-03-24 09:30:00-04:00 | buy | 14 | 1660 | 2022-01-21 | 168.00 | limit |
+| 2022-01-25 09:30:00-05:00 | buy | 1 | 1200 | 2023-01-20 | 148.50 | limit |
+| 2022-01-26 09:30:00-05:00 | buy | 1 | 1170 | 2023-01-20 | 153.90 | limit |
+| 2023-01-13 09:30:00-05:00 | sell | 1 | 1200 | 2023-01-20 | 0.50 | market |
+| 2023-01-13 09:30:00-05:00 | sell | 1 | 1170 | 2023-01-20 | 2.00 | market |
+
+#### Cold-cache / downloader-used run (NOT valid for acceptance): MeliDeepDrawdownCalls_2026-01-04_07-47_eHhYxI
+
+| time | side | qty | strike | expiration | price | type |
+|---|---|---:|---:|---|---:|---|
+| 2014-01-07 09:30:00-05:00 | buy | 25 | 120 | 2016-01-15 | 18.90 | limit |
+| 2014-01-09 09:30:00-05:00 | buy | 25 | 120 | 2016-01-15 | 18.80 | limit |
+| 2015-09-14 09:30:00-04:00 | buy | 4 | 125 | 2017-01-20 | 13.50 | limit |
+| 2016-01-11 08:30:00-05:00 | sell | 50 | 120 | 2016-01-15 | 0.25 | market |
+| 2017-01-13 09:30:00-05:00 | sell | 4 | 125 | 2017-01-20 | 49.40 | market |
+| 2018-06-07 09:30:00-04:00 | buy | 1 | 340 | 2020-01-17 | 52.50 | limit |
+| 2018-06-08 09:30:00-04:00 | buy | 1 | 340 | 2020-01-17 | 51.90 | limit |
+| 2019-11-06 09:30:00-05:00 | buy | 1 | 580 | 2021-01-15 | 69.80 | limit |
+| 2020-01-10 09:30:00-05:00 | sell | 2 | 340 | 2020-01-17 | 309.00 | market |
+| 2020-03-12 09:30:00-04:00 | buy | 4 | 600 | 2021-01-15 | 72.70 | limit |
+| 2021-01-08 09:30:00-05:00 | sell | 1 | 580 | 2021-01-15 | 1134.00 | market |
+| 2021-01-08 09:30:00-05:00 | sell | 4 | 600 | 2021-01-15 | 1114.00 | market |
+| 2021-03-08 09:30:00-05:00 | buy | 15 | 1640 | 2022-01-21 | 192.90 | limit |
+| 2021-03-24 09:30:00-04:00 | buy | 15 | 1660 | 2022-01-21 | 139.40 | limit |
+| 2021-12-01 09:30:00-05:00 | buy | 1 | 1320 | 2022-09-16 | 120.50 | limit |
+| 2022-03-14 09:30:00-04:00 | buy | 1 | 1060 | 2023-01-20 | 131.00 | limit |
+| 2022-09-09 09:30:00-04:00 | sell | 1 | 1320 | 2022-09-16 | 0.30 | market |
+| 2023-01-13 09:30:00-05:00 | sell | 1 | 1060 | 2023-01-20 | 36.70 | market |
+| 2023-01-18 09:30:00-05:00 | buy | 2 | 1280 | 2024-01-19 | 153.90 | limit |
+| 2023-01-19 09:30:00-05:00 | buy | 2 | 1280 | 2024-01-19 | 156.00 | limit |
+| 2024-01-12 09:30:00-05:00 | sell | 4 | 1280 | 2024-01-19 | 372.40 | market |
+| 2024-04-18 09:30:00-04:00 | buy | 6 | 1640 | 2025-01-17 | 115.60 | limit |
+| 2024-04-19 09:30:00-04:00 | buy | 6 | 1620 | 2025-01-17 | 110.90 | limit |
+| 2025-01-10 09:30:00-05:00 | sell | 6 | 1640 | 2025-01-17 | 119.00 | market |
+| 2025-01-10 09:30:00-05:00 | sell | 6 | 1620 | 2025-01-17 | 138.90 | market |
+
 ## SPX Short Straddle Intraday
 
 - Run id: `SPXShortStraddle_2026-01-02_10-39_XtAwjW`

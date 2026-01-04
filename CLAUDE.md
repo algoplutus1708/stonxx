@@ -6,6 +6,15 @@
 1. `docs/BACKTESTING_ARCHITECTURE.md` - Understand the backtesting data flow
 2. `AGENTS.md` - Critical rules for ThetaData (DO NOT SKIP)
 
+## Multi-Agent Collaboration (CRITICAL)
+This repo is often worked on by **multiple AI sessions** at the same time.
+
+- Work only on branch `4.4.25` for this release; do not create new branches/PRs.
+- Never run `git checkout`; avoid destructive commands (`git reset --hard`, `git clean -f`, `git stash`).
+- Before committing: `git status` must be clean/understood; read diffs for changes you didn’t personally create.
+- Coordinate via `docs/handoffs/` when touching shared areas (CI/baselines/backtest harnesses).
+- Any behavioral change must include docs updates + regression tests, with comments explaining “why/invariants”.
+
 ## Documentation Layout
 
 - `docs/` = hand-authored markdown (architecture, investigations, handoffs, ops notes)

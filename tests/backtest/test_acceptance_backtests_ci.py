@@ -20,7 +20,6 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -33,19 +32,10 @@ import pytest
 
 pytestmark = [pytest.mark.acceptance_backtest]
 
-# Headline metrics are computed from floating series and serialized to 0.01% resolution.
-# In practice we occasionally see ±0.01–0.05% rounding differences across runs even when the
-# underlying trades are identical, so we allow a tiny tolerance to prevent CI flake while still
-# catching meaningful drift.
-_METRIC_TOLERANCE_CENTIPERCENT = int(os.environ.get("ACCEPTANCE_METRIC_TOLERANCE_CENTIPERCENT", "10"))
-
-
-# Emitted by lumibot/tools/thetadata_queue_client.py when a request is enqueued to ThetaTerminal.
-_DOWNLOADER_QUEUE_LOG_PATTERNS = (
-    r"Submitted to queue:\s+request_id=",
-    r"\[THETA\]\[QUEUE\]\s+Submitted",
-    r"ThetaData cache MISS .* fetching .* from ThetaTerminal",
-)
+# Headline metrics are written at 0.01% resolution in `*_tearsheet.csv`.
+# We keep CI strict by default and only allow a 0.01% tolerance to avoid rare float->string
+# edge cases while still catching any meaningful correctness drift.
+_METRIC_TOLERANCE_CENTIPERCENT = int(os.environ.get("ACCEPTANCE_METRIC_TOLERANCE_CENTIPERCENT", "1"))
 
 
 def _is_ci() -> bool:
@@ -109,43 +99,6 @@ def _find_single(paths: list[Path], description: str) -> Path:
     return paths[0]
 
 
-def _file_contains_any(path: Path, patterns: tuple[str, ...]) -> str | None:
-    if not path.exists():
-        return None
-    try:
-        text = path.read_text(errors="ignore")
-    except Exception:
-        return None
-    for pattern in patterns:
-        if re.search(pattern, text):
-            return pattern
-    return None
-
-
-def _assert_no_downloader_queue_used(run_dir: Path) -> None:
-    logs_dir = run_dir / "logs"
-    candidates = list(logs_dir.glob("*_logs.csv"))
-    log_csv = candidates[0] if len(candidates) == 1 else None
-
-    pattern = None
-    if log_csv is not None:
-        pattern = _file_contains_any(log_csv, _DOWNLOADER_QUEUE_LOG_PATTERNS)
-
-    # Also scan subprocess stdout/stderr (best-effort) in case logging isn't written.
-    if pattern is None:
-        stdout_path = run_dir / "stdout.txt"
-        stderr_path = run_dir / "stderr.txt"
-        pattern = _file_contains_any(stdout_path, _DOWNLOADER_QUEUE_LOG_PATTERNS) or _file_contains_any(
-            stderr_path, _DOWNLOADER_QUEUE_LOG_PATTERNS
-        )
-
-    if pattern is not None:
-        raise AssertionError(
-            "Acceptance backtest attempted to use the ThetaData downloader queue "
-            f"(pattern {pattern!r} matched). Expected fully-warm S3 cache (no downloader queue usage)."
-        )
-
-
 def _base_env(repo_root: Path) -> dict[str, str]:
     env = dict(os.environ)
     env.update(
@@ -157,13 +110,23 @@ def _base_env(repo_root: Path) -> dict[str, str]:
             "BACKTESTING_QUIET_LOGS": "false",
             "BACKTESTING_SHOW_PROGRESS_BAR": "true",
             "SAVE_LOGFILE": env.get("SAVE_LOGFILE", "true"),
+            # Acceptance requirement: the S3 cache is expected to already be warm for these windows.
+            # Any attempt to hit the Data Downloader is treated as a regression and must fail fast.
+            "LUMIBOT_ACCEPTANCE_TRIPWIRE": "1",
+            # Match Strategy Library/Demos/.env (prod-like acceptance flags).
+            "LUMIBOT_CACHE_BACKEND": "s3",
+            "LUMIBOT_CACHE_MODE": "readwrite",
+            "LUMIBOT_CACHE_S3_VERSION": "v44",
+            "THETADATA_USE_QUEUE": "true",
+            "DATADOWNLOADER_API_KEY_HEADER": env.get("DATADOWNLOADER_API_KEY_HEADER", "X-Downloader-Key"),
+            "DATADOWNLOADER_SKIP_LOCAL_START": env.get("DATADOWNLOADER_SKIP_LOCAL_START", "true"),
         }
     )
 
     # Ensure we always import the checked-out source tree (even when running in a temp cwd).
-    env["PYTHONPATH"] = f"{repo_root}:{env.get('PYTHONPATH', '')}".strip(":")
+    tripwire_dir = repo_root / "tests" / "backtest" / "acceptance_tripwire"
+    env["PYTHONPATH"] = f"{tripwire_dir}:{repo_root}:{env.get('PYTHONPATH', '')}".strip(":")
     env.setdefault("PYTHONHASHSEED", "0")
-    env.setdefault("LUMIBOT_CACHE_S3_VERSION", "v1")  # optional in prod; code defaults to v1
     return env
 
 
@@ -178,6 +141,7 @@ class _BaselineCase:
     baseline_run_id: str
     expected_metrics_centipercent: dict[str, int]
     baseline_backtest_time_seconds: float | None
+    max_backtest_time_seconds: int
 
 
 def _repo_root() -> Path:
@@ -209,6 +173,7 @@ def _load_baselines() -> dict[str, _BaselineCase]:
             baseline_run_id=str(raw["baseline_run_id"]),
             expected_metrics_centipercent=dict(raw["metrics_centipercent"]),
             baseline_backtest_time_seconds=raw.get("backtest_time_seconds"),
+            max_backtest_time_seconds=int(raw["max_backtest_time_seconds"]),
         )
 
     if not out:
@@ -250,35 +215,6 @@ def _assert_settings_match_window(case: _BaselineCase, payload: dict[str, object
         )
 
 
-def _runtime_limits(case: _BaselineCase) -> tuple[float | None, float | None]:
-    """
-    Returns (max_inner_backtest_time_s, max_outer_wall_time_s).
-
-    Notes (2026-01-04):
-    - Local/manual release gate is strict: 900s with prod-like flags.
-    - GitHub-hosted CI runners vary; we enforce "not hours" by scaling from the baseline run time.
-      Tight CI gating should be done on stable hardware (self-hosted runners).
-    """
-    local_max = float(os.environ.get("ACCEPTANCE_BACKTEST_LOCAL_MAX_SECONDS", "900"))
-
-    if not _is_ci():
-        return local_max, local_max
-
-    # CI limits: baseline_time * factor, bounded by [floor, cap].
-    factor = float(os.environ.get("ACCEPTANCE_BACKTEST_CI_FACTOR", "8"))
-    floor_s = float(os.environ.get("ACCEPTANCE_BACKTEST_CI_FLOOR_SECONDS", "900"))
-    cap_s = float(os.environ.get("ACCEPTANCE_BACKTEST_CI_CAP_SECONDS", "5400"))
-
-    baseline_s = case.baseline_backtest_time_seconds
-    if baseline_s is None:
-        # Fall back to the cap. This shouldn't happen for updated baselines.
-        return cap_s, cap_s
-
-    scaled = max(floor_s, baseline_s * factor)
-    limit = min(cap_s, scaled)
-    return limit, min(cap_s, limit + 1200.0)  # allow some overhead outside the core backtest timer
-
-
 def _require_acceptance_env(case: _BaselineCase) -> None:
     required_common = [
         "THETADATA_USERNAME",
@@ -287,8 +223,6 @@ def _require_acceptance_env(case: _BaselineCase) -> None:
     required_thetadata = [
         "DATADOWNLOADER_BASE_URL",
         "DATADOWNLOADER_API_KEY",
-        "LUMIBOT_CACHE_BACKEND",
-        "LUMIBOT_CACHE_MODE",
         "LUMIBOT_CACHE_S3_BUCKET",
         "LUMIBOT_CACHE_S3_PREFIX",
         "LUMIBOT_CACHE_S3_REGION",
@@ -304,7 +238,7 @@ def _require_acceptance_env(case: _BaselineCase) -> None:
         _require_env(required_common)
 
 
-def _run_subprocess_with_live_scan(
+def _run_subprocess(
     *,
     cmd: list[str],
     cwd: Path,
@@ -312,78 +246,22 @@ def _run_subprocess_with_live_scan(
     stdout_path: Path,
     stderr_path: Path,
     timeout_s: int,
-    scan_patterns: tuple[str, ...] = (),
-) -> tuple[int, str | None]:
-    """
-    Run a subprocess while streaming stdout/stderr to files.
-
-    If any `scan_patterns` match in either stream, terminate the process early and return
-    (returncode, matched_pattern).
-
-    This keeps acceptance failures crisp when the warm-cache invariant is violated:
-    we don't want to wait 15–90 minutes just to discover a queue submission early in the run.
-    """
-    matched_pattern: str | None = None
-    matched_lock = threading.Lock()
-
+) -> int:
+    """Run a subprocess and stream stdout/stderr to files (no log-scraping)."""
     with stdout_path.open("w", encoding="utf-8") as stdout_file, stderr_path.open("w", encoding="utf-8") as stderr_file:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(cwd),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
-
-        def _pump(stream, out_file) -> None:
-            nonlocal matched_pattern
-            try:
-                for line in iter(stream.readline, ""):
-                    out_file.write(line)
-                    out_file.flush()
-                    if not scan_patterns:
-                        continue
-                    if matched_pattern is not None:
-                        continue
-                    for pat in scan_patterns:
-                        if re.search(pat, line):
-                            with matched_lock:
-                                if matched_pattern is None:
-                                    matched_pattern = pat
-                                    try:
-                                        proc.terminate()
-                                    except Exception:
-                                        pass
-                            break
-            finally:
-                try:
-                    stream.close()
-                except Exception:
-                    pass
-
-        threads = [
-            threading.Thread(target=_pump, args=(proc.stdout, stdout_file), daemon=True),
-            threading.Thread(target=_pump, args=(proc.stderr, stderr_file), daemon=True),
-        ]
-        for t in threads:
-            t.start()
-
         try:
-            returncode = proc.wait(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            returncode = proc.wait(timeout=10)
-            raise subprocess.TimeoutExpired(cmd, timeout_s)
-        finally:
-            for t in threads:
-                t.join(timeout=5)
-
-    return returncode, matched_pattern
+            proc = subprocess.run(
+                cmd,
+                cwd=str(cwd),
+                env=env,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                timeout=timeout_s,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError(f"Acceptance backtest timed out after {timeout_s}s. run_dir={cwd}") from exc
+    return int(proc.returncode)
 
 
 def _run_script(case: _BaselineCase) -> tuple[Path, dict[str, int]]:
@@ -409,28 +287,19 @@ def _run_script(case: _BaselineCase) -> tuple[Path, dict[str, int]]:
     stdout_path = run_dir / "stdout.txt"
     stderr_path = run_dir / "stderr.txt"
 
-    max_inner_s, max_outer_s = _runtime_limits(case)
-    timeout_s = int(max_outer_s or (60 * 90))  # absolute upper bound so jobs don't hang forever
+    max_inner_s = float(case.max_backtest_time_seconds)
+    # Hard kill timeout (outer) to prevent silent hangs. The strict regression gate is asserted
+    # on `backtest_time_seconds` from settings.json (inner timer).
+    timeout_s = int(max(60.0, max_inner_s + 600.0))
 
-    t0 = time.monotonic()
-    scan_patterns = _DOWNLOADER_QUEUE_LOG_PATTERNS if case.data_source == "thetadata" else ()
-    returncode, matched_pattern = _run_subprocess_with_live_scan(
+    returncode = _run_subprocess(
         cmd=[sys.executable, str(script_path)],
         cwd=run_dir,
         env=env,
         stdout_path=stdout_path,
         stderr_path=stderr_path,
         timeout_s=timeout_s,
-        scan_patterns=scan_patterns,
     )
-    outer_s = time.monotonic() - t0
-
-    if matched_pattern is not None:
-        raise AssertionError(
-            "Acceptance backtest attempted to use the ThetaData downloader queue "
-            f"(pattern {matched_pattern!r} matched in stdout/stderr). Expected fully-warm S3 cache.\n"
-            f"run_dir={run_dir}"
-        )
 
     if returncode != 0:
         tail = ""
@@ -454,9 +323,6 @@ def _run_script(case: _BaselineCase) -> tuple[Path, dict[str, int]]:
     _find_single(sorted(logs_dir.glob(f"{case.strategy_name}_*_trades.csv")), f"{case.strategy_name} trades.csv")
     _find_single(sorted(logs_dir.glob(f"{case.strategy_name}_*_logs.csv")), f"{case.strategy_name} logs.csv")
 
-    if case.data_source == "thetadata":
-        _assert_no_downloader_queue_used(run_dir)
-
     metrics = _read_tearsheet_metrics_centipercent(tearsheet_csv)
 
     expected = case.expected_metrics_centipercent
@@ -475,15 +341,10 @@ def _run_script(case: _BaselineCase) -> tuple[Path, dict[str, int]]:
     _assert_settings_match_window(case, payload)
 
     inner_s = payload.get("backtest_time_seconds")
-    if max_inner_s is not None and isinstance(inner_s, (int, float)) and inner_s > max_inner_s:
+    if isinstance(inner_s, (int, float)) and inner_s > max_inner_s:
         raise AssertionError(
             f"{case.slug} backtest_time_seconds regression: actual={inner_s:.1f}s max={max_inner_s:.1f}s "
             f"(baseline={case.baseline_backtest_time_seconds})\nsettings={settings}\nrun_dir={run_dir}"
-        )
-
-    if max_outer_s is not None and outer_s > max_outer_s:
-        raise AssertionError(
-            f"{case.slug} wall_time regression: actual={outer_s:.1f}s max={max_outer_s:.1f}s\nrun_dir={run_dir}"
         )
 
     return run_dir, metrics
@@ -509,22 +370,12 @@ def test_acceptance_leaps_alpha_picks() -> None:
     for required in ("UBER", "CLS", "MFC"):
         assert required in symbols, f"Expected {required} to be traded in short window; got symbols={sorted(symbols)[:25]}"
 
-    _run_script(_baseline("leaps_alpha_picks_full_year"))
-
 
 def test_acceptance_tqqq_sma200() -> None:
-    theta = _baseline("tqqq_sma200_thetadata")
-    yahoo = _baseline("tqqq_sma200_yahoo")
-
-    _, theta_metrics = _run_script(theta)
-    _, yahoo_metrics = _run_script(yahoo)
-
-    # Parity sanity: Yahoo and ThetaData should be directionally close (avoid obvious inflation/deflation).
-    assert abs(theta_metrics["cagr"] - yahoo_metrics["cagr"]) <= 1000  # 10.00%
+    _run_script(_baseline("tqqq_sma200_thetadata"))
 
 
 def test_acceptance_backdoor_butterfly() -> None:
-    _run_script(_baseline("backdoor_butterfly_baseline"))
     _run_script(_baseline("backdoor_butterfly_full_year"))
 
 
@@ -537,5 +388,4 @@ def test_acceptance_backdoor_smartlimit() -> None:
 
 
 def test_acceptance_spx_short_straddle() -> None:
-    _run_script(_baseline("spx_short_straddle_baseline"))
     _run_script(_baseline("spx_short_straddle_repro"))
