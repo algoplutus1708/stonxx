@@ -69,6 +69,7 @@ jobs:
             lumibot/backtesting/thetadata_backtesting_pandas.py \
             lumibot/components/options_helper.py \
             lumibot/strategies/_strategy.py \
+            tests/backtest/test_acceptance_backtests_ci.py \
             tests/test_thetadata_day_timestamp_alignment.py \
             tests/test_thetadata_get_last_price_trade_only.py \
             tests/test_options_helper_thetadata_actionable_strikes.py \
@@ -187,15 +188,66 @@ jobs:
           pip install requests
           pip install -r requirements_dev.txt
 
-      - name: Run acceptance smokes (ThetaData warm-cache gate)
+      - name: Run backtest tests
+        run: |
+          set -euo pipefail
+          PYTEST_MARKERS='not apitest and not downloader and not acceptance_backtest'
+          timeout 1500 python -m pytest tests/backtest/ -m "${PYTEST_MARKERS}" --tb=short -q --durations=30 -x
+
+  acceptance-backtests:
+    name: Acceptance Backtests (${{ matrix.case.slug }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: unit-tests
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        case:
+          - slug: aapl_deep_dip_calls
+            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_aapl_deep_dip_calls
+          - slug: leaps_alpha_picks
+            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_leaps_alpha_picks
+          - slug: tqqq_sma200
+            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_tqqq_sma200
+          - slug: backdoor_butterfly
+            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_backdoor_butterfly
+          - slug: meli_deep_drawdown
+            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_meli_deep_drawdown
+          - slug: backdoor_smartlimit
+            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_backdoor_smartlimit
+          - slug: spx_short_straddle
+            nodeid: tests/backtest/test_acceptance_backtests_ci.py::test_acceptance_spx_short_straddle
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          echo "Set AIOHTTP_NO_EXTENSIONS=$AIOHTTP_NO_EXTENSIONS so that aiohttp doesn't try to install C extensions"
+          python -m pip install --upgrade pip
+          pip install requests
+          pip install -r requirements_dev.txt
+
+      - name: Run acceptance backtest (Strategy Library demo)
         env:
-          # Run in the same prod-like configuration used for real backtests (S3 cache enabled and
-          # downloader configured), but the smokes must be fully served from the dev S3 cache and
-          # must fail if they try to hit the downloader queue.
+          # Match the local/manual acceptance env: ThetaData + S3 cache enabled + downloader configured.
           IS_BACKTESTING: "true"
           BACKTESTING_DATA_SOURCE: thetadata
+          SHOW_PLOT: "True"
+          SHOW_INDICATORS: "True"
+          SHOW_TEARSHEET: "True"
+          BACKTESTING_QUIET_LOGS: "false"
+          BACKTESTING_SHOW_PROGRESS_BAR: "true"
+          SAVE_LOGFILE: "true"
           LUMIBOT_CACHE_BACKEND: s3
-          LUMIBOT_CACHE_MODE: s3_readwrite
+          LUMIBOT_CACHE_MODE: readwrite
           LUMIBOT_CACHE_S3_BUCKET: ${{ secrets.LUMIBOT_CACHE_S3_BUCKET }}
           LUMIBOT_CACHE_S3_PREFIX: ${{ secrets.LUMIBOT_CACHE_S3_PREFIX }}
           LUMIBOT_CACHE_S3_REGION: ${{ secrets.LUMIBOT_CACHE_S3_REGION }}
@@ -204,25 +256,20 @@ jobs:
           LUMIBOT_CACHE_S3_SECRET_ACCESS_KEY: ${{ secrets.LUMIBOT_CACHE_S3_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          timeout 1500 python -m pytest -q -m acceptance_smoke tests/backtest/test_theta_strategies_integration.py --tb=short --durations=30 -x
-
-      - name: Run backtest tests
-        run: |
-          set -euo pipefail
-          PYTEST_MARKERS='not apitest and not downloader and not acceptance_smoke'
-          timeout 1500 python -m pytest tests/backtest/ -m "${PYTEST_MARKERS}" --tb=short -q --durations=30 -x
+          timeout 10800 python -m pytest -q "${{ matrix.case.nodeid }}" --tb=short --durations=30 -x
 
   LintAndTest:
     name: LintAndTest
     runs-on: ubuntu-latest
     if: always()
-    needs: [lint, unit-tests, backtest-tests]
+    needs: [lint, unit-tests, backtest-tests, acceptance-backtests]
     steps:
       - name: Check results
         run: |
           echo "lint: ${{ needs.lint.result }}"
           echo "unit-tests: ${{ needs.unit-tests.result }}"
           echo "backtest-tests: ${{ needs.backtest-tests.result }}"
+          echo "acceptance-backtests: ${{ needs.acceptance-backtests.result }}"
 
           if [ "${{ needs.lint.result }}" != "success" ]; then
             exit 1
@@ -231,5 +278,8 @@ jobs:
             exit 1
           fi
           if [ "${{ needs.backtest-tests.result }}" != "success" ]; then
+            exit 1
+          fi
+          if [ "${{ needs.acceptance-backtests.result }}" != "success" ]; then
             exit 1
           fi
