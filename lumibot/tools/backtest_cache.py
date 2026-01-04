@@ -279,6 +279,16 @@ class BacktestCacheManager:
         logger.debug(
             "[REMOTE_CACHE][UPLOAD] %s <- %s", remote_key, local_path.as_posix()
         )
+        # Persist a tiny marker so future runs can reuse the file without an extra S3 roundtrip,
+        # as long as the remote key (including cache version) matches.
+        try:
+            marker_path = local_path.with_suffix(local_path.suffix + ".s3key")
+            marker_tmp = marker_path.with_suffix(marker_path.suffix + ".tmp")
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            marker_tmp.write_text(remote_key, encoding="utf-8")
+            os.replace(marker_tmp, marker_path)
+        except Exception:
+            pass
         with self._stats_lock:
             self._stats["uploads"] += 1.0
             self._stats["upload_s"] += float(elapsed)

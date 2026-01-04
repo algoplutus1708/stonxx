@@ -36,6 +36,10 @@ Notes:
   when placeholder semantics or schema changes.
 * Encryption, ACLs, and lifecycle policies remain the responsibility of the
   bucket configuration so we avoid adding client-side overhead.
+* `LUMIBOT_CACHE_FOLDER` is the local cache root (default: OS app cache dir). It
+  can be overridden via the `LUMIBOT_CACHE_FOLDER` environment variable (must be
+  set **before importing** `lumibot`) to simulate “fresh container” disks or to
+  isolate runs in CI.
 
 ## Remote Key Scheme
 
@@ -71,6 +75,9 @@ example `stock` or `index`).
 * `BacktestCacheManager` lazily instantiates an S3 client, downloading files on
   demand (`ensure_local_file`) and uploading after cache writes
   (`on_local_update`).
+  * The manager writes a small adjacent marker file (`*.s3key`) containing the
+    fully-qualified remote key. This allows safe local reuse across runs when
+    the cache version/prefix match, without an extra S3 roundtrip.
 * `thetadata_helper.get_price_data` calls the manager before attempting to read
   from disk, and again after successful cache updates. Payload metadata captures
   provider, symbol, asset type, and option attributes for future auditing.

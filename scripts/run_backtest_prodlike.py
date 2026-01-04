@@ -2,10 +2,12 @@
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+from datetime import datetime
 
 
 def load_dotenv(path: Path) -> dict[str, str]:
@@ -52,6 +54,15 @@ def count_queue_submits(log_csv: Path) -> int | None:
         return None
 
 
+def _default_workdir(label: str) -> Path:
+    # IMPORTANT: Use a clean directory outside Strategy Library to avoid LumiBot's recursive `.env`
+    # discovery accidentally loading unrelated env files (and to reduce startup overhead from
+    # scanning large folder trees).
+    runid = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_label = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in (label or "backtest"))
+    return Path(f"/Users/robertgrzesik/Documents/Development/backtest_runs/{runid}_{safe_label}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run a LumiBot backtest with prod-like flags using env from botspot_node/.env-local without printing secrets")
     parser.add_argument("--main", required=True, help="Path to extracted strategy main.py")
@@ -63,9 +74,14 @@ def main() -> int:
         help="dotenv file containing DATADOWNLOADER + S3 cache creds",
     )
     parser.add_argument(
-        "--strategy-library",
-        default="/Users/robertgrzesik/Documents/Development/Strategy Library",
-        help="Working directory so artifacts land in Strategy Library/logs",
+        "--workdir",
+        default=None,
+        help="Clean working directory where `logs/` artifacts are written (defaults to a new folder under ~/Documents/Development/backtest_runs/)",
+    )
+    parser.add_argument(
+        "--copy-artifacts-to",
+        default=None,
+        help="Optional directory to copy the final `logs/*` artifacts into (e.g., Strategy Library/logs). No files are deleted.",
     )
     parser.add_argument(
         "--lumibot-root",
@@ -107,8 +123,11 @@ def main() -> int:
     dotenv_path = Path(args.dotenv)
     dotenv = load_dotenv(dotenv_path)
 
-    strategy_library_root = Path(args.strategy_library).resolve()
-    log_dir = strategy_library_root / "logs"
+    label = args.label or main_py.parent.name
+
+    workdir = Path(args.workdir).resolve() if args.workdir else _default_workdir(label)
+    workdir.mkdir(parents=True, exist_ok=True)
+    log_dir = workdir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
@@ -165,26 +184,24 @@ def main() -> int:
     if args.cache_prefix:
         env["LUMIBOT_CACHE_S3_PREFIX"] = args.cache_prefix
 
-    label = args.label or main_py.parent.name
-
     started_at = time.time()
     print(f"[run] label={label}")
     print(f"[run] main={main_py}")
     print(f"[run] window={args.start} -> {args.end}")
-    print(f"[run] strategy_library={strategy_library_root}")
+    print(f"[run] workdir={workdir}")
     print(f"[run] cache_folder={env.get('LUMIBOT_CACHE_FOLDER')}")
     print(f"[run] cache_s3_bucket={env.get('LUMIBOT_CACHE_S3_BUCKET')}")
     print(f"[run] cache_s3_prefix={env.get('LUMIBOT_CACHE_S3_PREFIX')}")
     print(f"[run] cache_s3_version={env.get('LUMIBOT_CACHE_S3_VERSION')}")
 
-    subprocess_log = Path(args.subprocess_log) if args.subprocess_log else (strategy_library_root / f"subprocess_{label}.log")
+    subprocess_log = Path(args.subprocess_log) if args.subprocess_log else (workdir / f"subprocess_{label}.log")
     subprocess_log.parent.mkdir(parents=True, exist_ok=True)
     print(f"[run] subprocess_log={subprocess_log}")
 
     with subprocess_log.open("w") as log_f:
         proc = subprocess.run(
             [sys.executable, str(main_py)],
-            cwd=str(strategy_library_root),
+            cwd=str(workdir),
             env=env,
             stdout=log_f,
             stderr=subprocess.STDOUT,
@@ -205,6 +222,19 @@ def main() -> int:
         submits = count_queue_submits(logs)
         if submits is not None:
             print(f"[metrics] queue_submits={submits}")
+
+        if args.copy_artifacts_to:
+            dest_root = Path(args.copy_artifacts_to).resolve()
+            dest_root.mkdir(parents=True, exist_ok=True)
+            for src in (tearsheet, trades, logs, settings):
+                if not src.exists():
+                    continue
+                dst = dest_root / src.name
+                try:
+                    shutil.copy2(src, dst)
+                except Exception as exc:
+                    print(f"[warn] failed to copy {src} -> {dst}: {exc}")
+            print(f"[artifacts] copied_to={dest_root}")
 
     return proc.returncode
 

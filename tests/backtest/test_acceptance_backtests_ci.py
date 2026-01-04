@@ -280,6 +280,10 @@ def _run_script(case: _BaselineCase) -> tuple[Path, dict[str, int]]:
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
 
     env = _base_env(repo_root)
+    # CI runners start with an empty disk cache. Local developer machines often have a warm cache
+    # under the default appdirs location, which can hide missing S3 objects and cause CI-only
+    # downloader usage. Force an isolated cache root per run so local == CI.
+    env["LUMIBOT_CACHE_FOLDER"] = str(run_dir / "cache")
     env["BACKTESTING_START"] = case.start_date
     env["BACKTESTING_END"] = case.end_date
     env["BACKTESTING_DATA_SOURCE"] = case.data_source

@@ -1035,7 +1035,9 @@ class BacktestingBroker(Broker):
 
             parent_order.child_orders = orders
             self._unprocessed_orders.append(parent_order)
-            self.stream.dispatch(self.NEW_ORDER, order=parent_order)
+            # Backtesting must be deterministic: process the NEW_ORDER event inline so the parent
+            # multileg order is tracked consistently before the simulation clock advances.
+            self.stream.dispatch(self.NEW_ORDER, wait_until_complete=True, order=parent_order)
             return [parent_order]
 
         return results

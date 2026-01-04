@@ -5685,6 +5685,32 @@ def get_chains_cached(
                 for exp_date in data["Chains"][right]:
                     data["Chains"][right][exp_date] = list(data["Chains"][right][exp_date])
 
+            # Best-effort: ensure locally-present chain cache files are also present in the remote
+            # S3 cache. CI runners start from empty disks; without this, a "warm local" run can
+            # look healthy while CI rebuilds chains via the downloader (and fails acceptance).
+            try:
+                from lumibot.tools.backtest_cache import get_backtest_cache
+
+                cache_manager = get_backtest_cache()
+                remote_key = cache_manager.remote_key_for(fpath)
+                if remote_key:
+                    marker_path = fpath.with_suffix(fpath.suffix + ".s3key")
+                    marker_value = ""
+                    if marker_path.exists():
+                        try:
+                            marker_value = marker_path.read_text(encoding="utf-8").strip()
+                        except Exception:
+                            marker_value = ""
+                    if marker_value != remote_key:
+                        cache_manager.on_local_update(fpath)
+            except Exception:
+                logger.debug(
+                    "[THETA][CHAIN_CACHE] Remote cache upload (reuse) failed for %s on %s",
+                    asset.symbol,
+                    current_date,
+                    exc_info=True,
+                )
+
             return data
 
     # 4) No suitable file => fetch from ThetaData using exp=0 chain builder

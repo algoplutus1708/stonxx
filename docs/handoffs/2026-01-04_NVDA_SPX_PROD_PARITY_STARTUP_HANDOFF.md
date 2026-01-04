@@ -61,7 +61,8 @@ This work is not “done” until we have **fresh proof** (not old artifacts) th
 ### Runtime + safety rules
 - **No long-lived commands without a timeout**. Always wrap with `/Users/robertgrzesik/bin/safe-timeout ...`.
 - For these P0/P1 investigations:
-  - If a run cannot complete within a reasonable leash (10–20 minutes for NVDA target, ≤1 hour for SPX cold target), treat that as a performance regression and **stop + inspect logs** instead of “waiting 6 hours”.
+  - If a run cannot complete within a reasonable leash (**≤20 minutes per run**), treat that as a performance regression and **stop + inspect logs** instead of “waiting hours”.
+  - For “cold cache” scenarios, prefer **short windows** (days/weeks) and **chunking** (month/quarter segments) rather than a single long run.
 - **Never start ThetaTerminal locally with production credentials.** Backtests must use the remote downloader.
 
 ### Write-location policy (security + hygiene)
@@ -243,6 +244,7 @@ Then download and unzip.
 
 ### Tooling
 Use `scripts/run_backtest_prodlike.py` from this repo.
+See `docs/PRODLIKE_LOCAL_BACKTEST_RUNS.md` for the canonical, up-to-date run templates (timeouts, cache isolation, artifact locations).
 
 Purpose:
 - Run a `main.py` under local `PYTHONPATH` pointing to this LumiBot repo
@@ -251,8 +253,11 @@ Purpose:
 - Keep output in a controlled log file to avoid terminal spam
 
 ### Where artifacts should land
-Artifacts must be placed in:
-- `/Users/robertgrzesik/Documents/Development/Strategy Library/logs`
+Default behavior (recommended):
+- `scripts/run_backtest_prodlike.py` writes artifacts to a clean per-run workdir under `~/Documents/Development/backtest_runs/<runid>_<label>/logs/`.
+
+Optional convenience:
+- Use `--copy-artifacts-to "/Users/robertgrzesik/Documents/Development/Strategy Library/logs"` to copy the final artifacts into Strategy Library for quick browsing/search.
 
 Minimum artifacts to capture for each “fresh proof run”:
 - `*_tearsheet.html` (openable in browser)
@@ -266,8 +271,8 @@ Do not “wait forever”.
 - NVDA full-window run leash: start with **20 minutes**.
   - If it does not finish in 20 minutes, treat as performance issue; collect logs and stop.
 - SPX cold-cache run leash: start with **15 minutes** to inspect request behavior.
-  - If request volume is sane, extend to **60 minutes** if needed to complete full year.
-  - If request volume explodes again, stop immediately and fix root cause.
+  - If request volume is sane, **expand the window gradually** (week → month → quarter) while keeping each run ≤20 minutes.
+  - If request volume explodes again, stop immediately and fix root cause before expanding.
 
 ---
 
@@ -378,7 +383,7 @@ Goal:
   - `LUMIBOT_CACHE_FOLDER=/Users/robertgrzesik/Documents/Development/tmp/lumibot_cache_spx_20260104_153000`
 
 3) Cold run (inspection leash first)
-- Run each strategy full-year with:
+- Run each strategy on a **short diagnostic window** first (days/weeks) with:
   - the cold S3 version
   - a fresh local cache folder
 - Leash: 15 minutes initially.
@@ -388,7 +393,8 @@ Goal:
   - repeated `get_strike_deltas` calls
 
 4) If request volume is sane
-- Re-run with a longer leash (up to 60 minutes) to allow full-year completion on a cold S3 namespace.
+- Expand the window gradually (week → month → quarter), keeping each run ≤20 minutes.
+- Once behavior is sane, complete the full year by running **chunked windows** (e.g., month-by-month) rather than a single long job.
 
 5) Warm proof
 - Keep the same `LUMIBOT_CACHE_S3_VERSION` (now warm)
@@ -550,7 +556,7 @@ Implications:
 ### Strategy Library artifacts (local)
 - Logs/artifacts directory:
   - `/Users/robertgrzesik/Documents/Development/Strategy Library/logs`
-- For these P0 runs, the acceptance criterion is: new `*_tearsheet.html` exists here and opens in browser.
+- For these P0 runs, artifacts must exist in the run workdir `logs/` (and it’s recommended to also copy into Strategy Library via `--copy-artifacts-to` for easy browsing/search).
 
 ### Production artifacts (S3)
 BotSpot/BotManager store artifacts under (as seen in botspot_node code):
@@ -570,7 +576,8 @@ Note: code zips are separate:
 Use the BotManager AWS profile:
 
 ```bash
-aws logs tail "/aws/ecs/prod-trading-bots-backtest" \
+/Users/robertgrzesik/bin/safe-timeout 120s \
+  aws logs tail "/aws/ecs/prod-trading-bots-backtest" \
   --profile BotManager \
   --since 2h \
   --filter-pattern "<manager_bot_id>"
@@ -579,7 +586,8 @@ aws logs tail "/aws/ecs/prod-trading-bots-backtest" \
 If `tail` is noisy, use `filter-log-events` for a static dump:
 
 ```bash
-aws logs filter-log-events \
+/Users/robertgrzesik/bin/safe-timeout 120s \
+  aws logs filter-log-events \
   --profile BotManager \
   --log-group-name "/aws/ecs/prod-trading-bots-backtest" \
   --filter-pattern "<manager_bot_id>" \
@@ -663,11 +671,12 @@ NVDA full-window (20m leash):
 /Users/robertgrzesik/bin/safe-timeout 1200s \
   python3 /Users/robertgrzesik/Documents/Development/lumivest_bot_server/strategies/lumibot/scripts/run_backtest_prodlike.py \
     --label nvda_full_prodlike \
-    --strategy-library "$WORKDIR" \
+    --workdir "$WORKDIR" \
     --cache-folder "$CACHE_DIR" \
     --main "/Users/robertgrzesik/Documents/Development/Strategy Library/tmp/backtest_code/334e2c98-7134-4f38-860c-b6b11879a51b/main.py" \
     --start 2013-01-10 \
-    --end 2025-12-30
+    --end 2025-12-30 \
+    --copy-artifacts-to "/Users/robertgrzesik/Documents/Development/Strategy Library/logs"
 ```
 
 SPX cold run (inspection leash first):
@@ -680,12 +689,13 @@ mkdir -p "$SPX_CACHE_DIR"
 /Users/robertgrzesik/bin/safe-timeout 900s \
   python3 scripts/run_backtest_prodlike.py \
     --label spx_copy2_cold_inspect \
-    --strategy-library "$WORKDIR" \
+    --workdir "$WORKDIR" \
     --cache-folder "$SPX_CACHE_DIR" \
     --cache-version "spx_cold_${SPX_RUNID}" \
     --main "/Users/robertgrzesik/Documents/Development/Strategy Library/tmp/backtest_code/c7c6bbd9-41f7-48c9-8754-3231e354f83b/main.py" \
     --start 2025-01-07 \
-    --end 2025-12-27
+    --end 2025-02-07 \
+    --copy-artifacts-to "/Users/robertgrzesik/Documents/Development/Strategy Library/logs"
 ```
 
 Warm proof (same S3 version, new local cache folder):
@@ -695,22 +705,23 @@ SPX_RUNID="spx_cold_${SPX_RUNID}"  # reuse from cold
 SPX_CACHE_DIR2="/Users/robertgrzesik/Documents/Development/tmp/lumibot_cache_spx_${SPX_RUNID}_warmlocal"
 mkdir -p "$SPX_CACHE_DIR2"
 
-/Users/robertgrzesik/bin/safe-timeout 3600s \
+/Users/robertgrzesik/bin/safe-timeout 1200s \
   python3 scripts/run_backtest_prodlike.py \
     --label spx_copy2_warm_s3 \
-    --strategy-library "$WORKDIR" \
+    --workdir "$WORKDIR" \
     --cache-folder "$SPX_CACHE_DIR2" \
     --cache-version "$SPX_RUNID" \
     --main "/Users/robertgrzesik/Documents/Development/Strategy Library/tmp/backtest_code/c7c6bbd9-41f7-48c9-8754-3231e354f83b/main.py" \
     --start 2025-01-07 \
-    --end 2025-12-27
+    --end 2025-02-07 \
+    --copy-artifacts-to "/Users/robertgrzesik/Documents/Development/Strategy Library/logs"
 ```
 
 ### 4) Post-run quick checks (must do)
-- Verify a new tearsheet exists:
-  - `ls -1 "/Users/robertgrzesik/Documents/Development/Strategy Library/logs" | rg "<StrategyName>_.*_tearsheet\\.html" | tail`
-- Count downloader queue submits:
-  - `rg -n "Submitted to queue" "/Users/robertgrzesik/Documents/Development/Strategy Library/logs/<run_prefix>_logs.csv" | wc -l`
+- Verify a new tearsheet exists (if you used `--copy-artifacts-to`):
+  - `ls -1 "/Users/robertgrzesik/Documents/Development/Strategy Library/logs" | rg "<label>_.*_tearsheet\\.html" | tail`
+- Count downloader queue submits (same note):
+  - `rg -n "Submitted to queue" "/Users/robertgrzesik/Documents/Development/Strategy Library/logs/<label>_logs.csv" | wc -l`
 
 If “warm” still submits to queue heavily, caching coverage is incomplete for the request type.
 
@@ -756,7 +767,7 @@ Stop conditions:
 
 Pass conditions:
 - finishes
-- produces fresh artifacts in `Strategy Library/logs`
+- produces fresh artifacts in the run workdir `logs/` (and optionally copied into `Strategy Library/logs`)
 - no end-of-run crash
 
 If it fails:
@@ -778,7 +789,7 @@ For each manager_bot_id:
   - `LUMIBOT_CACHE_S3_VERSION=spx_cold_<runid>`
   - `LUMIBOT_CACHE_FOLDER=/Users/robertgrzesik/Documents/Development/tmp/lumibot_cache_spx_<runid>`
 
-3) Run full-year window exactly as prod:
+3) Run a short window first (prod-faithful, but time-bounded):
 - Leash: **15 minutes** initially (inspection run)
 
 Stop conditions during the 15m inspection:
@@ -789,7 +800,8 @@ Stop conditions during the 15m inspection:
   → stop and fix the request explosion before attempting full completion.
 
 If inspection looks sane (bounded request volume):
-- rerun with a larger leash (up to 60 minutes) to complete the full year on cold S3.
+- expand the window gradually (week → month → quarter) while keeping each run ≤20 minutes.
+- once behavior is stable, complete the full year by running chunked windows (month-by-month) rather than a single long job.
 
 ### Step 3: SPX warm proof — warm S3 + cold local (fresh container)
 
