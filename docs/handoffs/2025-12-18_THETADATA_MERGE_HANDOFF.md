@@ -374,7 +374,7 @@ This is the full “merge to dev” execution plan, in the order it should be do
 **Phase D — Documentation cleanup + docs folder restructure**
 10) Clean up repo-root “AI markdown” files (user request):
    - Move `THETADATA_INVESTIGATION_2025-12-11.md` into `docs/investigations/`.
-   - Move `THETADATA_BACKTESTING_HANDOFF_2025-12-17.md` (and other handoffs) into `docs/handoffs/`.
+   - Move `2025-12-17_THETADATA_BACKTESTING_HANDOFF.md` (and other handoffs) into `docs/handoffs/`.
 11) Implement the docs folder split so generated docs no longer collide with human/AI docs:
    - Target structure:
      - `generated-docs/` = output built from `docsrc/`
@@ -428,8 +428,8 @@ If you need to watch checks without leaving a long-running process:
 ### 7.2 Clean up “random markdown files” in repo root
 These exist and should be moved or deleted:
 - `Documents/Development/lumivest_bot_server/strategies/lumibot/THETADATA_INVESTIGATION_2025-12-11.md`
-- `Documents/Development/lumivest_bot_server/strategies/lumibot/THETADATA_BACKTESTING_HANDOFF_2025-12-17.md`
-- (This file) `Documents/Development/lumivest_bot_server/strategies/lumibot/THETADATA_MERGE_HANDOFF_2025-12-18.md`
+- `Documents/Development/lumivest_bot_server/strategies/lumibot/docs/handoffs/2025-12-17_THETADATA_BACKTESTING_HANDOFF.md`
+- (This file) `Documents/Development/lumivest_bot_server/strategies/lumibot/docs/handoffs/2025-12-18_THETADATA_MERGE_HANDOFF.md`
 
 User preference: AI docs should live under a dedicated `docs/` (human-maintained) folder, not the generated docs output folder.
 

@@ -16,7 +16,7 @@ We optimize for:
 
 - Handoffs: `docs/handoffs/`
 - Investigations: `docs/investigations/`
-- Latest session handoff: `docs/handoffs/THETADATA_SESSION_HANDOFF_2025-12-26.md`
+- Latest session handoff: `docs/handoffs/2025-12-26_THETADATA_SESSION_HANDOFF.md`
 
 ## Directory Structure
 

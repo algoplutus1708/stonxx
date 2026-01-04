@@ -55,7 +55,7 @@ ThetaData backtests should behave broker-like:
 - Backtesting architecture:
   - `docs/BACKTESTING_ARCHITECTURE.md`
 - Session handoff (this file):
-  - `docs/handoffs/THETADATA_SESSION_HANDOFF_2025-12-26.md`
+  - `docs/handoffs/2025-12-26_THETADATA_SESSION_HANDOFF.md`
 - ThetaData rules and safety:
   - `AGENTS.md`
   - `CLAUDE.md`

@@ -30,7 +30,7 @@ The canonical acceptance suite definition (strategies, windows, and what to vali
 
 The latest “why are we changing this?” investigation context (stalls/perf history) lives in the session handoffs:
 
-- `docs/handoffs/THETADATA_SESSION_HANDOFF_2026-01-01.md`
+- `docs/handoffs/2026-01-01_THETADATA_SESSION_HANDOFF.md`
 
 ## Backtest profiling (opt-in)
 

@@ -122,10 +122,10 @@ If a new session is lost, these are the “map” files to open first.
 
 **Prior handoffs (the ones humans reference)**
 - Latest prior session handoff (Dec 26, 2025):
-  - `docs/handoffs/THETADATA_SESSION_HANDOFF_2025-12-26.md`
+  - `docs/handoffs/2025-12-26_THETADATA_SESSION_HANDOFF.md`
 - Earlier merge/backtesting handoffs (Dec 17–18, 2025):
-  - `docs/handoffs/THETADATA_BACKTESTING_HANDOFF_2025-12-17.md`
-  - `docs/handoffs/THETADATA_MERGE_HANDOFF_2025-12-18.md`
+  - `docs/handoffs/2025-12-17_THETADATA_BACKTESTING_HANDOFF.md`
+  - `docs/handoffs/2025-12-18_THETADATA_MERGE_HANDOFF.md`
 
 **Investigations (high signal)**
 - SmartLimit / slippage design + semantics:
