@@ -465,7 +465,12 @@ class Data:
         if dt in self.iter_index_dict:
             i = self.iter_index_dict[dt]
         else:
-            # If not found, get the last known data
+            # If not found, get the last known data.
+            #
+            # NOTE: `iter_index.asof(dt)` returns the index position of the last bar <= dt.
+            # Call sites that slice with an exclusive end bound must apply the +1 themselves
+            # where appropriate (daily bars), otherwise `get_last_price()` and other direct
+            # indexers can go out-of-bounds when dt is after the last bar.
             i = self.iter_index.asof(dt)
 
         return i
@@ -743,7 +748,23 @@ class Data:
             else:
                 timeshift = int(timeshift.total_seconds() / 60)
 
-        end_row = self.get_iter_count(dt) - timeshift
+        iter_count = self.get_iter_count(dt)
+        try:
+            if pd.isna(iter_count):
+                iter_count = 0
+        except Exception:
+            pass
+
+        # IMPORTANT:
+        # - This method slices with `end_row` as an *exclusive* bound.
+        # - For daily data, `get_iter_count()` returns the last bar <= dt, and daily bars are
+        #   already "complete" for any intraday dt on that date. We therefore add +1 so the
+        #   last available bar is included by default.
+        # - For intraday data, the legacy behaviour is preserved to avoid lookahead.
+        if self.timestep == "day":
+            end_row = iter_count + 1 - timeshift
+        else:
+            end_row = iter_count - timeshift
 
         data_len = len(next(iter(self.datalines.values())).dataline) if self.datalines else 0
         if end_row > data_len:
