@@ -336,6 +336,34 @@ class TestWaitForResult:
         assert result == {"price": 150.0}
         assert status_code == 200
 
+    @patch.object(requests.Session, "get")
+    def test_wait_for_result_failed_returns_terminal_result(self, mock_get):
+        """Status=failed can still be a terminal outcome (e.g., ThetaData 472 no data)."""
+        mock_status = MagicMock()
+        mock_status.status_code = 200
+        mock_status.json.return_value = {"request_id": "req-123", "status": "failed"}
+        mock_status.raise_for_status.return_value = None
+
+        mock_result = MagicMock()
+        mock_result.status_code = 472
+        mock_result.json.return_value = {"request_id": "req-123", "status": "failed", "error": "no data"}
+
+        mock_get.side_effect = [mock_status, mock_result]
+
+        client = QueueClient("http://test:8080", "test-key")
+        client._pending_requests["test-corr"] = QueuedRequestInfo(
+            request_id="req-123",
+            correlation_id="test-corr",
+            path="v3/test",
+            status="pending",
+        )
+        client._request_id_to_correlation["req-123"] = "test-corr"
+
+        result, status_code = client.wait_for_result("req-123", poll_interval=0.01, timeout=1.0)
+
+        assert result is None
+        assert status_code == 472
+
     @patch.object(requests.Session, 'get')
     def test_wait_for_result_timeout(self, mock_get):
         """Test wait_for_result raises TimeoutError."""

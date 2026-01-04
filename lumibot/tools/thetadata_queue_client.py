@@ -507,11 +507,20 @@ class QueueClient:
             self._pending_requests[correlation_id] = info
             self._request_id_to_correlation[request_id] = correlation_id
 
+        try:
+            params_json = json.dumps(query_params, sort_keys=True, default=str)
+        except Exception:
+            params_json = str(query_params)
+        if len(params_json) > 500:
+            params_json = params_json[:500] + "…"
+
         logger.info(
-            "Submitted to queue: request_id=%s correlation=%s position=%s",
+            "Submitted to queue: request_id=%s correlation=%s position=%s path=%s params=%s",
             request_id,
             correlation_id,
             queue_position,
+            path,
+            params_json,
         )
         # Best-effort: surface request_id into the progress UI so a "stall" is diagnosable.
         try:  # pragma: no cover - UI plumbing
@@ -702,25 +711,37 @@ class QueueClient:
                     last_log_time = time.time()
 
                 # Check terminal states
-                if status == "completed":
-                    result, status_code, _ = self.get_result(request_id)
-                    # Log successful receipt from queue (fills logging gap for individual pieces)
-                    elapsed = time.time() - start_time
-                    result_size = len(result) if isinstance(result, (list, dict)) else 0
-                    logger.info(
-                        "[THETA][QUEUE] Received result: request_id=%s elapsed=%.1fs status_code=%d size=%d",
-                        request_id,
-                        elapsed,
-                        status_code,
-                        result_size,
-                    )
-                    # Update local tracking
-                    with self._lock:
-                        if info.correlation_id in self._pending_requests:
-                            self._pending_requests[info.correlation_id].status = "completed"
-                            self._pending_requests[info.correlation_id].result = result
-                            self._pending_requests[info.correlation_id].result_status_code = status_code
-                    return result, status_code
+                if status in ("completed", "failed"):
+                    # IMPORTANT: The downloader may surface "no data" (ThetaData 472) or other
+                    # non-200 terminal outcomes as status=failed. We must treat those as terminal
+                    # once the result endpoint is available, otherwise callers can stall until a timeout
+                    # and never record a cache placeholder (breaking the warm-cache invariant).
+                    result, status_code, result_state = self.get_result(request_id)
+                    if status_code == 202:
+                        # Result not ready yet; keep polling.
+                        pass
+                    elif result_state == "dead" or status_code == 500:
+                        with self._lock:
+                            if info.correlation_id in self._pending_requests:
+                                self._pending_requests[info.correlation_id].status = "dead"
+                        raise Exception(f"Request {request_id} permanently failed: {info.error}")
+                    else:
+                        elapsed = time.time() - start_time
+                        result_size = len(result) if isinstance(result, (list, dict)) else 0
+                        logger.info(
+                            "[THETA][QUEUE] Received result: request_id=%s status=%s elapsed=%.1fs status_code=%d size=%d",
+                            request_id,
+                            status,
+                            elapsed,
+                            status_code,
+                            result_size,
+                        )
+                        with self._lock:
+                            if info.correlation_id in self._pending_requests:
+                                self._pending_requests[info.correlation_id].status = status
+                                self._pending_requests[info.correlation_id].result = result
+                                self._pending_requests[info.correlation_id].result_status_code = status_code
+                        return result, status_code
 
                 elif status == "dead":
                     with self._lock:
