@@ -20,13 +20,13 @@ There is a **separate dev account** that CAN be used for local debugging without
 
 ```bash
 # Quick test with dev credentials
-mkdir -p /tmp/theta-dev-test
-echo -e "rob-dev@lumiwealth.com\nTestTestTest" > /tmp/theta-dev-test/creds.txt
-java -jar $(python -c "import lumibot; import os; print(os.path.join(os.path.dirname(lumibot.__file__), 'tools', 'ThetaTerminal.jar'))") /tmp/theta-dev-test/creds.txt &
+mkdir -p "/Users/robertgrzesik/Documents/Development/tmp/theta-dev-test"
+echo -e "rob-dev@lumiwealth.com\nTestTestTest" > "/Users/robertgrzesik/Documents/Development/tmp/theta-dev-test/creds.txt"
+java -jar $(python -c "import lumibot; import os; print(os.path.join(os.path.dirname(lumibot.__file__), 'tools', 'ThetaTerminal.jar'))") "/Users/robertgrzesik/Documents/Development/tmp/theta-dev-test/creds.txt" &
 sleep 10
 curl "http://127.0.0.1:25510/v2/status"  # Should show CONNECTED
 pkill -f "ThetaTerminal.jar"  # Clean up
-rm -rf /tmp/theta-dev-test
+rm -rf "/Users/robertgrzesik/Documents/Development/tmp/theta-dev-test"
 ```
 
 **Use dev credentials ONLY for:** Debugging ThetaTerminal itself, testing API endpoints, investigating data issues.
@@ -35,6 +35,7 @@ rm -rf /tmp/theta-dev-test
    integrations, reuse that helper so we never DDoS the server.
 4. **Long commands = safe-timeout (20m default max).** Wrap backtests/pytest/stress jobs with `/Users/robertgrzesik/bin/safe-timeout 1200s …` and break work into smaller chunks if it would run longer. Only use longer timeouts when absolutely necessary (e.g., explicit full-window acceptance backtests).
 5. **Artifacts.** When demonstrating fixes, capture `Strategy\ Library/logs/*.log`, tear sheets, and downloader stress JSONs so the accuracy/dividend/resilience story stays reproducible.
+6. **Write Location Policy (no “code files” outside Development).** Do not create helper scripts (e.g., `*.py`) under `/tmp` or other non-Development locations. Put LumiBot helpers under `scripts/` in this repo.
 
 Failure to follow these rules will break everyone's workflows—double-check env vars before running anything.
 
