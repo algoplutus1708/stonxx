@@ -72,6 +72,10 @@ class Broker(ABC):
     ERROR_ORDER = "error"
     PLACEHOLDER_ORDER = "placeholder"
 
+    @staticmethod
+    def _truthy_env(value: str | None) -> bool:
+        return (value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
     def __init__(self, name="", connect_stream=True, data_source: DataSource = None, option_source: DataSource = None,
                  config=None, max_workers=20, extended_trading_minutes=0, cleanup_config=None):
         """Broker constructor"""
@@ -1896,6 +1900,23 @@ class Broker(ABC):
             "asset.expiration": stored_order.asset.expiration if stored_order.asset is not None else None,
             "asset.asset_type": stored_order.asset.asset_type if stored_order.asset is not None else None,
         }
+
+        # Backtest-only trade audit telemetry.
+        #
+        # WHY: NVDA/SPX investigations require a bulletproof, per-fill record of the *inputs used
+        # to decide* a fill (bar OHLC, quote bid/ask, underlying quote, slippage model, etc.).
+        # We keep this behind an env flag because it increases CSV width and can add overhead.
+        if self._truthy_env(os.environ.get("LUMIBOT_BACKTEST_AUDIT")):
+            audit = getattr(stored_order, "_audit", None)
+            if isinstance(audit, dict) and audit:
+                for key, value in audit.items():
+                    # Namespace audit fields to avoid collisions with existing columns.
+                    new_row[f"audit.{key}"] = value
+            try:
+                delattr(stored_order, "_audit")
+            except Exception:
+                pass
+
         price_source = getattr(stored_order, "_price_source", None)
         if price_source:
             new_row["price_source"] = price_source
