@@ -45,7 +45,7 @@ CASES: List[Case] = [
         start_date="2020-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="AAPLDeepDipCalls_2026-01-02_10-25_3KsjXy",
+        baseline_run_id="AAPLDeepDipCalls_2026-01-04_11-14_lIPHBU",
     ),
     Case(
         slug="leaps_alpha_picks_short",
@@ -54,7 +54,7 @@ CASES: List[Case] = [
         start_date="2025-10-01",
         end_date="2025-10-15",
         data_source="thetadata",
-        baseline_run_id="LeapsCallDebitSpread_2026-01-02_10-07_OZi6We",
+        baseline_run_id="LeapsCallDebitSpread_2026-01-04_11-20_vXE88y",
     ),
     Case(
         slug="leaps_alpha_picks_full_year",
@@ -63,7 +63,7 @@ CASES: List[Case] = [
         start_date="2025-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="LeapsCallDebitSpread_2026-01-02_10-48_4UtvLT",
+        baseline_run_id="LeapsCallDebitSpread_2026-01-04_11-22_rnMuYq",
     ),
     Case(
         slug="tqqq_sma200_thetadata",
@@ -72,7 +72,7 @@ CASES: List[Case] = [
         start_date="2013-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="TqqqSma200Strategy_2026-01-02_10-24_Uus6vb",
+        baseline_run_id="TqqqSma200Strategy_2026-01-04_11-10_Wa65DX",
     ),
     Case(
         slug="tqqq_sma200_yahoo",
@@ -81,7 +81,7 @@ CASES: List[Case] = [
         start_date="2013-01-01",
         end_date="2025-12-01",
         data_source="yahoo",
-        baseline_run_id="TqqqSma200Strategy_2026-01-02_10-25_fOI4Ek",
+        baseline_run_id="TqqqSma200Strategy_2026-01-04_04-40_2sdaIJ",
     ),
     # Backdoor Butterfly 0DTE: we keep two windows (speed baseline vs full-year acceptance).
     Case(
@@ -91,7 +91,7 @@ CASES: List[Case] = [
         start_date="2025-01-01",
         end_date="2025-11-30",
         data_source="thetadata",
-        baseline_run_id="BackdoorButterfly0DTE_2026-01-02_18-52_XdYcWQ",
+        baseline_run_id="BackdoorButterfly0DTE_2026-01-04_11-33_sBKYi2",
     ),
     Case(
         slug="backdoor_butterfly_full_year",
@@ -100,7 +100,7 @@ CASES: List[Case] = [
         start_date="2025-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="BackdoorButterfly0DTE_2026-01-02_10-29_HPNuUM",
+        baseline_run_id="BackdoorButterfly0DTE_2026-01-04_11-40_1VPPZ9",
     ),
     Case(
         slug="meli_deep_drawdown",
@@ -109,7 +109,7 @@ CASES: List[Case] = [
         start_date="2013-01-01",
         end_date="2025-12-18",
         data_source="thetadata",
-        baseline_run_id="MeliDeepDrawdownCalls_2026-01-02_19-24_kZELl5",
+        baseline_run_id="MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O",
     ),
     Case(
         slug="backdoor_smartlimit",
@@ -118,7 +118,7 @@ CASES: List[Case] = [
         start_date="2025-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="BackdoorButterfly0DTESmartLimit_2026-01-02_10-34_UTFoHq",
+        baseline_run_id="BackdoorButterfly0DTESmartLimit_2026-01-04_06-29_NduXK0",
     ),
     # SPX Short Straddle: "baseline" and "stall repro".
     #
@@ -131,7 +131,7 @@ CASES: List[Case] = [
         start_date="2025-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="SPXShortStraddle_2025-12-31_17-16_Ff79Hy",
+        baseline_run_id="SPXShortStraddle_2026-01-04_06-37_sHgfVQ",
     ),
     Case(
         slug="spx_short_straddle_repro",
@@ -140,7 +140,7 @@ CASES: List[Case] = [
         start_date="2025-01-06",
         end_date="2025-12-26",
         data_source="thetadata",
-        baseline_run_id="SPXShortStraddle_2026-01-02_10-39_XtAwjW",
+        baseline_run_id="SPXShortStraddle_2026-01-04_06-41_B1jF98",
     ),
 ]
 

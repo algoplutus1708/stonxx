@@ -258,6 +258,15 @@ jobs:
           set -euo pipefail
           timeout 10800 python -m pytest -q "${{ matrix.case.nodeid }}" --tb=short --durations=30 -x
 
+      - name: Upload acceptance artifacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-${{ matrix.case.slug }}-${{ github.run_id }}
+          path: |
+            tests/backtest/_acceptance_runs/**
+            tests/backtest/acceptance_backtests_baselines.json
+
   LintAndTest:
     name: LintAndTest
     runs-on: ubuntu-latest

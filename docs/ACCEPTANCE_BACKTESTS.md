@@ -9,6 +9,18 @@ This document is the **canonical manual acceptance suite** for LumiBot backtesti
 - **Every row must include the `run_id`** so artifacts remain auditable in `Strategy Library/logs/`.
 - Release gate runs must use **production-like flags** (see below).
 
+## CI acceptance gate (source of truth)
+
+- GitHub CI runs the real Strategy Library demos via `tests/backtest/test_acceptance_backtests_ci.py`.
+- CI assertions are **strict** and driven by `tests/backtest/acceptance_backtests_baselines.json` (generated from
+  `Strategy Library/logs/` via `scripts/generate_acceptance_backtests_baselines.py`).
+- When updating expected outputs: append rows here *and* update the baseline JSON from the chosen baseline `run_id`s.
+
+## Window semantics (avoid false “drift”)
+
+- LumiBot treats `BACKTESTING_END` as **exclusive**.
+- As a result, `*_settings.json` records `backtesting_end` as `(BACKTESTING_END - 1 day) 23:59:00` (local market TZ).
+
 ## Guardrails
 
 - **Do not modify demo strategy files** under `Strategy Library/Demos/`. Fix issues in **LumiBot** (or the data-downloader if proven root cause).
@@ -71,6 +83,8 @@ Each strategy section includes:
 |---|---:|---|---:|---:|---:|---:|---|---|
 | `AAPLDeepDipCalls_2025-12-25_19-08_WHRsPm` | (unknown) | 2020-01-01 → 2025-11-30 | (n/a) | 865% | 48.72% | -33.08% | (unknown) | (unknown) |
 | `AAPLDeepDipCalls_2026-01-02_10-25_3KsjXy` | 4.4.21 | 2020-01-01 → 2025-11-30 | 237.5 | 870% | 48.86% | -34.09% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `AAPLDeepDipCalls_2026-01-04_06-02_3HO2Ds` | 4.4.24 | 2020-01-01 → 2025-11-30 | 26.9 | 862% | 48.63% | -34.09% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `AAPLDeepDipCalls_2026-01-04_11-14_lIPHBU` | 4.4.24 | 2020-01-01 → 2025-11-30 | 77.8 | 853% | 48.36% | -34.3% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 2) Alpha Picks LEAPS (Call Debit Spread)
 
@@ -86,6 +100,10 @@ Each strategy section includes:
 | `LeapsCallDebitSpread_2025-12-25_19-14_lLFnSk` | (unknown) | 2025-10-01 → 2025-10-15 | (n/a) | 1% | 17.87% | -1.42% | (unknown) | (unknown) |
 | `LeapsCallDebitSpread_2026-01-02_10-07_OZi6We` | 4.4.21 | 2025-10-01 → 2025-10-14 | 44.5 | 0% | 14.46% | -1.42% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-02_10-48_4UtvLT` | 4.4.21 | 2025-01-01 → 2025-11-30 | 285.5 | -3% | -3.03% | -19.33% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `LeapsCallDebitSpread_2026-01-04_05-13_ZpmFin` | 4.4.24 | 2025-10-01 → 2025-10-14 | 10.8 | 2% | 58.04% | -1.14% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `LeapsCallDebitSpread_2026-01-04_11-20_vXE88y` | 4.4.24 | 2025-10-01 → 2025-10-14 | 5.4 | 0% | 11.81% | -1.16% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `LeapsCallDebitSpread_2026-01-04_05-53_OtxpYi` | 4.4.24 | 2025-01-01 → 2025-11-30 | 10.7 | -74% | -77.61% | -84.04% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `LeapsCallDebitSpread_2026-01-04_11-22_rnMuYq` | 4.4.24 | 2025-01-01 → 2025-11-30 | 7.6 | -4% | -4.34% | -18.39% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 3) TQQQ SMA200 (ThetaData vs Yahoo sanity)
 
@@ -101,6 +119,9 @@ Each strategy section includes:
 | `TqqqSma200Strategy_2025-12-25_19-20_cQkd1T` | (unknown) | (unknown) | 2013-01-01 → 2025-11-30 | (n/a) | 8,585% | 42.17% | -48.40% | (unknown) | (unknown) |
 | `TqqqSma200Strategy_2026-01-02_10-24_Uus6vb` | 4.4.21 | thetadata | 2013-01-01 → 2025-11-30 | 33.8 | 8,585% | 42.17% | -48.40% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `TqqqSma200Strategy_2026-01-02_10-25_fOI4Ek` | 4.4.21 | yahoo | 2013-01-01 → 2025-11-30 | 8.2 | 8,272% | 40.94% | -48.82% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `TqqqSma200Strategy_2026-01-04_04-39_xX9si4` | 4.4.24 | thetadata | 2013-01-01 → 2025-11-30 | 12.1 | 8,774% | 42.4% | -48.4% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `TqqqSma200Strategy_2026-01-04_11-10_Wa65DX` | 4.4.24 | thetadata | 2013-01-01 → 2025-11-30 | 16.3 | 8,585% | 42.16% | -48.4% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `TqqqSma200Strategy_2026-01-04_04-40_2sdaIJ` | 4.4.24 | yahoo | 2013-01-01 → 2025-11-30 | 11.3 | 8,272% | 40.94% | -48.82% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 4) Backdoor Butterfly 0DTE (regular fills; index + index options)
 
@@ -119,6 +140,11 @@ We keep two canonical windows:
 | `BackdoorButterfly0DTE_2025-12-31_15-43_TWzKau` | 4.4.20 | 2025-01-01 → 2025-11-30 | 79.8 | -22% | -24.00% | -30.13% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `BackdoorButterfly0DTE_2026-01-02_10-29_HPNuUM` | 4.4.21 | 2025-01-01 → 2025-11-30 | 267.8 | -19% | -20.79% | -25.94% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `BackdoorButterfly0DTE_2026-01-02_18-52_XdYcWQ` | 4.4.21 | 2025-01-01 → 2025-11-29 | 121.6 | -21% | -23.12% | -26.42% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTE_2026-01-04_06-26_S1FSC2` | 4.4.24 | 2025-01-01 → 2025-11-30 | 120.5 | -20% | -22.1% | -25.48% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTE_2026-01-04_11-40_1VPPZ9` | 4.4.24 | 2025-01-01 → 2025-11-30 | 119.4 | -21% | -23.15% | -26.45% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTE_2026-01-04_06-24_KaizMH` | 4.4.24 | 2025-01-01 → 2025-11-29 | 116.4 | -21% | -23.37% | -26.62% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTE_2026-01-04_11-27_KD9Qi0` | 4.4.24 | 2025-01-01 → 2025-11-29 | 118.0 | -21% | -23.11% | -26.41% | historical (superseded; minor rounding drift) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTE_2026-01-04_11-33_sBKYi2` | 4.4.24 | 2025-01-01 → 2025-11-29 | 118.1 | -21% | -23.12% | -26.42% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 5) MELI Deep Drawdown Calls
 
@@ -128,13 +154,15 @@ We keep two canonical windows:
   - entry trades occur (drawdown-triggered buys)
   - no “sawtooth” PV caused by missing option marks (forward-fill behavior remains stable)
 
-This strategy is **under investigation** for baseline mismatch (do not rebaseline without explicit sign-off).
+This strategy was previously **under investigation** for baseline mismatch; CI uses the row marked `expected baseline`.
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | status | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
 | `MeliDeepDrawdownCalls_2025-12-25_20-38_33bGtY` | (unknown) | 2013-01-01 → 2025-12-17 | (n/a) | 131% | 7.26% | -97.78% | expected (historical anchor) | (unknown) |
 | `MeliDeepDrawdownCalls_2026-01-02_10-09_7yisFp` | 4.4.21 | 2013-01-01 → 2025-12-17 | 856.3 | -91% | -18.22% | -99.73% | under investigation | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `MeliDeepDrawdownCalls_2026-01-02_19-24_kZELl5` | 4.4.21 | 2013-01-01 → 2025-12-17 | 350.4 | 14% | 1.08% | -98.26% | under investigation (daily snapshot NBBO override) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `MeliDeepDrawdownCalls_2026-01-04_09-39_hyg1f1` | 4.4.24 | 2013-01-01 → 2025-12-17 | 18.1 | 82% | 5.12% | -98.2% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O` | 4.4.24 | 2013-01-01 → 2025-12-17 | 41.1 | -89% | -16.83% | -98.96% | expected baseline (post daily-bar end-row fix; queue-free) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 See: `docs/investigations/ACCURACY_AUDIT_2026-01-02.md` for the divergence notes and first-diff audit plan.
 
@@ -151,6 +179,7 @@ See: `docs/investigations/ACCURACY_AUDIT_2026-01-02.md` for the divergence notes
 |---|---:|---|---:|---:|---:|---:|---|---|
 | `BackdoorButterfly0DTESmartLimit_2026-01-02_10-34_UTFoHq` | 4.4.21 | 2025-01-01 → 2025-11-30 | 283.0 | -3% | -2.96% | -13.58% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `BackdoorButterfly0DTESmartLimit_2026-01-02_19-49_QXkWuB` | 4.4.21 | 2025-01-01 → 2025-11-29 | 107.1 | -6% | -6.2% | -13.39% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTESmartLimit_2026-01-04_06-29_NduXK0` | 4.4.24 | 2025-01-01 → 2025-11-30 | 120.4 | -6% | -6.42% | -14.88% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 7) SPX Short Straddle Intraday (production stall repro)
 
@@ -168,6 +197,8 @@ We keep two canonical windows:
 | `SPXShortStraddle_2025-12-31_17-16_Ff79Hy` | 4.4.20 | 2025-01-01 → 2025-11-30 | 104.8 | -17% | -18.99% | -28.34% | speed baseline (historical) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `SPXShortStraddle_2026-01-02_10-39_XtAwjW` | 4.4.21 | 2025-01-06 → 2025-12-25 | 516.8 | -17% | -17.81% | -33.51% | stall repro window | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `SPXShortStraddle_2026-01-02_18-51_1JvQro` | 4.4.21 | 2025-01-06 → 2025-12-24 | 63.8 | -17% | -17.5% | -33.51% | stall repro window (perf fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `SPXShortStraddle_2026-01-04_06-37_sHgfVQ` | 4.4.24 | 2025-01-01 → 2025-11-30 | 70.7 | -21% | -22.96% | -30.87% | speed baseline (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `SPXShortStraddle_2026-01-04_06-41_B1jF98` | 4.4.24 | 2025-01-06 → 2025-12-25 | 76.1 | -17% | -17.5% | -33.51% | stall repro window (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ## Optional: Profiling artifact (opt-in)
 

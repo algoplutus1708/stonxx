@@ -7,9 +7,10 @@ User requirement (non-negotiable):
 - They must FAIL if any run tries to enqueue a ThetaData downloader request (cache miss / fallback).
 
 Implementation notes:
-- We run each script in an isolated temp working directory so that `logs/` is clean and parseable.
-- We parse the generated `*_tearsheet.csv` for Total Return / CAGR% / Max Drawdown and assert
-  broad guardrail ranges (not exact values).
+- We run each script in an isolated run directory so that `logs/` is clean and parseable.
+- Expected metrics (Total Return / CAGR% / Max Drawdown) come from
+  `tests/backtest/acceptance_backtests_baselines.json` (generated from Strategy Library `logs/`).
+  We assert these *strictly* (0.01% resolution) to catch even small correctness drift.
 """
 
 from __future__ import annotations
@@ -19,13 +20,24 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
+import uuid
 from dataclasses import dataclass
+from datetime import date, timedelta
+from decimal import Decimal
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 pytestmark = [pytest.mark.acceptance_backtest]
+
+# Headline metrics are computed from floating series and serialized to 0.01% resolution.
+# In practice we occasionally see ±0.01–0.05% rounding differences across runs even when the
+# underlying trades are identical, so we allow a tiny tolerance to prevent CI flake while still
+# catching meaningful drift.
+_METRIC_TOLERANCE_CENTIPERCENT = int(os.environ.get("ACCEPTANCE_METRIC_TOLERANCE_CENTIPERCENT", "10"))
 
 
 # Emitted by lumibot/tools/thetadata_queue_client.py when a request is enqueued to ThetaTerminal.
@@ -50,30 +62,39 @@ def _require_env(keys: list[str]) -> None:
     pytest.skip(message)
 
 
-def _parse_percent(text: str) -> float:
+def _centipercent(text: str) -> int:
     """
-    Parse values like:
-    - "-17%" -> -0.17
-    - "48.86%" -> 0.4886
-    - "8,272%" -> 82.72
+    Convert percent strings into *centipercent* integers (0.01% units).
+
+    Examples:
+    - "48.86%" -> 4886
+    - "-17%" -> -1700
+    - "8,585%" -> 858500
+
+    Notes:
+    - We intentionally assert at 0.01% resolution (the tearsheet CSV is written at this granularity).
+    - Anything finer is not representable and should be treated as a serialization bug.
     """
     s = str(text).strip()
     if not s.endswith("%"):
-        raise ValueError(f"Expected percent string, got {text!r}")
+        raise ValueError(f"Expected percent string ending with '%', got {text!r}")
     s = s[:-1].replace(",", "").strip()
-    return float(s) / 100.0
+    scaled = Decimal(s) * Decimal("100")
+    if scaled != scaled.to_integral_value():
+        raise ValueError(f"Percent value {text!r} is not representable at 0.01% resolution.")
+    return int(scaled)
 
 
-def _read_tearsheet_metrics(tearsheet_csv: Path) -> dict[str, float]:
+def _read_tearsheet_metrics_centipercent(tearsheet_csv: Path) -> dict[str, int]:
     df = pd.read_csv(tearsheet_csv)
     if "Metric" not in df.columns or "Strategy" not in df.columns:
         raise AssertionError(f"Unexpected tearsheet CSV columns: {list(df.columns)}")
 
-    def _get(metric_name: str) -> float:
+    def _get(metric_name: str) -> int:
         row = df.loc[df["Metric"] == metric_name]
         if row.empty:
             raise AssertionError(f"Missing metric {metric_name!r} in {tearsheet_csv}")
-        return _parse_percent(row["Strategy"].iloc[0])
+        return _centipercent(row["Strategy"].iloc[0])
 
     return {
         "total_return": _get("Total Return"),
@@ -126,29 +147,10 @@ def _assert_no_downloader_queue_used(run_dir: Path) -> None:
 
 
 def _base_env(repo_root: Path) -> dict[str, str]:
-    required = [
-        "DATADOWNLOADER_BASE_URL",
-        "DATADOWNLOADER_API_KEY",
-        "LUMIBOT_CACHE_BACKEND",
-        "LUMIBOT_CACHE_MODE",
-        "LUMIBOT_CACHE_S3_BUCKET",
-        "LUMIBOT_CACHE_S3_PREFIX",
-        "LUMIBOT_CACHE_S3_REGION",
-        "LUMIBOT_CACHE_S3_VERSION",
-        "LUMIBOT_CACHE_S3_ACCESS_KEY_ID",
-        "LUMIBOT_CACHE_S3_SECRET_ACCESS_KEY",
-        # ThetaData credentials are required by Strategy.backtest() input validation even when
-        # using the remote downloader. Any non-empty values are sufficient here.
-        "THETADATA_USERNAME",
-        "THETADATA_PASSWORD",
-    ]
-    _require_env(required)
-
     env = dict(os.environ)
     env.update(
         {
             "IS_BACKTESTING": "True",
-            "BACKTESTING_DATA_SOURCE": "thetadata",
             "SHOW_PLOT": "True",
             "SHOW_INDICATORS": "True",
             "SHOW_TEARSHEET": "True",
@@ -160,31 +162,242 @@ def _base_env(repo_root: Path) -> dict[str, str]:
 
     # Ensure we always import the checked-out source tree (even when running in a temp cwd).
     env["PYTHONPATH"] = f"{repo_root}:{env.get('PYTHONPATH', '')}".strip(":")
+    env.setdefault("PYTHONHASHSEED", "0")
+    env.setdefault("LUMIBOT_CACHE_S3_VERSION", "v1")  # optional in prod; code defaults to v1
     return env
 
 
 @dataclass(frozen=True)
-class _RunCase:
+class _BaselineCase:
     slug: str
     strategy_name: str
     script_filename: str
-    start_date: str
-    end_date: str
-    data_source: str = "thetadata"
-    expected_total_return: float | None = None
-    expected_cagr: float | None = None
-    expected_max_drawdown: float | None = None
-    tol_total_return: float = 0.30
-    tol_cagr: float = 0.10
-    tol_max_drawdown: float = 0.15
+    start_date: str  # BACKTESTING_START (YYYY-MM-DD)
+    end_date: str  # BACKTESTING_END (YYYY-MM-DD, exclusive)
+    data_source: str
+    baseline_run_id: str
+    expected_metrics_centipercent: dict[str, int]
+    baseline_backtest_time_seconds: float | None
 
 
-def _run_script(case: _RunCase, tmp_path: Path, run_name: str) -> tuple[Path, dict[str, float]]:
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _baselines_path(repo_root: Path) -> Path:
+    return repo_root / "tests" / "backtest" / "acceptance_backtests_baselines.json"
+
+
+def _load_baselines() -> dict[str, _BaselineCase]:
+    repo_root = _repo_root()
+    path = _baselines_path(repo_root)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    cases = payload.get("cases") or []
+
+    out: dict[str, _BaselineCase] = {}
+    for raw in cases:
+        slug = str(raw["slug"])
+        if slug in out:
+            raise AssertionError(f"Duplicate baseline slug in {path}: {slug}")
+        out[slug] = _BaselineCase(
+            slug=slug,
+            strategy_name=str(raw["strategy_name"]),
+            script_filename=str(raw["script_filename"]),
+            start_date=str(raw["start_date"]),
+            end_date=str(raw["end_date"]),
+            data_source=str(raw["data_source"]),
+            baseline_run_id=str(raw["baseline_run_id"]),
+            expected_metrics_centipercent=dict(raw["metrics_centipercent"]),
+            baseline_backtest_time_seconds=raw.get("backtest_time_seconds"),
+        )
+
+    if not out:
+        raise AssertionError(f"No baseline cases found in {path}")
+    return out
+
+
+_BASELINES_BY_SLUG = _load_baselines()
+
+
+def _baseline(slug: str) -> _BaselineCase:
+    try:
+        return _BASELINES_BY_SLUG[slug]
+    except KeyError as exc:
+        raise AssertionError(f"Unknown acceptance baseline slug {slug!r}. Update {_baselines_path(_repo_root())}.") from exc
+
+
+def _runs_root(repo_root: Path) -> Path:
+    return repo_root / "tests" / "backtest" / "_acceptance_runs"
+
+
+def _expected_settings_end_date(end_date_exclusive: str) -> str:
+    # LumiBot treats BACKTESTING_END as exclusive and writes backtesting_end as (end-1day) at 23:59.
+    end = date.fromisoformat(end_date_exclusive)
+    return (end - timedelta(days=1)).isoformat()
+
+
+def _assert_settings_match_window(case: _BaselineCase, payload: dict[str, object]) -> None:
+    start = str(payload.get("backtesting_start") or "")
+    end = str(payload.get("backtesting_end") or "")
+
+    if not start.startswith(case.start_date):
+        raise AssertionError(f"{case.slug}: settings backtesting_start={start!r} does not start with {case.start_date!r}")
+
+    expected_end_date = _expected_settings_end_date(case.end_date)
+    if not re.match(rf"^{re.escape(expected_end_date)}\s+23:59:00", end):
+        raise AssertionError(
+            f"{case.slug}: settings backtesting_end={end!r} does not match expected date {expected_end_date!r} @ 23:59:00"
+        )
+
+
+def _runtime_limits(case: _BaselineCase) -> tuple[float | None, float | None]:
+    """
+    Returns (max_inner_backtest_time_s, max_outer_wall_time_s).
+
+    Notes (2026-01-04):
+    - Local/manual release gate is strict: 900s with prod-like flags.
+    - GitHub-hosted CI runners vary; we enforce "not hours" by scaling from the baseline run time.
+      Tight CI gating should be done on stable hardware (self-hosted runners).
+    """
+    local_max = float(os.environ.get("ACCEPTANCE_BACKTEST_LOCAL_MAX_SECONDS", "900"))
+
+    if not _is_ci():
+        return local_max, local_max
+
+    # CI limits: baseline_time * factor, bounded by [floor, cap].
+    factor = float(os.environ.get("ACCEPTANCE_BACKTEST_CI_FACTOR", "8"))
+    floor_s = float(os.environ.get("ACCEPTANCE_BACKTEST_CI_FLOOR_SECONDS", "900"))
+    cap_s = float(os.environ.get("ACCEPTANCE_BACKTEST_CI_CAP_SECONDS", "5400"))
+
+    baseline_s = case.baseline_backtest_time_seconds
+    if baseline_s is None:
+        # Fall back to the cap. This shouldn't happen for updated baselines.
+        return cap_s, cap_s
+
+    scaled = max(floor_s, baseline_s * factor)
+    limit = min(cap_s, scaled)
+    return limit, min(cap_s, limit + 1200.0)  # allow some overhead outside the core backtest timer
+
+
+def _require_acceptance_env(case: _BaselineCase) -> None:
+    required_common = [
+        "THETADATA_USERNAME",
+        "THETADATA_PASSWORD",
+    ]
+    required_thetadata = [
+        "DATADOWNLOADER_BASE_URL",
+        "DATADOWNLOADER_API_KEY",
+        "LUMIBOT_CACHE_BACKEND",
+        "LUMIBOT_CACHE_MODE",
+        "LUMIBOT_CACHE_S3_BUCKET",
+        "LUMIBOT_CACHE_S3_PREFIX",
+        "LUMIBOT_CACHE_S3_REGION",
+        "LUMIBOT_CACHE_S3_ACCESS_KEY_ID",
+        "LUMIBOT_CACHE_S3_SECRET_ACCESS_KEY",
+    ]
+
+    if case.data_source == "thetadata":
+        _require_env(required_common + required_thetadata)
+    else:
+        # Yahoo runs don't require downloader/cache secrets, but they still require non-empty ThetaData
+        # credentials due to Strategy.backtest() validation in shared code paths.
+        _require_env(required_common)
+
+
+def _run_subprocess_with_live_scan(
+    *,
+    cmd: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    stdout_path: Path,
+    stderr_path: Path,
+    timeout_s: int,
+    scan_patterns: tuple[str, ...] = (),
+) -> tuple[int, str | None]:
+    """
+    Run a subprocess while streaming stdout/stderr to files.
+
+    If any `scan_patterns` match in either stream, terminate the process early and return
+    (returncode, matched_pattern).
+
+    This keeps acceptance failures crisp when the warm-cache invariant is violated:
+    we don't want to wait 15–90 minutes just to discover a queue submission early in the run.
+    """
+    matched_pattern: str | None = None
+    matched_lock = threading.Lock()
+
+    with stdout_path.open("w", encoding="utf-8") as stdout_file, stderr_path.open("w", encoding="utf-8") as stderr_file:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(cwd),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+        def _pump(stream, out_file) -> None:
+            nonlocal matched_pattern
+            try:
+                for line in iter(stream.readline, ""):
+                    out_file.write(line)
+                    out_file.flush()
+                    if not scan_patterns:
+                        continue
+                    if matched_pattern is not None:
+                        continue
+                    for pat in scan_patterns:
+                        if re.search(pat, line):
+                            with matched_lock:
+                                if matched_pattern is None:
+                                    matched_pattern = pat
+                                    try:
+                                        proc.terminate()
+                                    except Exception:
+                                        pass
+                            break
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+        threads = [
+            threading.Thread(target=_pump, args=(proc.stdout, stdout_file), daemon=True),
+            threading.Thread(target=_pump, args=(proc.stderr, stderr_file), daemon=True),
+        ]
+        for t in threads:
+            t.start()
+
+        try:
+            returncode = proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            returncode = proc.wait(timeout=10)
+            raise subprocess.TimeoutExpired(cmd, timeout_s)
+        finally:
+            for t in threads:
+                t.join(timeout=5)
+
+    return returncode, matched_pattern
+
+
+def _run_script(case: _BaselineCase) -> tuple[Path, dict[str, int]]:
     repo_root = Path(__file__).resolve().parents[2]
+    _require_acceptance_env(case)
+
     script_path = repo_root / "tests" / "backtest" / "acceptance_strategies" / case.script_filename
     assert script_path.exists(), f"Missing strategy script: {script_path}"
 
-    run_dir = tmp_path / run_name
+    runs_root = _runs_root(repo_root)
+    runs_root.mkdir(parents=True, exist_ok=True)
+
+    run_id = f"{case.slug}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    run_dir = runs_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "logs").mkdir(parents=True, exist_ok=True)
 
@@ -196,27 +409,36 @@ def _run_script(case: _RunCase, tmp_path: Path, run_name: str) -> tuple[Path, di
     stdout_path = run_dir / "stdout.txt"
     stderr_path = run_dir / "stderr.txt"
 
-    # CI runners can be slow; still apply an upper bound so jobs don't hang forever.
-    timeout_s = 60 * 90  # 90 minutes per run
+    max_inner_s, max_outer_s = _runtime_limits(case)
+    timeout_s = int(max_outer_s or (60 * 90))  # absolute upper bound so jobs don't hang forever
 
-    with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open("w", encoding="utf-8") as stderr:
-        proc = subprocess.run(
-            [sys.executable, str(script_path)],
-            cwd=str(run_dir),
-            env=env,
-            stdout=stdout,
-            stderr=stderr,
-            text=True,
-            timeout=timeout_s,
+    t0 = time.monotonic()
+    scan_patterns = _DOWNLOADER_QUEUE_LOG_PATTERNS if case.data_source == "thetadata" else ()
+    returncode, matched_pattern = _run_subprocess_with_live_scan(
+        cmd=[sys.executable, str(script_path)],
+        cwd=run_dir,
+        env=env,
+        stdout_path=stdout_path,
+        stderr_path=stderr_path,
+        timeout_s=timeout_s,
+        scan_patterns=scan_patterns,
+    )
+    outer_s = time.monotonic() - t0
+
+    if matched_pattern is not None:
+        raise AssertionError(
+            "Acceptance backtest attempted to use the ThetaData downloader queue "
+            f"(pattern {matched_pattern!r} matched in stdout/stderr). Expected fully-warm S3 cache.\n"
+            f"run_dir={run_dir}"
         )
 
-    if proc.returncode != 0:
+    if returncode != 0:
         tail = ""
         try:
             tail = (stderr_path.read_text(errors="ignore") + "\n" + stdout_path.read_text(errors="ignore"))[-8000:]
         except Exception:
             tail = "(failed to read stdout/stderr tail)"
-        raise AssertionError(f"{case.slug} failed (exit={proc.returncode}).\n--- tail ---\n{tail}")
+        raise AssertionError(f"{case.slug} failed (exit={returncode}). run_dir={run_dir}\n--- tail ---\n{tail}")
 
     logs_dir = run_dir / "logs"
     settings = _find_single(
@@ -230,66 +452,56 @@ def _run_script(case: _RunCase, tmp_path: Path, run_name: str) -> tuple[Path, di
 
     # Artifact sanity
     _find_single(sorted(logs_dir.glob(f"{case.strategy_name}_*_trades.csv")), f"{case.strategy_name} trades.csv")
+    _find_single(sorted(logs_dir.glob(f"{case.strategy_name}_*_logs.csv")), f"{case.strategy_name} logs.csv")
 
-    _assert_no_downloader_queue_used(run_dir)
+    if case.data_source == "thetadata":
+        _assert_no_downloader_queue_used(run_dir)
 
-    metrics = _read_tearsheet_metrics(tearsheet_csv)
+    metrics = _read_tearsheet_metrics_centipercent(tearsheet_csv)
 
-    def _assert_close(actual: float, expected: float | None, tol: float, label: str) -> None:
-        if expected is None:
-            return
-        if abs(actual - expected) > tol:
+    expected = case.expected_metrics_centipercent
+    for key in ("total_return", "cagr", "max_drawdown"):
+        actual = metrics[key]
+        exp = int(expected[key])
+        if abs(actual - exp) > _METRIC_TOLERANCE_CENTIPERCENT:
             raise AssertionError(
-                f"{case.slug} {label} out of range: actual={actual:.4f} expected={expected:.4f} tol=±{tol:.4f}\n"
-                f"tearsheet={tearsheet_csv}"
+                f"{case.slug} {key} mismatch (centipercent): actual={actual} expected={exp} "
+                f"tolerance={_METRIC_TOLERANCE_CENTIPERCENT} "
+                f"(baseline_run_id={case.baseline_run_id})\n"
+                f"tearsheet={tearsheet_csv}\nrun_dir={run_dir}"
             )
 
-    _assert_close(metrics["total_return"], case.expected_total_return, case.tol_total_return, "total_return")
-    _assert_close(metrics["cagr"], case.expected_cagr, case.tol_cagr, "cagr")
-    _assert_close(metrics["max_drawdown"], case.expected_max_drawdown, case.tol_max_drawdown, "max_drawdown")
+    payload = json.loads(settings.read_text(encoding="utf-8"))
+    _assert_settings_match_window(case, payload)
 
-    # Also sanity-check that settings.json is parseable (helps detect truncated writes).
-    try:
-        json.loads(settings.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise AssertionError(f"{case.slug} produced an invalid settings.json: {settings}") from exc
+    inner_s = payload.get("backtest_time_seconds")
+    if max_inner_s is not None and isinstance(inner_s, (int, float)) and inner_s > max_inner_s:
+        raise AssertionError(
+            f"{case.slug} backtest_time_seconds regression: actual={inner_s:.1f}s max={max_inner_s:.1f}s "
+            f"(baseline={case.baseline_backtest_time_seconds})\nsettings={settings}\nrun_dir={run_dir}"
+        )
+
+    if max_outer_s is not None and outer_s > max_outer_s:
+        raise AssertionError(
+            f"{case.slug} wall_time regression: actual={outer_s:.1f}s max={max_outer_s:.1f}s\nrun_dir={run_dir}"
+        )
 
     return run_dir, metrics
 
 
-def test_acceptance_aapl_deep_dip_calls(tmp_path: Path) -> None:
-    case = _RunCase(
-        slug="aapl_deep_dip_calls",
-        strategy_name="AAPLDeepDipCalls",
-        script_filename="AAPL Deep Dip Calls (Copy 4).py",
-        start_date="2020-01-01",
-        end_date="2025-12-01",
-        expected_total_return=8.70,
-        expected_cagr=0.4886,
-        expected_max_drawdown=-0.3409,
-        tol_total_return=1.50,
-        tol_cagr=0.15,
-        tol_max_drawdown=0.15,
-    )
-    _run_script(case, tmp_path, "aapl_deep_dip_calls")
+def test_acceptance_aapl_deep_dip_calls() -> None:
+    _run_script(_baseline("aapl_deep_dip_calls"))
 
 
-def test_acceptance_leaps_alpha_picks(tmp_path: Path) -> None:
-    # Short window: must trade UBER/CLS/MFC (both legs). Metrics are annualized, so keep loose.
-    short = _RunCase(
-        slug="leaps_alpha_picks_short",
-        strategy_name="LeapsCallDebitSpread",
-        script_filename="Leaps Buy Hold (Alpha Picks).py",
-        start_date="2025-10-01",
-        end_date="2025-10-15",
-        expected_max_drawdown=-0.0142,
-        tol_max_drawdown=0.05,
-    )
-    run_dir, _ = _run_script(short, tmp_path, "leaps_short")
+def test_acceptance_leaps_alpha_picks() -> None:
+    # Short window: must trade UBER/CLS/MFC (both legs). Metrics are annualized; we still assert strictly
+    # against the baseline tearsheet, because this is deterministic given fixed data and code.
+    short = _baseline("leaps_alpha_picks_short")
+    run_dir, _ = _run_script(short)
 
     # Verify required tickers traded (both legs show up in trades.csv).
     trades_csv = _find_single(
-        sorted((run_dir / "logs").glob("LeapsCallDebitSpread_*_trades.csv")),
+        sorted((run_dir / "logs").glob(f"{short.strategy_name}_*_trades.csv")),
         "Leaps trades.csv",
     )
     trades = pd.read_csv(trades_csv)
@@ -297,158 +509,33 @@ def test_acceptance_leaps_alpha_picks(tmp_path: Path) -> None:
     for required in ("UBER", "CLS", "MFC"):
         assert required in symbols, f"Expected {required} to be traded in short window; got symbols={sorted(symbols)[:25]}"
 
-    # Full-year window (guardrail metrics from docs).
-    full_year = _RunCase(
-        slug="leaps_alpha_picks_full_year",
-        strategy_name="LeapsCallDebitSpread",
-        script_filename="Leaps Buy Hold (Alpha Picks).py",
-        start_date="2025-01-01",
-        end_date="2025-12-01",
-        expected_total_return=-0.03,
-        expected_cagr=-0.0303,
-        expected_max_drawdown=-0.1933,
-        tol_total_return=0.25,
-        tol_cagr=0.15,
-        tol_max_drawdown=0.15,
-    )
-    _run_script(full_year, tmp_path, "leaps_full_year")
+    _run_script(_baseline("leaps_alpha_picks_full_year"))
 
 
-def test_acceptance_tqqq_sma200(tmp_path: Path) -> None:
-    base = _RunCase(
-        slug="tqqq_sma200_thetadata",
-        strategy_name="TqqqSma200Strategy",
-        script_filename="TQQQ 200-Day MA.py",
-        start_date="2013-01-01",
-        end_date="2025-12-01",
-        expected_total_return=82.72,
-        expected_cagr=0.4094,
-        expected_max_drawdown=-0.4882,
-        tol_total_return=10.0,
-        tol_cagr=0.15,
-        tol_max_drawdown=0.15,
-    )
-    _, theta_metrics = _run_script(base, tmp_path, "tqqq_thetadata")
+def test_acceptance_tqqq_sma200() -> None:
+    theta = _baseline("tqqq_sma200_thetadata")
+    yahoo = _baseline("tqqq_sma200_yahoo")
 
-    yahoo = _RunCase(
-        slug="tqqq_sma200_yahoo",
-        strategy_name="TqqqSma200Strategy",
-        script_filename="TQQQ 200-Day MA.py",
-        start_date=base.start_date,
-        end_date=base.end_date,
-        data_source="yahoo",
-        expected_total_return=82.72,
-        expected_cagr=0.4094,
-        expected_max_drawdown=-0.4882,
-        tol_total_return=12.0,
-        tol_cagr=0.20,
-        tol_max_drawdown=0.20,
-    )
-    _, yahoo_metrics = _run_script(yahoo, tmp_path, "tqqq_yahoo")
+    _, theta_metrics = _run_script(theta)
+    _, yahoo_metrics = _run_script(yahoo)
 
-    # Parity sanity: Yahoo and ThetaData should be directionally close (avoid obvious inflation).
-    assert abs(theta_metrics["cagr"] - yahoo_metrics["cagr"]) < 0.10
+    # Parity sanity: Yahoo and ThetaData should be directionally close (avoid obvious inflation/deflation).
+    assert abs(theta_metrics["cagr"] - yahoo_metrics["cagr"]) <= 1000  # 10.00%
 
 
-def test_acceptance_backdoor_butterfly(tmp_path: Path) -> None:
-    # Speed baseline window
-    baseline = _RunCase(
-        slug="backdoor_butterfly_baseline",
-        strategy_name="BackdoorButterfly0DTE",
-        script_filename="Backdoor Butterfly 0 DTE (Copy).py",
-        start_date="2025-01-01",
-        end_date="2025-11-30",
-        expected_total_return=-0.20,
-        expected_cagr=-0.21,
-        expected_max_drawdown=-0.26,
-        tol_total_return=0.30,
-        tol_cagr=0.20,
-        tol_max_drawdown=0.20,
-    )
-    _run_script(baseline, tmp_path, "backdoor_baseline")
-
-    # Full-year acceptance window
-    full_year = _RunCase(
-        slug="backdoor_butterfly_full_year",
-        strategy_name="BackdoorButterfly0DTE",
-        script_filename="Backdoor Butterfly 0 DTE (Copy).py",
-        start_date="2025-01-01",
-        end_date="2025-12-01",
-        expected_total_return=-0.20,
-        expected_cagr=-0.21,
-        expected_max_drawdown=-0.26,
-        tol_total_return=0.35,
-        tol_cagr=0.25,
-        tol_max_drawdown=0.25,
-    )
-    _run_script(full_year, tmp_path, "backdoor_full_year")
+def test_acceptance_backdoor_butterfly() -> None:
+    _run_script(_baseline("backdoor_butterfly_baseline"))
+    _run_script(_baseline("backdoor_butterfly_full_year"))
 
 
-def test_acceptance_meli_deep_drawdown(tmp_path: Path) -> None:
-    case = _RunCase(
-        slug="meli_deep_drawdown",
-        strategy_name="MeliDeepDrawdownCalls",
-        script_filename="Meli Deep Drawdown Calls.py",
-        start_date="2013-01-01",
-        end_date="2025-12-18",
-        # Historical anchor (under investigation; keep very wide tolerances).
-        expected_total_return=1.31,
-        expected_cagr=0.0726,
-        expected_max_drawdown=-0.9778,
-        tol_total_return=3.00,
-        tol_cagr=0.40,
-        tol_max_drawdown=0.25,
-    )
-    _run_script(case, tmp_path, "meli_full")
+def test_acceptance_meli_deep_drawdown() -> None:
+    _run_script(_baseline("meli_deep_drawdown"))
 
 
-def test_acceptance_backdoor_smartlimit(tmp_path: Path) -> None:
-    case = _RunCase(
-        slug="backdoor_smartlimit",
-        strategy_name="BackdoorButterfly0DTESmartLimit",
-        script_filename="Backdoor Butterfly 0 DTE (Copy) - with SMART LIMITS.py",
-        start_date="2025-01-01",
-        end_date="2025-12-01",
-        expected_total_return=-0.03,
-        expected_cagr=-0.03,
-        expected_max_drawdown=-0.1358,
-        tol_total_return=0.30,
-        tol_cagr=0.25,
-        tol_max_drawdown=0.20,
-    )
-    _run_script(case, tmp_path, "backdoor_smartlimit")
+def test_acceptance_backdoor_smartlimit() -> None:
+    _run_script(_baseline("backdoor_smartlimit"))
 
 
-def test_acceptance_spx_short_straddle(tmp_path: Path) -> None:
-    # Speed baseline
-    baseline = _RunCase(
-        slug="spx_short_straddle_baseline",
-        strategy_name="SPXShortStraddle",
-        script_filename="SPX Short Straddle Intraday (Copy).py",
-        start_date="2025-01-01",
-        end_date="2025-11-30",
-        expected_total_return=-0.17,
-        expected_cagr=-0.1899,
-        expected_max_drawdown=-0.2834,
-        tol_total_return=0.25,
-        tol_cagr=0.20,
-        tol_max_drawdown=0.20,
-    )
-    _run_script(baseline, tmp_path, "spx_baseline")
-
-    # Stall repro / prod parity
-    repro = _RunCase(
-        slug="spx_short_straddle_repro",
-        strategy_name="SPXShortStraddle",
-        script_filename="SPX Short Straddle Intraday (Copy).py",
-        start_date="2025-01-06",
-        end_date="2025-12-26",
-        expected_total_return=-0.17,
-        expected_cagr=-0.1781,
-        expected_max_drawdown=-0.3351,
-        tol_total_return=0.30,
-        tol_cagr=0.25,
-        tol_max_drawdown=0.25,
-    )
-    _run_script(repro, tmp_path, "spx_repro")
-
+def test_acceptance_spx_short_straddle() -> None:
+    _run_script(_baseline("spx_short_straddle_baseline"))
+    _run_script(_baseline("spx_short_straddle_repro"))
