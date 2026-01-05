@@ -6490,3 +6490,5 @@ timestamp,test_name,data_source,trading_days,execution_time_seconds,git_commit,l
 2026-01-04T21:50:02.003321,test_databento_auth_failure_propagates,Databento,,0.151,55863cce,4.4.24,,,,,Auto-tracked from test_databento
 2026-01-04T21:50:17.430811,test_databento_continuous_futures_minute_data,Databento,,15.306,55863cce,4.4.24,,,,,Auto-tracked from test_databento
 2026-01-04T21:50:28.599279,test_databento_continuous_futures_minute_data_polars,Databento,,11.048,55863cce,4.4.24,,,,,Auto-tracked from test_databento
+2026-01-04T22:12:40.078701,test_acceptance_leaps_alpha_picks,unknown,,33.851,a45e40db,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-04T22:13:37.616903,test_acceptance_aapl_deep_dip_calls,unknown,,35.863,a45e40db,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci

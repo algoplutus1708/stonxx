@@ -108,12 +108,12 @@ Each strategy section includes:
 
 #### Expected Results (ThetaData / S3 v44)
 
-- Correct Total Return = 0.00%
-- Correct CAGR = 11.81%
-- Correct Max DD = -1.16%
-- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 5.4s
+- Correct Total Return = 1.00%
+- Correct CAGR = 18.00%
+- Correct Max DD = -1.43%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 33.3s
 - CI cap (seconds) <= 120
-- Baseline `run_id` = `LeapsCallDebitSpread_2026-01-04_11-20_vXE88y`
+- Baseline `run_id` = `LeapsCallDebitSpread_2026-01-04_22-07_IhWXKY`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -121,7 +121,8 @@ Each strategy section includes:
 | `LeapsCallDebitSpread_2026-01-02_10-07_OZi6We` | 4.4.21 | 2025-10-01 → 2025-10-14 | 44.5 | 0% | 14.46% | -1.42% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-02_10-48_4UtvLT` | 4.4.21 | 2025-01-01 → 2025-11-30 | 285.5 | -3% | -3.03% | -19.33% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-04_05-13_ZpmFin` | 4.4.24 | 2025-10-01 → 2025-10-14 | 10.8 | 2% | 58.04% | -1.14% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `LeapsCallDebitSpread_2026-01-04_11-20_vXE88y` | 4.4.24 | 2025-10-01 → 2025-10-14 | 5.4 | 0% | 11.81% | -1.16% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `LeapsCallDebitSpread_2026-01-04_11-20_vXE88y` | 4.4.24 | 2025-10-01 → 2025-10-14 | 5.4 | 0% | 11.81% | -1.16% | historical (superseded; baseline updated under v44 cache semantics) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `LeapsCallDebitSpread_2026-01-04_22-07_IhWXKY` | 4.4.25 | 2025-10-01 → 2025-10-14 | 33.3 | 1% | 18.0% | -1.43% | prod-like (baseline; v44; queue-free) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-04_05-53_OtxpYi` | 4.4.24 | 2025-01-01 → 2025-11-30 | 10.7 | -74% | -77.61% | -84.04% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-04_11-22_rnMuYq` | 4.4.24 | 2025-01-01 → 2025-11-30 | 7.6 | -4% | -4.34% | -18.39% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
