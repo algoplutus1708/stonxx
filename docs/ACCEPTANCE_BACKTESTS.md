@@ -64,7 +64,7 @@ Example format (repeat this on every speed row):
 
 - `macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8`
 
-## Canonical suite (currently 7 demos)
+## Canonical suite (currently 7 cases)
 
 This suite will grow over time (more strategies, data sources, and/or windows). When adding a new case:
 - add a new section below (including `#### Expected Results`)

@@ -14,8 +14,8 @@
       },
       "metrics_raw": {
         "cagr": "48.65%",
-        "max_drawdown": "-34.3%",
-        "total_return": "863%"
+        "max_drawdown": "-34.30%",
+        "total_return": "863.00%"
       },
       "script_filename": "AAPL Deep Dip Calls (Copy 4).py",
       "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
@@ -37,9 +37,9 @@
         "total_return": 100
       },
       "metrics_raw": {
-        "cagr": "18.0%",
+        "cagr": "18.00%",
         "max_drawdown": "-1.43%",
-        "total_return": "1%"
+        "total_return": "1.00%"
       },
       "script_filename": "Leaps Buy Hold (Alpha Picks).py",
       "settings_backtesting_end": "2025-10-14 23:59:00-04:00",
@@ -62,8 +62,8 @@
       },
       "metrics_raw": {
         "cagr": "42.16%",
-        "max_drawdown": "-48.4%",
-        "total_return": "8,585%"
+        "max_drawdown": "-48.40%",
+        "total_return": "8,585.00%"
       },
       "script_filename": "TQQQ 200-Day MA.py",
       "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
@@ -87,7 +87,7 @@
       "metrics_raw": {
         "cagr": "-23.12%",
         "max_drawdown": "-26.42%",
-        "total_return": "-21%"
+        "total_return": "-21.00%"
       },
       "script_filename": "Backdoor Butterfly 0 DTE (Copy).py",
       "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
@@ -111,7 +111,7 @@
       "metrics_raw": {
         "cagr": "6.16%",
         "max_drawdown": "-98.17%",
-        "total_return": "104%"
+        "total_return": "104.00%"
       },
       "script_filename": "Meli Deep Drawdown Calls.py",
       "settings_backtesting_end": "2025-12-17 23:59:00-05:00",
@@ -135,7 +135,7 @@
       "metrics_raw": {
         "cagr": "-6.43%",
         "max_drawdown": "-13.41%",
-        "total_return": "-6%"
+        "total_return": "-6.00%"
       },
       "script_filename": "Backdoor Butterfly 0 DTE (Copy) - with SMART LIMITS.py",
       "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
@@ -157,9 +157,9 @@
         "total_return": -1700
       },
       "metrics_raw": {
-        "cagr": "-17.5%",
+        "cagr": "-17.50%",
         "max_drawdown": "-33.51%",
-        "total_return": "-17%"
+        "total_return": "-17.00%"
       },
       "script_filename": "SPX Short Straddle Intraday (Copy).py",
       "settings_backtesting_end": "2025-12-25 23:59:00-05:00",

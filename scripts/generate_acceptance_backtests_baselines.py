@@ -148,12 +148,22 @@ def _read_tearsheet(tearsheet_csv: Path) -> Dict[str, Dict[str, Any]]:
             raise RuntimeError(f"Missing metric {metric_name!r} in {tearsheet_csv}")
         return str(row.iloc[0]).strip()
 
-    raw = {
+    raw_tearsheet = {
         "total_return": _get("Total Return"),
         "cagr": _get("CAGR% (Annual Return)"),
         "max_drawdown": _get("Max Drawdown"),
     }
-    centi = {k: _centipercent(v) for k, v in raw.items()}
+    centi = {k: _centipercent(v) for k, v in raw_tearsheet.items()}
+
+    def _format_centipercent(value: int) -> str:
+        """Render a centipercent integer as a canonical percent string with 2 decimals."""
+        sign = "-" if value < 0 else ""
+        value = abs(int(value))
+        whole = value // 100
+        frac = value % 100
+        return f"{sign}{whole:,}.{frac:02d}%"
+
+    raw = {k: _format_centipercent(v) for k, v in centi.items()}
     return {"raw": raw, "centipercent": centi}
 
 
