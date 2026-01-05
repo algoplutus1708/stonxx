@@ -48,11 +48,12 @@ This page documents environment variables used by LumiBot, with an emphasis on *
 - Purpose: Emit **per-fill audit telemetry** into the trades/event CSV as `audit.*` columns.
 - Values: `1` enables (anything truthy); unset/`0` disables.
 - Output:
-  - `*_trades.csv` / trade-event CSV contains additional `audit.*` columns.
+  - `*_trade_events.csv` (full trade-event export) contains additional `audit.*` columns.
   - Includes quote/bid/ask snapshots (asset + underlying for options), bar OHLC, SMART_LIMIT inputs, and multileg linkage.
 - Where:
   - Audit collection: `lumibot/backtesting/backtesting_broker.py`
   - Audit column emission: `lumibot/brokers/broker.py`
+  - Trade-event file routing: `lumibot/strategies/_strategy.py` (exports `*_trade_events.csv`; the plotter writes a simplified `*_trades.csv` for UI/quick review).
 
 ## Profiling (parity + performance investigations)
 
@@ -106,6 +107,19 @@ These env vars are used by the ThetaData chain cache/builder in `lumibot/tools/t
 - Purpose: Number of in-flight strike-list requests when building chains.
 - Values: integer.
 - Default: `0` (use queue client concurrency).
+
+## ThetaData corporate action normalization (accuracy)
+
+### `THETADATA_APPLY_CORPORATE_ACTIONS_INTRADAY`
+- Purpose: Apply split/dividend adjustments to **intraday** frames (minute/second/hour) in backtests so:
+  - intraday stock OHLC/quotes match **daily** split-adjusted prices, and
+  - option-chain strike normalization (which uses split-adjusted daily reference prices) stays consistent.
+- Values: truthy enables (`1`, `true`, `yes`); falsy disables (`0`, `false`).
+- Default:
+  - enabled when `IS_BACKTESTING` is truthy
+  - disabled otherwise
+- Pitfall: disabling can break options strike selection around splits (example: NVDA 2024-06-10 10:1 split).
+- Where: `lumibot/tools/thetadata_helper.py` (`get_price_data`)
 
 ## Remote cache (S3)
 

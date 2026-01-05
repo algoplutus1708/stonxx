@@ -62,7 +62,7 @@ LUMIBOT_BACKTEST_AUDIT
 - Purpose: Emit **per-fill audit telemetry** into the trade-event CSV as ``audit.*`` columns.
 - Values: ``1`` enables (any truthy value); unset/``0`` disables.
 - Output:
-  - Adds ``audit.*`` columns to the backtest trade-event CSV (for example, quote bid/ask snapshots, bar OHLC, SMART_LIMIT inputs, and multileg linkage).
+  - Writes a full trade-event export ``*_trade_events.csv`` with ``audit.*`` columns (for example, quote bid/ask snapshots, bar OHLC, SMART_LIMIT inputs, and multileg linkage).
 - Notes:
   - This increases CSV width and can add overhead; keep it enabled only when you need a full audit trail.
 
@@ -138,6 +138,20 @@ THETADATA_CHAIN_STRIKES_BATCH_SIZE
 - Purpose: Number of in-flight strike-list requests when building chains.
 - Values: integer.
 - Default: ``0`` (use queue client concurrency).
+
+ThetaData corporate action normalization (accuracy)
+--------------------------------------------------
+
+THETADATA_APPLY_CORPORATE_ACTIONS_INTRADAY
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Apply split/dividend adjustments to **intraday** frames (minute/second/hour) in backtests so intraday prices match daily split-adjusted prices and option-chain strike normalization stays consistent.
+- Values: ``1`` / ``true`` enable; ``0`` / ``false`` disable.
+- Default:
+  - enabled when ``IS_BACKTESTING`` is truthy
+  - disabled otherwise
+- Notes:
+  - Disabling can break options strike selection around splits (example: NVDA 10-for-1 split on 2024-06-10).
 
 Remote cache (S3)
 -----------------

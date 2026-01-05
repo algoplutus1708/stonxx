@@ -77,6 +77,48 @@ Failure to follow these rules will break everyone's workflows—double-check env
   - `docsrc/environment_variables.rst` (public docs), and
   - `docs/ENV_VARS.md` when engineering notes help contributors.
 
+## Changelog Maintenance (MANDATORY)
+
+**Location:** `CHANGELOG.md`
+
+**CRITICAL:** The changelog MUST be updated for every deployment, release, or significant change.
+
+### When to Update
+
+- **Deployments** - Any code deployed to production
+- **Version bumps** - New version tags or releases
+- **Bug fixes** - Data source, split, dividend, or broker fixes
+- **New features** - New brokers, data sources, strategy capabilities
+- **Breaking changes** - API changes, env var changes (mark with ⚠️)
+- **Performance/dependency updates**
+
+### Format
+
+```markdown
+## X.Y.Z - YYYY-MM-DD
+
+### Added
+- New feature
+
+### Changed
+- Modified behavior
+
+### Fixed
+- Bug fix
+
+### Deprecated / Removed / Security
+- As applicable
+```
+
+### Pre-Deployment Checklist
+
+- [ ] Changelog entry added with current date
+- [ ] Version number updated (if applicable)
+- [ ] All significant changes documented
+- [ ] Breaking changes marked with ⚠️
+
+**If changelog wasn't updated, add a retroactive entry before the next deployment.**
+
 ## Scoped instruction files
 - `tests/AGENTS.md` — rules for everything under `tests/` (legacy-test authority policy).
 

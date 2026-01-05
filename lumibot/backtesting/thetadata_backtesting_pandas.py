@@ -3052,8 +3052,16 @@ class ThetaDataBacktestingPandas(PandasData):
                     start_dt = dt
                     end_dt = dt + window_td
                 else:
+                    # ThetaData minute-aggregated quote bars are often timestamped at the END of the
+                    # minute. At the session open this means the first "09:30" quote bar can appear
+                    # at 09:31, so a strict backward-only window (dt-1m -> dt) frequently returns an
+                    # empty/placeholder response and causes option scanners to conclude "no quotes".
+                    #
+                    # Use a small forward buffer so we can still find the first valid bar for the
+                    # current dt without needing to download a full day of quotes.
+                    window_td = delta_td * 5
                     start_dt = dt - delta_td
-                    end_dt = dt
+                    end_dt = dt + window_td
 
                 df_snapshot = thetadata_helper.get_historical_data_snapshot_cached(
                     asset,
@@ -3106,11 +3114,17 @@ class ThetaDataBacktestingPandas(PandasData):
                     row = df_snapshot.iloc[0]
                     row_ts = df_snapshot.index[0]
                 else:
-                    # Prefer the last bar at/before dt.
+                    # Prefer the last bar at/before dt. If none exist (common at the open due to
+                    # end-of-minute timestamping), fall forward to the first bar after dt.
                     try:
                         df_slice = df_snapshot.loc[:dt]
-                        row = df_slice.iloc[-1] if not df_slice.empty else df_snapshot.iloc[-1]
-                        row_ts = df_slice.index[-1] if not df_slice.empty else df_snapshot.index[-1]
+                        if not df_slice.empty:
+                            row = df_slice.iloc[-1]
+                            row_ts = df_slice.index[-1]
+                        else:
+                            df_future = df_snapshot.loc[dt:]
+                            row = df_future.iloc[0] if not df_future.empty else df_snapshot.iloc[-1]
+                            row_ts = df_future.index[0] if not df_future.empty else df_snapshot.index[-1]
                     except Exception:
                         row = df_snapshot.iloc[-1]
                         row_ts = df_snapshot.index[-1]

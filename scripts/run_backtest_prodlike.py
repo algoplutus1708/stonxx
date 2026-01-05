@@ -43,6 +43,7 @@ def find_latest_prefix(log_dir: Path, started_at: float) -> str | None:
         "_logs.csv",
         "_settings.json",
         "_trades.csv",
+        "_trade_events.csv",
         "_tearsheet.html",
         "_tearsheet.csv",
     )
@@ -253,6 +254,7 @@ def main() -> int:
     prefix = find_latest_prefix(log_dir, started_at)
     if prefix:
         trades = log_dir / f"{prefix}_trades.csv"
+        trade_events = log_dir / f"{prefix}_trade_events.csv"
         logs = log_dir / f"{prefix}_logs.csv"
         settings = log_dir / f"{prefix}_settings.json"
         tearsheet_html = log_dir / f"{prefix}_tearsheet.html"
@@ -267,6 +269,7 @@ def main() -> int:
             print(f"[artifacts] tearsheet_csv={tearsheet_csv}")
 
         print(f"[artifacts] trades={trades if trades.exists() else '(missing)'}")
+        print(f"[artifacts] trade_events={trade_events if trade_events.exists() else '(missing)'}")
         print(f"[artifacts] logs={logs if logs.exists() else '(missing)'}")
         print(f"[artifacts] settings={settings if settings.exists() else '(missing)'}")
 
@@ -277,7 +280,7 @@ def main() -> int:
         if args.copy_artifacts_to:
             dest_root = Path(args.copy_artifacts_to).resolve()
             dest_root.mkdir(parents=True, exist_ok=True)
-            for src in (tearsheet_html, tearsheet_csv, trades, logs, settings, subprocess_log):
+            for src in (tearsheet_html, tearsheet_csv, trades, trade_events, logs, settings, subprocess_log):
                 if not src.exists():
                     continue
                 dst = dest_root / src.name

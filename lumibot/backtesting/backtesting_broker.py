@@ -2599,6 +2599,20 @@ class BacktestingBroker(Broker):
             snap = getattr(quote, "snapshot", None)
             if snap is not None:
                 fields.update(self._audit_quote_fields("submit.asset_quote.snapshot", snap))
+
+            # For ThetaData backtests, the most useful execution-time NBBO is often only available
+            # via the data source's `snapshot_only` fast-path. The generic Broker.get_quote() call
+            # can return trade-derived prices without bid/ask, which isn't sufficient for audits.
+            #
+            # Best-effort: if the underlying data source supports `snapshot_only=True`, capture it.
+            source = getattr(self, "data_source", None)
+            if source is not None and asset is not None and hasattr(source, "get_quote"):
+                try:
+                    snap_quote = source.get_quote(asset, quote=getattr(order, "quote", None), exchange=None, snapshot_only=True)
+                except TypeError:
+                    snap_quote = None
+                if snap_quote is not None:
+                    fields.update(self._audit_quote_fields("submit.asset_quote.snapshot_only", snap_quote))
         except Exception as exc:
             fields["submit.asset_quote_error"] = str(exc)
 
@@ -2613,6 +2627,15 @@ class BacktestingBroker(Broker):
                     usnap = getattr(uquote, "snapshot", None)
                     if usnap is not None:
                         fields.update(self._audit_quote_fields("submit.underlying_quote.snapshot", usnap))
+
+                    source = getattr(self, "data_source", None)
+                    if source is not None and hasattr(source, "get_quote"):
+                        try:
+                            usnap_quote = source.get_quote(underlying, quote=getattr(order, "quote", None), exchange=None, snapshot_only=True)
+                        except TypeError:
+                            usnap_quote = None
+                        if usnap_quote is not None:
+                            fields.update(self._audit_quote_fields("submit.underlying_quote.snapshot_only", usnap_quote))
         except Exception as exc:
             fields["submit.underlying_quote_error"] = str(exc)
 

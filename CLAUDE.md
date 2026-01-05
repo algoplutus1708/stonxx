@@ -41,6 +41,70 @@ This repo is often worked on by **multiple AI sessions** at the same time.
   - `docsrc/environment_variables.rst` (public docs), and
   - `docs/ENV_VARS.md` when engineering notes help contributors.
 
+## Changelog Maintenance (MANDATORY)
+
+**Location:** `CHANGELOG.md`
+
+**CRITICAL:** The changelog MUST be updated for every deployment, release, or significant change. This is NOT optional.
+
+### When to Update the Changelog
+
+Update the changelog when ANY of these occur:
+1. **Deployments** - Any code deployed to production
+2. **Version bumps** - New version tags or releases
+3. **Bug fixes** - Especially data source, split adjustment, or dividend fixes
+4. **New features** - New brokers, data sources, or strategy capabilities
+5. **Breaking changes** - API changes, env var changes, config changes
+6. **Performance improvements** - Cache optimizations, query efficiency
+7. **Dependency updates** - Major library version changes
+
+### Changelog Format
+
+```markdown
+## X.Y.Z - YYYY-MM-DD
+
+### Added
+- New feature description
+
+### Changed
+- Modified behavior description
+
+### Fixed
+- Bug fix description
+
+### Deprecated
+- Feature being phased out
+
+### Removed
+- Removed feature
+
+### Security
+- Security-related changes
+```
+
+### Pre-Deployment Checklist
+
+Before any deployment:
+- [ ] Changelog entry added with current date
+- [ ] Version number updated (if applicable)
+- [ ] All significant changes documented
+- [ ] Breaking changes clearly marked with ⚠️
+
+### Example Entry
+
+```markdown
+## 4.4.25 - 2025-01-04
+
+### Fixed
+- ThetaData split adjustment idempotency - prevents multiple applications
+- Dividend deduplication for same ex_date events
+
+### Changed
+- Cache version bumped to v8 for split adjustment fixes
+```
+
+**If you forget to update the changelog, you MUST add a retroactive entry before the next deployment.**
+
 ## Documentation Layout
 
 - `docs/` = hand-authored markdown (architecture, investigations, handoffs, ops notes)

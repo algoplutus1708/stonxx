@@ -944,6 +944,19 @@ def _event_cache_paths(asset: Asset, event_type: str) -> Tuple[Path, Path]:
 
 
 def _load_event_cache_frame(cache_path: Path) -> pd.DataFrame:
+    # CI runners (and production-like backtest containers) start with empty disks.
+    # If the S3 backtest cache is enabled, hydrate the on-disk event cache before deciding it
+    # doesn't exist, so local == CI and we don't re-hit the downloader for warm-cache runs.
+    try:
+        from lumibot.tools.backtest_cache import get_backtest_cache
+
+        cache_manager = get_backtest_cache()
+        if cache_manager is not None and not cache_path.exists():
+            cache_manager.ensure_local_file(cache_path)
+    except Exception:
+        # Ignore remote cache hydrate failures and fall back to local-only behavior.
+        pass
+
     if not cache_path.exists():
         return pd.DataFrame()
     try:
@@ -962,9 +975,25 @@ def _save_event_cache_frame(cache_path: Path, df: pd.DataFrame) -> None:
     if "event_date" in df_to_save.columns:
         df_to_save["event_date"] = pd.to_datetime(df_to_save["event_date"], utc=True)
     df_to_save.to_parquet(cache_path, index=False)
+    try:
+        from lumibot.tools.backtest_cache import get_backtest_cache
+
+        get_backtest_cache().on_local_update(cache_path)
+    except Exception:
+        logger.debug("[THETA][EVENT_CACHE] Remote cache upload failed for %s", cache_path, exc_info=True)
 
 
 def _load_event_metadata(meta_path: Path) -> List[Tuple[date, date]]:
+    # See `_load_event_cache_frame`: hydrate event metadata from remote cache when available.
+    try:
+        from lumibot.tools.backtest_cache import get_backtest_cache
+
+        cache_manager = get_backtest_cache()
+        if cache_manager is not None and not meta_path.exists():
+            cache_manager.ensure_local_file(meta_path)
+    except Exception:
+        pass
+
     if not meta_path.exists():
         return []
     try:
@@ -993,6 +1022,12 @@ def _write_event_metadata(meta_path: Path, ranges: List[Tuple[date, date]]) -> N
     }
     meta_path.parent.mkdir(parents=True, exist_ok=True)
     meta_path.write_text(json.dumps(payload), encoding="utf-8")
+    try:
+        from lumibot.tools.backtest_cache import get_backtest_cache
+
+        get_backtest_cache().on_local_update(meta_path)
+    except Exception:
+        logger.debug("[THETA][EVENT_CACHE] Remote cache upload failed for %s", meta_path, exc_info=True)
 
 
 def _merge_coverage_ranges(ranges: List[Tuple[date, date]]) -> List[Tuple[date, date]]:
@@ -1743,7 +1778,9 @@ def _apply_corporate_actions_to_frame(
         # This makes historical prices comparable to current prices.
         # IMPORTANT: Only apply splits that have actually occurred (split_date <= data_end_date)
         # Don't adjust for future splits that haven't happened yet.
-        price_columns = ["open", "high", "low", "close"]
+        # Apply split adjustment to any price-like columns we may have (OHLC, NBBO, etc).
+        # Intraday quote requests may return bid/ask instead of OHLC; keep those consistent too.
+        price_columns = ["open", "high", "low", "close", "bid", "ask", "mid_price"]
         available_price_cols = [col for col in price_columns if col in frame.columns]
 
         if available_price_cols:
@@ -2100,6 +2137,21 @@ def get_price_data(
 
     if return_polars:
         raise ValueError("ThetaData polars output is not available; pass return_polars=False.")
+
+    def _truthy_env(name: str, default: str = "true") -> bool:
+        value = os.environ.get(name, default)
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    # Corporate-action normalization for intraday frames is primarily needed for *backtests*:
+    # option chains (and day bars) are split-normalized to today's share count, and intraday
+    # stock OHLC must match that scale or options strategies can select invalid strikes.
+    #
+    # Default: enabled when `IS_BACKTESTING` is truthy, disabled otherwise. Can be overridden via
+    # `THETADATA_APPLY_CORPORATE_ACTIONS_INTRADAY` for debugging/backwards compatibility.
+    if os.environ.get("THETADATA_APPLY_CORPORATE_ACTIONS_INTRADAY") is None:
+        apply_intraday_corporate_actions = _truthy_env("IS_BACKTESTING", "false")
+    else:
+        apply_intraday_corporate_actions = _truthy_env("THETADATA_APPLY_CORPORATE_ACTIONS_INTRADAY", "false")
 
     # Preserve original bounds for final filtering
     requested_start = start
@@ -2575,9 +2627,17 @@ def get_price_data(
                 result_frame.index.max().isoformat()
             )
 
-        # Apply split adjustments to cached data (the adjustment logic is idempotent)
-        # This ensures cached data from before the split adjustment fix is properly adjusted
-        if result_frame is not None and not result_frame.empty and timespan == "day":
+        # Corporate actions: day bars have always been split-adjusted (Yahoo-style "Adj Close" behavior).
+        #
+        # Critical bugfix (NVDA 2022 backtests): option chain strikes are split-normalized using *daily*
+        # split-adjusted reference prices, but intraday stock OHLC was previously returned unadjusted.
+        # That created a 10x mismatch after NVDA's 2024-06-10 10:1 split (e.g., underlying ~300 vs
+        # strikes ~30), causing options strategies to find "no valid strike".
+        #
+        # Fix: apply the same corporate action normalization to intraday frames during backtests
+        # (or when explicitly enabled).
+        should_apply_corporate_actions = timespan == "day" or apply_intraday_corporate_actions
+        if result_frame is not None and not result_frame.empty and should_apply_corporate_actions:
             start_day = start.date() if hasattr(start, "date") else start
             end_day = end.date() if hasattr(end, "date") else end
             result_frame = _apply_corporate_actions_to_frame(
@@ -3066,6 +3126,25 @@ def get_price_data(
             df_all = ensure_missing_column(df_all)
         else:
             df_all = _strip_placeholder_rows(df_all)
+
+    # Apply corporate actions to intraday frames by default so underlying prices live in the same
+    # split-adjusted space as option-chain strike normalization (see comment in cache-hit path).
+    if (
+        apply_intraday_corporate_actions
+        and df_all is not None
+        and not df_all.empty
+        and timespan != "day"
+    ):
+        try:
+            start_day = requested_start.date() if hasattr(requested_start, "date") else requested_start
+            end_day = requested_end.date() if hasattr(requested_end, "date") else requested_end
+            df_all = _apply_corporate_actions_to_frame(asset, df_all, start_day, end_day, username, password)
+        except Exception:
+            logger.debug(
+                "[THETA][SPLIT_ADJUST] Failed to apply corporate actions to intraday frame for %s",
+                asset,
+                exc_info=True,
+            )
 
     if (
         not preserve_full_history
