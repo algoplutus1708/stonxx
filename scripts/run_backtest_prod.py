@@ -193,15 +193,17 @@ def _download_artifacts(
         artifacts[file_type] = str(path)
 
     # Best-effort; not all runs emit all files.
+    #
+    # NOTE: BotManager `/backtest_results` only supports a fixed set of file types.
+    # If this list drifts, update it to match the API (BotManager returns a 400 with the allowed set).
     for file_type, suffix in (
-        ("completion_json", "completion.json"),
-        ("settings_json", "settings.json"),
-        ("logs_csv", "logs.csv"),
         ("trades_csv", "trades.csv"),
-        ("trade_events_csv", "trade_events.csv"),
         ("stats_csv", "stats.csv"),
         ("tearsheet_html", "tearsheet.html"),
-        ("tearsheet_csv", "tearsheet.csv"),
+        ("trades_html", "trades.html"),
+        ("indicators_html", "indicators.html"),
+        ("indicators_csv", "indicators.csv"),
+        ("completion_json", "completion.json"),
         ("profile_yappi_csv", "profile_yappi.csv"),
     ):
         try:
