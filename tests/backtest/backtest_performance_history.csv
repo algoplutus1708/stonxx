@@ -6687,3 +6687,7 @@ timestamp,test_name,data_source,trading_days,execution_time_seconds,git_commit,l
 2026-01-05T11:07:28.891854,test_yahoo_last_price,Yahoo,,0.164,b16bf5dd,4.4.27,,,,,Auto-tracked from test_yahoo
 2026-01-05T11:08:18.811276,test_bracket_orders_apply_entry_and_exit_fees,unknown,,0.266,b16bf5dd,4.4.27,,,,,Auto-tracked from test_pandas_backtest
 2026-01-05T11:08:19.120807,test_bracket_positions_remain_bounded,unknown,,0.222,b16bf5dd,4.4.27,,,,,Auto-tracked from test_pandas_backtest
+2026-01-05T11:11:13.418130,test_bracket_orders_apply_entry_and_exit_fees,unknown,,0.258,ac2ca005,4.4.27,,,,,Auto-tracked from test_pandas_backtest
+2026-01-05T11:11:13.722075,test_bracket_positions_remain_bounded,unknown,,0.21,ac2ca005,4.4.27,,,,,Auto-tracked from test_pandas_backtest
+2026-01-05T11:11:20.211607,test_acceptance_aapl_deep_dip_calls,unknown,,40.109,ac2ca005,4.4.27,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-05T11:12:16.342651,test_acceptance_aapl_deep_dip_calls,unknown,,44.371,ac2ca005,4.4.27,,,,,Auto-tracked from test_acceptance_backtests_ci

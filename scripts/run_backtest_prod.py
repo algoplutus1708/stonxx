@@ -264,6 +264,23 @@ def main() -> int:
     submitted_at_iso = _iso_utc(submitted_at)
 
     session.post(f"{base_url}/backtest", json=payload, headers=headers, timeout=60).raise_for_status()
+
+    # Print a safe "submitted" marker immediately so engineers can stop the script early (timeout)
+    # and still have the bot_id to inspect in BotSpot/CloudWatch without leaking secrets.
+    print(
+        json.dumps(
+            {
+                "status": "submitted",
+                "bot_id": bot_id,
+                "submitted_at_utc": submitted_at_iso,
+                "cache_version": env_vars.get("LUMIBOT_CACHE_S3_VERSION"),
+                "start_date": args.start,
+                "end_date": args.end,
+            },
+            separators=(",", ":"),
+        ),
+        flush=True,
+    )
     status_data = _wait_for_terminal_status(session, base_url, api_key, bot_id, timeout_s=60 * 60)
 
     finished_at = time.time()
@@ -300,4 +317,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
