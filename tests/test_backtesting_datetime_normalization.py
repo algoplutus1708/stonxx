@@ -52,28 +52,31 @@ def test_verify_backtest_inputs_accepts_mixed_timezones():
     aware_end = datetime.datetime(2025, 9, 30, tzinfo=datetime.timezone.utc)
 
     # Should not raise
-    _Strategy.verify_backtest_inputs(naive_start, aware_end)
+    start_dt, end_dt = _Strategy.verify_backtest_inputs(naive_start, aware_end)
+    assert start_dt.tzinfo is not None
+    assert end_dt.tzinfo is not None
 
 
-def test_verify_backtest_inputs_rejects_future_end_by_default(monkeypatch):
-    """Guardrail: backtesting_end must not be in the future unless explicitly allowed."""
-    monkeypatch.delenv("BACKTESTING_ALLOW_FUTURE_END", raising=False)
-
-    start = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
-    future_end = datetime.datetime(9999, 12, 31, tzinfo=datetime.timezone.utc)
-
-    with pytest.raises(ValueError, match="cannot be in the future"):
-        _Strategy.verify_backtest_inputs(start, future_end)
-
-
-def test_verify_backtest_inputs_allows_future_end_with_env(monkeypatch):
-    """Opt-in: allow future end dates for testing when BACKTESTING_ALLOW_FUTURE_END=true."""
-    monkeypatch.setenv("BACKTESTING_ALLOW_FUTURE_END", "true")
+def test_verify_backtest_inputs_clamps_future_end():
+    """Backtesting end dates in the future should clamp to now (no hard failure)."""
+    now_before = datetime.datetime.now(datetime.timezone.utc)
 
     start = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
     future_end = datetime.datetime(9999, 12, 31, tzinfo=datetime.timezone.utc)
 
-    _Strategy.verify_backtest_inputs(start, future_end)
+    _, end_dt = _Strategy.verify_backtest_inputs(start, future_end)
+    now_after = datetime.datetime.now(datetime.timezone.utc)
+
+    assert now_before <= end_dt <= now_after
+
+def test_verify_backtest_inputs_rejects_start_after_end_even_after_clamp():
+    """If start is in the future, clamping end to now should still raise."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    start = now + datetime.timedelta(days=1)
+    end = now + datetime.timedelta(days=2)
+
+    with pytest.raises(ValueError, match="must be after `backtesting_start`"):
+        _Strategy.verify_backtest_inputs(start, end)
 
 
 def test_run_backtest_normalizes_mixed_timezones(disable_datasource_override):

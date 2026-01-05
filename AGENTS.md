@@ -77,6 +77,10 @@ Failure to follow these rules will break everyone's workflows—double-check env
   - `@AGENTS.md`
 
 ## Env var documentation (REQUIRED)
+- **Do not add new environment variables by default.** Env vars are hard to discover, hard to document, and easy to
+  drift across deploy targets. Prefer explicit function parameters, config objects, or stable defaults.
+- Only introduce a new env var when it is genuinely required for deployment/runtime configuration (secrets, endpoints,
+  toggles needed for ops/rollout), and keep it narrowly scoped.
 - If you add or change an environment variable, update:
   - `docsrc/environment_variables.rst` (public docs), and
   - `docs/ENV_VARS.md` when engineering notes help contributors.

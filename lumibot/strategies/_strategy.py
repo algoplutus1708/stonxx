@@ -1848,10 +1848,10 @@ class _Strategy:
             )
             return None
 
+        backtesting_start, backtesting_end = self.verify_backtest_inputs(backtesting_start, backtesting_end)
+
         get_logger(__name__).info("Backtest start = %s", backtesting_start)
         get_logger(__name__).info("Backtest end = %s", backtesting_end)
-
-        self.verify_backtest_inputs(backtesting_start, backtesting_end)
 
         if not self.IS_BACKTESTABLE:
             get_logger(__name__).warning(f"Strategy {name + ' ' if name is not None else ''}cannot be " f"backtested at the moment")
@@ -2096,6 +2096,12 @@ class _Strategy:
         -------
         ValueError
             If the inputs are not set correctly.
+
+        Returns
+        -------
+        tuple[datetime.datetime, datetime.datetime]
+            Normalized (timezone-aware) and validated start/end datetimes. If the provided
+            end datetime is in the future, it is clamped to the current time.
         """
         # Check backtesting_start and backtesting_end
         if not isinstance(backtesting_start, datetime.datetime):
@@ -2114,19 +2120,27 @@ class _Strategy:
                 f"{end_dt} and {start_dt}"
             )
 
-        # Check that backtesting_end is not in the future (allow opt-in override for testing)
+        # If backtesting_end is in the future, clamp it to now. This avoids hard failures when
+        # callers specify a "future" end date (e.g., tomorrow) and expect the backtest to stop
+        # at the most recent available data.
         now = datetime.datetime.now(end_dt.tzinfo) if end_dt.tzinfo else datetime.datetime.now()
         if end_dt > now:
-            allow_future = os.environ.get("BACKTESTING_ALLOW_FUTURE_END", "").strip().lower() in {"1", "true", "yes"}
-            if not allow_future:
-                raise ValueError(
-                    f"`backtesting_end` cannot be in the future. You passed in {end_dt}, now is {now}"
-                )
             get_logger(__name__).warning(
-                "`backtesting_end` is in the future (%s > %s). Proceeding because BACKTESTING_ALLOW_FUTURE_END=true.",
+                "`backtesting_end` is in the future (%s > %s). Clamping to %s.",
                 end_dt,
                 now,
+                now,
             )
+            end_dt = now
+
+        # After clamping, ensure end is still after start.
+        if end_dt <= start_dt:
+            raise ValueError(
+                f"`backtesting_end` must be after `backtesting_start`. You passed in "
+                f"{end_dt} and {start_dt}"
+            )
+
+        return start_dt, end_dt
 
     def send_update_to_cloud(self):
         """
