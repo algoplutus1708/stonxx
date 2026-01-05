@@ -82,19 +82,20 @@ Each strategy section includes:
 
 #### Expected Results (ThetaData / S3 v44)
 
-- Correct Total Return = 853.00%
-- Correct CAGR = 48.36%
+- Correct Total Return = 863.00%
+- Correct CAGR = 48.65%
 - Correct Max DD = -34.30%
-- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 75.7s
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 30.6s
 - CI cap (seconds) <= 300
-- Baseline `run_id` = `AAPLDeepDipCalls_2026-01-04_11-14_lIPHBU`
+- Baseline `run_id` = `AAPLDeepDipCalls_2026-01-04_19-52_w1yl8v`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
 | `AAPLDeepDipCalls_2025-12-25_19-08_WHRsPm` | (unknown) | 2020-01-01 → 2025-11-30 | (n/a) | 865% | 48.72% | -33.08% | (unknown) | (unknown) |
 | `AAPLDeepDipCalls_2026-01-02_10-25_3KsjXy` | 4.4.21 | 2020-01-01 → 2025-11-30 | 237.5 | 870% | 48.86% | -34.09% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `AAPLDeepDipCalls_2026-01-04_06-02_3HO2Ds` | 4.4.24 | 2020-01-01 → 2025-11-30 | 26.9 | 862% | 48.63% | -34.09% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `AAPLDeepDipCalls_2026-01-04_11-14_lIPHBU` | 4.4.24 | 2020-01-01 → 2025-11-30 | 77.8 | 853% | 48.36% | -34.3% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `AAPLDeepDipCalls_2026-01-04_11-14_lIPHBU` | 4.4.24 | 2020-01-01 → 2025-11-30 | 77.8 | 853% | 48.36% | -34.3% | historical (superseded; baseline updated under v44 cache semantics) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `AAPLDeepDipCalls_2026-01-04_19-52_w1yl8v` | 4.4.24 | 2020-01-01 → 2025-11-30 | 30.6 | 863% | 48.65% | -34.3% | prod-like (baseline; v44; queue-free) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 2) Alpha Picks LEAPS (Call Debit Spread)
 
@@ -229,17 +230,18 @@ See: `docs/investigations/ACCURACY_AUDIT_2026-01-02.md` for the divergence notes
 #### Expected Results (ThetaData / S3 v44)
 
 - Correct Total Return = -6.00%
-- Correct CAGR = -6.42%
-- Correct Max DD = -14.88%
-- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 120.4s
+- Correct CAGR = -6.43%
+- Correct Max DD = -13.41%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 273.1s
 - CI cap (seconds) <= 600
-- Baseline `run_id` = `BackdoorButterfly0DTESmartLimit_2026-01-04_06-29_NduXK0`
+- Baseline `run_id` = `BackdoorButterfly0DTESmartLimit_2026-01-04_20-26_qtvxlf`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
 | `BackdoorButterfly0DTESmartLimit_2026-01-02_10-34_UTFoHq` | 4.4.21 | 2025-01-01 → 2025-11-30 | 283.0 | -3% | -2.96% | -13.58% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `BackdoorButterfly0DTESmartLimit_2026-01-02_19-49_QXkWuB` | 4.4.21 | 2025-01-01 → 2025-11-29 | 107.1 | -6% | -6.2% | -13.39% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `BackdoorButterfly0DTESmartLimit_2026-01-04_06-29_NduXK0` | 4.4.24 | 2025-01-01 → 2025-11-30 | 120.4 | -6% | -6.42% | -14.88% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTESmartLimit_2026-01-04_06-29_NduXK0` | 4.4.24 | 2025-01-01 → 2025-11-30 | 120.4 | -6% | -6.42% | -14.88% | historical (superseded; baseline updated under v44 cache semantics) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTESmartLimit_2026-01-04_20-26_qtvxlf` | 4.4.24 | 2025-01-01 → 2025-11-30 | 273.1 | -6% | -6.43% | -13.41% | prod-like (baseline; v44; queue-free) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 7) SPX Short Straddle Intraday (production stall repro)
 

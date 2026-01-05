@@ -1,15 +1,117 @@
 # Documentation
 
-This folder contains **human-authored** documentation (architecture, investigations, handoffs, ops notes).
+> LumiBot internal documentation: architecture, operations, investigations, and cross-session handoffs.
 
-## Quick Links
+This folder contains **human-authored** documentation for the LumiBot trading and backtesting framework. AI assistants should start here to understand documentation structure.
 
-| Document | Purpose |
-|----------|---------|
-| `BACKTESTING_ARCHITECTURE.md` | **Start here** - Data flow and architecture |
-| `../CHANGELOG.md` | **Deployment history** - Must be updated every release |
-| `ENV_VARS.md` | Environment variable reference |
-| `ACCEPTANCE_BACKTESTS.md` | Release gate criteria |
+---
+
+## File Index
+
+### Core Documentation
+
+| File | Purpose | When to Read |
+|------|---------|--------------|
+| `BACKTESTING_ARCHITECTURE.md` | **START HERE** - Data flow diagrams, component relationships, how backtests execute | Before modifying any backtesting code |
+| `ENV_VARS.md` | Complete environment variable reference with defaults and examples | When adding/changing env vars or debugging config issues |
+| `ACCEPTANCE_BACKTESTS.md` | Release gate criteria - what must pass before deployment | Before any release or version bump |
+| `BACKTESTING_TESTS.md` | Test suite organization and how to run backtest-related tests | When writing or debugging tests |
+| `THETADATA_CACHE_VALIDATION.md` | How ThetaData caching works, cache invalidation, version bumping | When debugging stale data or cache issues |
+| `REMOTE_CACHE.md` | S3 remote cache architecture and configuration | When debugging cache sync or S3 issues |
+| `PRODLIKE_LOCAL_BACKTEST_RUNS.md` | How to run production-like backtests locally | When replicating prod behavior locally |
+| `FUTURES_ROLL_POLICY.md` | Futures contract rolling logic and configuration | When working with futures strategies |
+| `DATABENTO_POLARS_OVERVIEW.md` | Databento integration and Polars dataframe usage | When working with Databento data source |
+
+### Root-Level Files
+
+| File | Purpose |
+|------|---------|
+| `../CHANGELOG.md` | **Deployment history** - MUST be updated every release |
+| `../AGENTS.md` | Cross-tool AI assistant instructions (Codex, Cursor, etc.) |
+| `../CLAUDE.md` | Claude Code-specific instructions |
+
+---
+
+## Directory Structure
+
+```
+docs/
+├── README.md                    # This file - documentation index
+├── [TOPIC_NAME].md              # Core documentation files
+├── handoffs/                    # Cross-session coordination
+│   ├── README.md                # Handoff conventions
+│   └── YYYY-MM-DD_TOPIC.md      # Individual handoff notes
+└── investigations/              # Deep dives and root-cause analyses
+    └── YYYY-MM-DD_TOPIC.md      # Investigation reports
+```
+
+### Subdirectories
+
+| Directory | Purpose | When to Use |
+|-----------|---------|-------------|
+| `handoffs/` | Cross-session coordination notes between AI agents or developers | When pausing work mid-task, switching contexts, or coordinating with others |
+| `investigations/` | Deep dives, root-cause analyses, accuracy audits | When debugging complex issues or documenting findings for future reference |
+
+---
+
+## Creating New Documentation
+
+### File Header Template (REQUIRED)
+
+Every new documentation file MUST start with this header:
+
+```markdown
+# TITLE
+
+> Brief one-line description of what this document covers.
+
+**Last Updated:** YYYY-MM-DD
+**Status:** [Draft | Active | Deprecated]
+**Audience:** [Developers | AI Agents | Both]
+
+---
+
+## Overview
+
+Brief 2-3 sentence summary of the document's purpose and key points.
+
+---
+
+[Document content follows...]
+```
+
+### File Naming Convention (MANDATORY)
+
+**All documentation files MUST use UPPERCASE names.**
+
+| Location | Pattern | Example |
+|----------|---------|---------|
+| `docs/` | `TOPIC_NAME.md` | `BACKTESTING_ARCHITECTURE.md` |
+| `handoffs/` | `YYYY-MM-DD_TOPIC_NAME.md` | `2026-01-04_THETADATA_HANDOFF.md` |
+| `investigations/` | `YYYY-MM-DD_TOPIC_NAME.md` | `2026-01-02_ACCURACY_AUDIT.md` |
+
+### Rules
+
+1. **UPPERCASE** - All letters must be uppercase (except date digits)
+2. **Underscores** - Use underscores `_` to separate words (not hyphens)
+3. **Date prefix** - Handoffs and investigations use `YYYY-MM-DD_` prefix for chronological sorting
+4. **Descriptive names** - Use clear, specific topic names
+
+### Examples
+
+```
+✅ CORRECT:
+  docs/BACKTESTING_ARCHITECTURE.md
+  docs/handoffs/2026-01-04_THETADATA_HANDOFF.md
+  docs/investigations/2026-01-02_ACCURACY_AUDIT.md
+
+❌ WRONG:
+  docs/backtesting_architecture.md      (lowercase)
+  docs/Backtesting-Architecture.md      (mixed case, hyphens)
+  docs/handoffs/thetadata_handoff.md    (missing date, lowercase)
+```
+
+---
 
 ## Changelog Maintenance (MANDATORY)
 
@@ -38,18 +140,13 @@ This folder contains **human-authored** documentation (architecture, investigati
 - [ ] Version number updated
 - [ ] Breaking changes clearly marked
 
-See `AGENTS.md` and `CLAUDE.md` for full requirements.
+See `../AGENTS.md` and `../CLAUDE.md` for full requirements.
 
 ---
 
-## Directory Structure
-
-- **Handoffs:** `handoffs/` - Cross-session coordination notes
-- **Investigations:** `investigations/` - Deep dives and root-cause analyses
-- **Naming convention:** `YYYY-MM-DD_<topic>.md` for chronological sorting
-
 ## Public Documentation Site
 
-- `docsrc/` contains the Sphinx source
+- `docsrc/` contains the Sphinx source for the public docs site
 - `generated-docs/` is local build output (gitignored)
 - GitHub Actions builds + deploys Pages on pushes to `dev`
+- **User-facing changes** should update both internal docs (`docs/`) AND public docs (`docsrc/`)

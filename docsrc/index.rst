@@ -167,14 +167,17 @@ Table of Contents
 
 .. toctree::
    :maxdepth: 3
-   
+
    Home <self>
    Build Bots with AI <https://botspot.trade/sales?utm_source=lumibot+docs&utm_medium=documentation&utm_campaign=Menu+Build+Bots+with+AI>
    GitHub <https://github.com/Lumiwealth/lumibot>
    Discord Community <https://discord.gg/v6asVjTCvh>
    Get Pre-Built Strategies <https://www.botspot.trade/?utm_source=documentation&utm_medium=referral&utm_campaign=lumibot_sidebar>
-   deployment
    getting_started
+   examples
+   common_mistakes
+   faq
+   deployment
    environment_variables
    lifecycle_methods
    vars

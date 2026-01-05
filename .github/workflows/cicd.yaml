@@ -198,6 +198,10 @@ jobs:
           SHARD_TOTAL: "4"
           # Acceptance backtests (in tests/backtest/) require the same ThetaData + S3 secrets used locally.
           # These env var names intentionally match Strategy Library/Demos/.env.
+          THETADATA_USERNAME: ${{ secrets.THETADATA_USERNAME }}
+          THETADATA_PASSWORD: ${{ secrets.THETADATA_PASSWORD }}
+          DATADOWNLOADER_BASE_URL: ${{ secrets.DATADOWNLOADER_BASE_URL }}
+          DATADOWNLOADER_API_KEY: ${{ secrets.DATADOWNLOADER_API_KEY }}
           LUMIBOT_CACHE_S3_BUCKET: ${{ secrets.LUMIBOT_CACHE_S3_BUCKET }}
           LUMIBOT_CACHE_S3_PREFIX: ${{ secrets.LUMIBOT_CACHE_S3_PREFIX }}
           LUMIBOT_CACHE_S3_REGION: ${{ secrets.LUMIBOT_CACHE_S3_REGION }}

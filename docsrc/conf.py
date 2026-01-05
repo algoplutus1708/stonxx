@@ -45,7 +45,26 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.autosummary",
     "sphinx.ext.autodoc",
+    "sphinx_llms_txt",  # Generates llms.txt and llms-full.txt for AI assistants
 ]
+
+# ============================================================================
+# sphinx-llms-txt configuration for AI discoverability
+# ============================================================================
+llms_txt_summary = """Lumibot is a Python trading and backtesting framework for stocks, options, crypto, and futures.
+It supports multiple brokers (Alpaca, Interactive Brokers, Tradier, Schwab) and data sources (Yahoo, ThetaData, Polygon).
+
+CRITICAL RULES FOR CODE GENERATION:
+- NEVER use datetime.now() or datetime.today() - always use self.get_datetime() for backtesting compatibility
+- NEVER use 'from __future__ import annotations' - it breaks Lumibot's type checking
+- Use self.vars for persistent variables across lifecycle methods (e.g., self.vars.my_variable = value)
+- Use self.log_message() instead of print() for proper logging
+- Get current prices with self.get_last_price(asset) - returns None if unavailable
+- Submit orders with self.submit_order(order) where order = self.create_order(asset, quantity, side)
+- Access portfolio with self.portfolio_value, self.cash, self.positions
+- Implement on_trading_iteration() for main strategy logic - runs once per bar/iteration
+- For options: Use self.create_asset(symbol, asset_type=Asset.AssetType.OPTION, expiration=date, strike=price, right='call'|'put')
+"""
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ["_templates"]
@@ -68,6 +87,12 @@ exclude_patterns = [
 # a list of builtin themes.
 #
 html_theme = "furo"
+
+# ============================================================================
+# Freshness signals for AI discoverability
+# ============================================================================
+# Show "Last updated" on all pages (helps AI know content is fresh)
+html_last_updated_fmt = "%B %d, %Y"
 
 html_theme_options = {
     "sidebar_hide_name": True,

@@ -1,21 +1,21 @@
 {
   "cases": [
     {
-      "backtest_time_seconds": 75.72403904102976,
-      "baseline_run_id": "AAPLDeepDipCalls_2026-01-04_11-14_lIPHBU",
+      "backtest_time_seconds": 30.623295542027336,
+      "baseline_run_id": "AAPLDeepDipCalls_2026-01-04_19-52_w1yl8v",
       "data_source": "thetadata",
       "end_date": "2025-12-01",
-      "max_backtest_time_seconds": 300,
       "lumibot_version": "4.4.24",
+      "max_backtest_time_seconds": 300,
       "metrics_centipercent": {
-        "cagr": 4836,
+        "cagr": 4865,
         "max_drawdown": -3430,
-        "total_return": 85300
+        "total_return": 86300
       },
       "metrics_raw": {
-        "cagr": "48.36%",
+        "cagr": "48.65%",
         "max_drawdown": "-34.3%",
-        "total_return": "853%"
+        "total_return": "863%"
       },
       "script_filename": "AAPL Deep Dip Calls (Copy 4).py",
       "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
@@ -29,8 +29,8 @@
       "baseline_run_id": "LeapsCallDebitSpread_2026-01-04_11-20_vXE88y",
       "data_source": "thetadata",
       "end_date": "2025-10-15",
-      "max_backtest_time_seconds": 120,
       "lumibot_version": "4.4.24",
+      "max_backtest_time_seconds": 120,
       "metrics_centipercent": {
         "cagr": 1181,
         "max_drawdown": -116,
@@ -53,8 +53,8 @@
       "baseline_run_id": "TqqqSma200Strategy_2026-01-04_11-10_Wa65DX",
       "data_source": "thetadata",
       "end_date": "2025-12-01",
-      "max_backtest_time_seconds": 180,
       "lumibot_version": "4.4.24",
+      "max_backtest_time_seconds": 180,
       "metrics_centipercent": {
         "cagr": 4216,
         "max_drawdown": -4840,
@@ -77,8 +77,8 @@
       "baseline_run_id": "BackdoorButterfly0DTE_2026-01-04_17-14_Dg5NJR",
       "data_source": "thetadata",
       "end_date": "2025-12-01",
-      "max_backtest_time_seconds": 600,
       "lumibot_version": "4.4.24",
+      "max_backtest_time_seconds": 600,
       "metrics_centipercent": {
         "cagr": -2312,
         "max_drawdown": -2642,
@@ -101,8 +101,8 @@
       "baseline_run_id": "MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O",
       "data_source": "thetadata",
       "end_date": "2025-12-18",
-      "max_backtest_time_seconds": 300,
       "lumibot_version": "4.4.24",
+      "max_backtest_time_seconds": 300,
       "metrics_centipercent": {
         "cagr": -1683,
         "max_drawdown": -9896,
@@ -121,20 +121,20 @@
       "strategy_name": "MeliDeepDrawdownCalls"
     },
     {
-      "backtest_time_seconds": 120.430182082986,
-      "baseline_run_id": "BackdoorButterfly0DTESmartLimit_2026-01-04_06-29_NduXK0",
+      "backtest_time_seconds": 273.12517324998043,
+      "baseline_run_id": "BackdoorButterfly0DTESmartLimit_2026-01-04_20-26_qtvxlf",
       "data_source": "thetadata",
       "end_date": "2025-12-01",
-      "max_backtest_time_seconds": 600,
       "lumibot_version": "4.4.24",
+      "max_backtest_time_seconds": 600,
       "metrics_centipercent": {
-        "cagr": -642,
-        "max_drawdown": -1488,
+        "cagr": -643,
+        "max_drawdown": -1341,
         "total_return": -600
       },
       "metrics_raw": {
-        "cagr": "-6.42%",
-        "max_drawdown": "-14.88%",
+        "cagr": "-6.43%",
+        "max_drawdown": "-13.41%",
         "total_return": "-6%"
       },
       "script_filename": "Backdoor Butterfly 0 DTE (Copy) - with SMART LIMITS.py",
@@ -149,8 +149,8 @@
       "baseline_run_id": "SPXShortStraddle_2026-01-04_06-41_B1jF98",
       "data_source": "thetadata",
       "end_date": "2025-12-26",
-      "max_backtest_time_seconds": 600,
       "lumibot_version": "4.4.24",
+      "max_backtest_time_seconds": 600,
       "metrics_centipercent": {
         "cagr": -1750,
         "max_drawdown": -3351,

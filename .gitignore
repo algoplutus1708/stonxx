@@ -65,3 +65,4 @@ tests/backtest/_acceptance_runs/
 
 # Local tool configs (untracked, user-specific)
 context*.json
+!context7.json

@@ -1,0 +1,54 @@
+# LumiBot
+
+> Trading and backtesting framework supporting multiple data sources (Yahoo, ThetaData, Polygon) and brokers (Alpaca, Interactive Brokers, Tradier).
+
+## Getting Started
+
+- [AGENTS.md](./AGENTS.md): AI assistant instructions - ThetaData rules, dev credentials, multi-agent collaboration
+- [CLAUDE.md](./CLAUDE.md): Claude Code-specific instructions with MCP server recommendations
+- [docs/README.md](./docs/README.md): Documentation index - start here for docs navigation
+
+## Core Documentation
+
+- [docs/BACKTESTING_ARCHITECTURE.md](./docs/BACKTESTING_ARCHITECTURE.md): **START HERE** - Data flow diagrams, component relationships, how backtests execute
+- [docs/ENV_VARS.md](./docs/ENV_VARS.md): Complete environment variable reference with defaults and examples
+- [docs/ACCEPTANCE_BACKTESTS.md](./docs/ACCEPTANCE_BACKTESTS.md): Release gate criteria - what must pass before deployment
+
+## Data Sources
+
+- [docs/THETADATA_CACHE_VALIDATION.md](./docs/THETADATA_CACHE_VALIDATION.md): ThetaData caching, cache invalidation, version bumping
+- [docs/REMOTE_CACHE.md](./docs/REMOTE_CACHE.md): S3 remote cache architecture and configuration
+- [docs/DATABENTO_POLARS_OVERVIEW.md](./docs/DATABENTO_POLARS_OVERVIEW.md): Databento integration and Polars dataframe usage
+
+## Operations
+
+- [CHANGELOG.md](./CHANGELOG.md): **DEPLOYMENT HISTORY** - Must be updated every release
+- [docs/PRODLIKE_LOCAL_BACKTEST_RUNS.md](./docs/PRODLIKE_LOCAL_BACKTEST_RUNS.md): Running production-like backtests locally
+- [docs/BACKTESTING_TESTS.md](./docs/BACKTESTING_TESTS.md): Test suite organization and running tests
+
+## Specialized Topics
+
+- [docs/FUTURES_ROLL_POLICY.md](./docs/FUTURES_ROLL_POLICY.md): Futures contract rolling logic and configuration
+
+## Cross-Session Coordination
+
+- [docs/handoffs/](./docs/handoffs/): Handoff notes between AI sessions (YYYY-MM-DD_TOPIC.md format)
+- [docs/investigations/](./docs/investigations/): Deep dives and root-cause analyses (YYYY-MM-DD_TOPIC.md format)
+
+## Key Source Locations
+
+- `lumibot/` - Main library source code
+- `lumibot/backtesting/` - Backtesting engine implementations
+- `lumibot/brokers/` - Broker integrations (Alpaca, IBKR, Tradier, etc.)
+- `lumibot/data_sources/` - Data source implementations (Yahoo, ThetaData, Polygon)
+- `lumibot/tools/thetadata_helper.py` - ThetaData corporate actions, split adjustments
+- `lumibot/strategies/` - Strategy base classes
+- `tests/` - Test suite
+
+## Critical Rules
+
+1. **NEVER run ThetaTerminal locally with production credentials** - kills production connections
+2. **Use Data Downloader** at `http://data-downloader.lumiwealth.com:8080` for backtests
+3. **Update CHANGELOG.md** with every deployment
+4. **File naming**: UPPERCASE with underscores (e.g., `BACKTESTING_ARCHITECTURE.md`)
+5. **Date-first** for handoffs/investigations (e.g., `2026-01-04_TOPIC.md`)

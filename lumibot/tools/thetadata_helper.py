@@ -3157,6 +3157,33 @@ def get_price_data(
         dates = pd.to_datetime(df_all.index).date
         df_all = df_all[(dates >= start_date) & (dates <= end_date)]
 
+    # Cache-miss path parity: intraday requests must be trimmed to [requested_start, requested_end]
+    # just like the cache-hit path. Otherwise, callers (and tests) can receive bars outside the
+    # requested window when the on-disk cache contains additional days.
+    if (
+        not preserve_full_history
+        and df_all is not None
+        and not df_all.empty
+        and timespan != "day"
+    ):
+        import datetime as datetime_module  # Avoid shadowing `dt` parameter.
+
+        start_bound = requested_start
+        end_bound = requested_end
+        if isinstance(start_bound, datetime_module.date) and not isinstance(start_bound, datetime_module.datetime):
+            start_bound = datetime_module.datetime.combine(start_bound, datetime_module.time.min)
+        if isinstance(end_bound, datetime_module.date) and not isinstance(end_bound, datetime_module.datetime):
+            end_bound = datetime_module.datetime.combine(end_bound, datetime_module.time.max)
+        if isinstance(end_bound, datetime_module.datetime) and end_bound.time() == datetime_module.time.min:
+            end_bound = datetime_module.datetime.combine(end_bound.date(), datetime_module.time.max)
+
+        if hasattr(start_bound, "tzinfo") and start_bound.tzinfo is None:
+            start_bound = LUMIBOT_DEFAULT_PYTZ.localize(start_bound).astimezone(pytz.UTC)
+        if hasattr(end_bound, "tzinfo") and end_bound.tzinfo is None:
+            end_bound = LUMIBOT_DEFAULT_PYTZ.localize(end_bound).astimezone(pytz.UTC)
+
+        df_all = df_all[(df_all.index >= start_bound) & (df_all.index <= end_bound)]
+
     return df_all
 
 
@@ -4964,9 +4991,10 @@ def get_historical_data(
         # FIX (2025-12-12): Convert split-adjusted strike back to original for ThetaData API query
         # Uses start_dt from enclosing scope as the simulation datetime
         query_strike = _get_option_query_strike(asset, sim_datetime=start_dt)
+        query_expiration = _thetadata_option_query_expiration(asset.expiration)
         return {
             "symbol": _thetadata_option_root_symbol(asset),
-            "expiration": asset.expiration.strftime("%Y-%m-%d"),
+            "expiration": query_expiration.strftime("%Y-%m-%d"),
             "strike": _format_option_strike(query_strike),
             "right": "call" if right.startswith("C") else "put",
         }
@@ -5075,6 +5103,31 @@ def _normalize_expiration_value(raw_value: object) -> Optional[str]:
     if len(text_value.split("-")) == 3:
         return text_value
     return None
+
+
+def _thetadata_option_query_expiration(expiration: date) -> date:
+    """Map LumiBot's tradable option expiry to the value expected by ThetaData endpoints.
+
+    Background:
+    - Many strategies (and LumiBot's internal trading model) treat the *last tradable day* as the
+      option "expiration" (usually Friday).
+    - ThetaData chain payloads can represent standard monthly expirations using the OCC "Saturday"
+      date (with last trading on Friday). Weeklies are often represented as Friday; some holiday
+      expirations are represented as Thursday.
+
+    For ThetaData history endpoints we need the provider's expiry representation, not necessarily
+    the tradable session date, or requests can return placeholder-only (status_code=472, size=0).
+    """
+    if isinstance(expiration, datetime):
+        expiration = expiration.date()
+
+    # Standard monthly options: 3rd Friday last-trading-date, OCC expiration is Saturday.
+    # Heuristic: if the provided expiry is a Friday between the 15th and 21st (inclusive), treat it
+    # as a "monthly" trading expiry and map to the OCC Saturday.
+    if expiration.weekday() == 4 and 15 <= expiration.day <= 21:
+        return expiration + timedelta(days=1)
+
+    return expiration
 
 
 def _normalize_strike_value(raw_value: object) -> Optional[float]:

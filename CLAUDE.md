@@ -30,9 +30,13 @@ This repo is often worked on by **multiple AI sessions** at the same time.
   - One-off helpers: `scripts/` (safe-timeout friendly).
   - **Public docs (Sphinx):** `docsrc/` is the source for the public documentation site; keep docstrings and Sphinx pages up to date for user-facing behaviors.
 - When a workflow changes (env vars, cache semantics, harness flags), update the relevant `docs/*` page in the same change set.
-- Prefer **date-first filenames** for handoffs/investigations so they sort chronologically:
-  - `docs/handoffs/YYYY-MM-DD_<topic>.md`
-  - `docs/investigations/YYYY-MM-DD_<topic>.md`
+- **AI Navigation:** See `llms.txt` in repo root for structured documentation index
+- **File naming convention (MANDATORY):** All docs use **UPPERCASE** names with underscores:
+  - Root docs: `TOPIC_NAME.md` (e.g., `BACKTESTING_ARCHITECTURE.md`)
+  - Handoffs: `YYYY-MM-DD_TOPIC_NAME.md` (e.g., `2026-01-04_THETADATA_HANDOFF.md`)
+  - Investigations: `YYYY-MM-DD_TOPIC_NAME.md` (e.g., `2026-01-02_ACCURACY_AUDIT.md`)
+  - Date-first for chronological sorting; UPPERCASE for consistency
+- **File header (REQUIRED):** New docs must start with: Title, one-line description, Last Updated date, Status, Audience, and Overview section
 - Interop note: `AGENTS.md` is the cross-tool convention; `CLAUDE.md` is Claude Code’s native file. If you want a single source of truth, Claude Code supports importing:
   - `@AGENTS.md`
 

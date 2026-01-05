@@ -48,7 +48,7 @@ CASES: List[Case] = [
         start_date="2020-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="AAPLDeepDipCalls_2026-01-04_11-14_lIPHBU",
+        baseline_run_id="AAPLDeepDipCalls_2026-01-04_19-52_w1yl8v",
         max_backtest_time_seconds=300,
     ),
     Case(
@@ -80,7 +80,7 @@ CASES: List[Case] = [
         start_date="2025-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="BackdoorButterfly0DTE_2026-01-04_11-40_1VPPZ9",
+        baseline_run_id="BackdoorButterfly0DTE_2026-01-04_17-14_Dg5NJR",
         max_backtest_time_seconds=600,
     ),
     Case(
@@ -100,7 +100,7 @@ CASES: List[Case] = [
         start_date="2025-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="BackdoorButterfly0DTESmartLimit_2026-01-04_06-29_NduXK0",
+        baseline_run_id="BackdoorButterfly0DTESmartLimit_2026-01-04_20-26_qtvxlf",
         max_backtest_time_seconds=600,
     ),
     # SPX Short Straddle: CI uses the stall repro / prod parity window (docs include the speed baseline historically).

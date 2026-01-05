@@ -19,3 +19,6 @@ safety
 
 # Secret Storage
 python-dotenv
+
+# Documentation (llms.txt generation for AI assistants)
+sphinx-llms-txt
