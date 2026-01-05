@@ -207,12 +207,12 @@ This strategy was previously **under investigation** for baseline mismatch; CI u
 
 #### Expected Results (ThetaData / S3 v44)
 
-- Correct Total Return = -89.00%
-- Correct CAGR = -16.83%
-- Correct Max DD = -98.96%
-- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 38.3s
+- Correct Total Return = 104.00%
+- Correct CAGR = 6.16%
+- Correct Max DD = -98.17%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 111.3s
 - CI cap (seconds) <= 300
-- Baseline `run_id` = `MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O`
+- Baseline `run_id` = `MeliDeepDrawdownCalls_2026-01-05_02-18_dKzthV`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | status | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -220,7 +220,8 @@ This strategy was previously **under investigation** for baseline mismatch; CI u
 | `MeliDeepDrawdownCalls_2026-01-02_10-09_7yisFp` | 4.4.21 | 2013-01-01 → 2025-12-17 | 856.3 | -91% | -18.22% | -99.73% | under investigation | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `MeliDeepDrawdownCalls_2026-01-02_19-24_kZELl5` | 4.4.21 | 2013-01-01 → 2025-12-17 | 350.4 | 14% | 1.08% | -98.26% | under investigation (daily snapshot NBBO override) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `MeliDeepDrawdownCalls_2026-01-04_09-39_hyg1f1` | 4.4.24 | 2013-01-01 → 2025-12-17 | 18.1 | 82% | 5.12% | -98.2% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O` | 4.4.24 | 2013-01-01 → 2025-12-17 | 41.1 | -89% | -16.83% | -98.96% | expected baseline (post daily-bar end-row fix; queue-free) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O` | 4.4.24 | 2013-01-01 → 2025-12-17 | 41.1 | -89% | -16.83% | -98.96% | historical (superseded; stale snapshot placeholder refetch caused missing option marks) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `MeliDeepDrawdownCalls_2026-01-05_02-18_dKzthV` | 4.4.25 | 2013-01-01 → 2025-12-17 | 111.3 | 104% | 6.16% | -98.17% | expected baseline (queue-free; post snapshot placeholder fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 See: `docs/investigations/ACCURACY_AUDIT_2026-01-02.md` for the divergence notes and first-diff audit plan.
 

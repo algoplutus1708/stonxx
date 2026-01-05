@@ -90,7 +90,7 @@ CASES: List[Case] = [
         start_date="2013-01-01",
         end_date="2025-12-18",
         data_source="thetadata",
-        baseline_run_id="MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O",
+        baseline_run_id="MeliDeepDrawdownCalls_2026-01-05_02-18_dKzthV",
         max_backtest_time_seconds=300,
     ),
     Case(
