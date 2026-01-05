@@ -39,20 +39,19 @@ jobs:
           pip install -r requirements_dev.txt
           pip install sphinx furo sphinx-llms-txt
 
-      - name: Build docs
+      - name: Build docs and generate llms files
         run: |
           cd docsrc
-          make html
+          # Build HTML + text output, generate compiled llms-full.txt
+          make llms
 
-      - name: Update llms.txt files
+      - name: Commit llms.txt files
         if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
         run: |
-          cp docsrc/_build/html/llms.txt llms.txt
-          cp docsrc/_build/html/llms-full.txt llms-full.txt
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add llms.txt llms-full.txt
-          git diff --staged --quiet || git commit -m "docs: update llms.txt files [skip ci]"
+          git diff --staged --quiet || git commit -m "docs: update llms.txt files (compiled) [skip ci]"
           git push || echo "Nothing to push"
 
       - name: Upload Pages artifact

@@ -25,13 +25,33 @@ help:
 	@mkdir -p ../generated-docs
 	@cp -a _build/html/. ../generated-docs
 
-# Copy generated llms.txt and llms-full.txt to repo root for Context7/AI discoverability
-llms:
-	@echo "Copying generated llms.txt and llms-full.txt to repo root..."
-	@cp _build/html/llms.txt ../llms.txt
-	@cp _build/html/llms-full.txt ../llms-full.txt
-	@echo "llms.txt and llms-full.txt updated at repo root"
+# Generate llms-full.txt with COMPILED documentation (resolved autodoc directives)
+# This uses Sphinx's text builder which extracts actual docstrings
+llms-full:
+	@echo "Building text output with resolved autodoc..."
+	@$(SPHINXBUILD) -b text "$(SOURCEDIR)" "$(BUILDDIR)/text" $(SPHINXOPTS)
+	@echo "Concatenating text files into llms-full.txt..."
+	@echo "# Lumibot Documentation (Compiled)" > ../llms-full.txt
+	@echo "# Generated: $$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> ../llms-full.txt
+	@echo "" >> ../llms-full.txt
+	@find _build/text -name "*.txt" -type f | sort | while read f; do \
+		echo "" >> ../llms-full.txt; \
+		echo "===== $$(basename $$f .txt) =====" >> ../llms-full.txt; \
+		echo "" >> ../llms-full.txt; \
+		cat "$$f" >> ../llms-full.txt; \
+	done
+	@echo "llms-full.txt generated at repo root ($$(wc -c < ../llms-full.txt | tr -d ' ') bytes)"
 
-# Build HTML and update llms files in one step
-html-llms: html llms
+# Copy llms.txt index from sphinx-llms-txt (the index is useful)
+llms-index:
+	@echo "Copying llms.txt index to repo root..."
+	@cp _build/html/llms.txt ../llms.txt
+	@echo "llms.txt updated at repo root"
+
+# Build HTML, generate compiled llms-full.txt, and copy index
+# This is the target GitHub Actions should use
+llms: html llms-full llms-index
 	@echo "Docs built and llms files updated"
+
+# Alias for backwards compatibility
+html-llms: llms

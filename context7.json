@@ -15,7 +15,9 @@
     ".github",
     "__pycache__",
     ".pytest_cache",
-    ".git"
+    ".git",
+    "docs/handoffs",
+    "docs/investigations"
   ],
   "excludeFiles": [
     "*.jar",
@@ -34,7 +36,11 @@
     "*.cfg",
     "*.ini",
     "*.yml",
-    "*.yaml"
+    "*.yaml",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "llms.txt",
+    "requirements*.txt"
   ],
   "rules": [
     "CRITICAL: Never use datetime.now() or datetime.today() in strategies - always use self.get_datetime() for backtesting compatibility",
