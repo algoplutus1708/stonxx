@@ -339,9 +339,9 @@ class OptionsHelper:
             # cap the probe depth more aggressively.
             try:
                 if not self._is_index_like_underlying(underlying_asset, getattr(underlying_asset, "symbol", None)):
-                    max_expirations_to_try = 2
+                    max_expirations_to_try = 1
             except Exception:
-                max_expirations_to_try = 2
+                max_expirations_to_try = 1
         for exp_date in expirations:
             if attempts >= max_expirations_to_try:
                 break

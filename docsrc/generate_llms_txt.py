@@ -1,4 +1,11 @@
-# Lumibot
+#!/usr/bin/env python3
+"""Generate llms.txt index file for AI discoverability."""
+
+import datetime
+import sys
+from pathlib import Path
+
+LLMS_TXT_CONTENT = '''# Lumibot
 
 > Python trading and backtesting framework for stocks, options, crypto, and futures.
 > Supports Alpaca, Interactive Brokers, Tradier, Schwab, ThetaData, Yahoo Finance, and Polygon.
@@ -128,5 +135,18 @@ class MyStrategy(Strategy):
 - `ThetaDataBacktesting` - Options and stocks (requires subscription)
 
 Set via environment variable: `BACKTESTING_DATA_SOURCE=yahoo|polygon|thetadata`
+'''
 
-# Generated: 2026-01-05T06:59:12Z
+
+def main():
+    output_path = Path(__file__).parent.parent / "llms.txt"
+
+    timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    content = LLMS_TXT_CONTENT.strip() + f"\n\n# Generated: {timestamp}\n"
+
+    output_path.write_text(content)
+    print(f"llms.txt generated at {output_path} ({len(content)} bytes)")
+
+
+if __name__ == "__main__":
+    main()

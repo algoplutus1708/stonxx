@@ -42,13 +42,12 @@ llms-full:
 	done
 	@echo "llms-full.txt generated at repo root ($$(wc -c < ../llms-full.txt | tr -d ' ') bytes)"
 
-# Copy llms.txt index from sphinx-llms-txt (the index is useful)
+# Generate llms.txt as a proper index with critical rules and quick reference
 llms-index:
-	@echo "Copying llms.txt index to repo root..."
-	@cp _build/html/llms.txt ../llms.txt
-	@echo "llms.txt updated at repo root"
+	@echo "Generating llms.txt index..."
+	@python3 generate_llms_txt.py
 
-# Build HTML, generate compiled llms-full.txt, and copy index
+# Build HTML, generate compiled llms-full.txt, and generate index
 # This is the target GitHub Actions should use
 llms: html llms-full llms-index
 	@echo "Docs built and llms files updated"

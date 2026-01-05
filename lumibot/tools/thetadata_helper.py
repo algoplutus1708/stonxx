@@ -3475,6 +3475,24 @@ def get_historical_data_snapshot_cached(
         except Exception:
             df_existing = None
         if df_existing is not None and not df_existing.empty:
+            # IMPORTANT: Placeholder-only snapshot caches (all rows missing=True) are valid negative
+            # caches for the full session. Do NOT refetch them.
+            #
+            # Without this, CI/acceptance runs that start from empty disks will:
+            # 1) download the placeholder from S3,
+            # 2) decide it "doesn't cover the full session" via index-range heuristics, and then
+            # 3) enqueue downloader work every run, violating the warm-cache invariant.
+            if prefer_full_session and str(getattr(asset, "asset_type", "")).lower() == "option":
+                try:
+                    if "missing" in df_existing.columns:
+                        missing_flags = df_existing["missing"].fillna(False).astype(bool)
+                        if bool(missing_flags.all()):
+                            return df_existing
+                except Exception:
+                    # If the missing column is malformed, treat this as a stable negative cache
+                    # rather than risk infinite refetch loops in production backtests.
+                    return df_existing
+
             # Backward-compat: older runs could have written a tiny dt-window payload under a
             # full-session cache key. For options, ensure the cached frame covers the whole
             # regular session; otherwise refetch once and overwrite the cache.
