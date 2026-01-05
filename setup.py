@@ -75,7 +75,7 @@ setuptools.setup(
         # PyArrow 15.0.0+ supports NumPy 2.x
         "pyarrow>=15.0.0",
         "tqdm",
-        "lumiwealth-tradier>=0.1.17",
+        "lumiwealth-tradier>=0.1.18",
         "pytz",
         "psycopg2-binary",
         # Exchange calendars 4.6.0+ supports NumPy 2.x

@@ -25,7 +25,7 @@ apscheduler>=3.10.4
 appdirs
 pyarrow>=15.0.0
 tqdm
-lumiwealth-tradier>=0.1.16
+lumiwealth-tradier>=0.1.18
 pytz
 psycopg2-binary
 exchange_calendars>=4.6.0
