@@ -6493,3 +6493,13 @@ timestamp,test_name,data_source,trading_days,execution_time_seconds,git_commit,l
 2026-01-04T22:12:40.078701,test_acceptance_leaps_alpha_picks,unknown,,33.851,a45e40db,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
 2026-01-04T22:13:37.616903,test_acceptance_aapl_deep_dip_calls,unknown,,35.863,a45e40db,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
 2026-01-04T23:47:04.614755,test_acceptance_spx_short_straddle,unknown,,201.086,8075dcfb,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-05T01:31:56.679484,test_acceptance_leaps_alpha_picks,unknown,,32.093,5fec1187,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-05T01:36:50.148730,test_acceptance_aapl_deep_dip_calls,unknown,,38.581,5fec1187,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-05T01:37:39.874110,test_acceptance_aapl_deep_dip_calls,unknown,,40.505,5fec1187,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-05T01:38:11.492005,test_acceptance_leaps_alpha_picks,unknown,,29.539,5fec1187,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-05T01:38:50.798990,test_acceptance_tqqq_sma200,unknown,,39.221,5fec1187,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-05T01:55:40.117898,test_acceptance_backdoor_butterfly,unknown,,271.179,5fec1187,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-05T01:56:27.181141,test_acceptance_aapl_deep_dip_calls,unknown,,37.112,5fec1187,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-05T01:57:01.760152,test_acceptance_leaps_alpha_picks,unknown,,32.772,5fec1187,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-05T01:57:42.029758,test_acceptance_tqqq_sma200,unknown,,40.187,5fec1187,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-05T02:02:08.408195,test_acceptance_backdoor_butterfly,unknown,,266.29,5fec1187,4.4.25,,,,,Auto-tracked from test_acceptance_backtests_ci

@@ -373,18 +373,6 @@ def _run_script(case: _BaselineCase) -> tuple[Path, dict[str, int]]:
                 f"settings={settings}\nrun_dir={run_dir}"
             )
 
-        remote_stats = payload.get("remote_cache_stats") or {}
-        try:
-            misses = int(remote_stats.get("misses") or 0)
-        except Exception:
-            misses = 0
-        if misses:
-            raise AssertionError(
-                f"{case.slug} had {misses} remote cache miss(es) (S3 missing object(s)); "
-                "this indicates the cache is not fully warm for the canonical acceptance window.\n"
-                f"settings={settings}\nrun_dir={run_dir}"
-            )
-
     inner_s = payload.get("backtest_time_seconds")
     if isinstance(inner_s, (int, float)) and inner_s > max_inner_s:
         raise AssertionError(

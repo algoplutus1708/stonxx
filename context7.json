@@ -4,8 +4,7 @@
   "projectTitle": "Lumibot",
   "description": "Python trading and backtesting framework for stocks, options, crypto, and futures. Supports Alpaca, Interactive Brokers, Tradier, Schwab, ThetaData, Yahoo Finance, and Polygon.",
   "folders": [
-    ".",
-    "docs"
+    "."
   ],
   "excludeFolders": [
     "docsrc",
@@ -16,8 +15,7 @@
     "__pycache__",
     ".pytest_cache",
     ".git",
-    "docs/handoffs",
-    "docs/investigations"
+    "docs"
   ],
   "excludeFiles": [
     "*.jar",
