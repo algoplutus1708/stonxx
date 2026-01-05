@@ -68,6 +68,12 @@ such as Polygon or DataBento. Option-chain caches now live at
 `<asset-folder>` matches `thetadata_helper._resolve_asset_folder(...)` (for
 example `stock` or `index`).
 
+Snapshot quote caches (used by `get_quote(snapshot_only=True)`) are stored under
+`thetadata/<asset-folder>/snapshot/quote/` and include the `trading_day`,
+interval label, and session bounds in the filename. For **option** assets we
+cache the full **regular session** per day (09:30–16:00) so hourly/iterative
+strategies don’t create one cache object per dt-window.
+
 ## Implementation Overview
 
 * `BacktestCacheSettings.from_env` validates the env contract and resolves

@@ -3423,11 +3423,22 @@ def get_historical_data_snapshot_cached(
     day = trading_days[0]
     start_local = _normalize_market_datetime(start_dt)
     end_local = _normalize_market_datetime(end_dt)
+
+    # Options do not trade during extended hours, and requesting quote history outside the regular
+    # session can produce placeholder-only responses (472). For snapshot-only quote probes we keep
+    # option caches strictly aligned to the regular session to:
+    # - minimize payload size,
+    # - avoid "refetch forever" behavior when extended hours are empty,
+    # - ensure cache windows are comparable across runs (S3 warm invariant).
+    effective_after_hours = include_after_hours
+    if str(getattr(asset, "asset_type", "")).lower() == "option":
+        effective_after_hours = False
+
     session_start, session_end = _compute_session_bounds(
         day,
         start_local,
         end_local,
-        include_after_hours,
+        effective_after_hours,
         prefer_full_session=prefer_full_session,
     )
 
@@ -3446,6 +3457,7 @@ def get_historical_data_snapshot_cached(
             "interval": interval_label,
             "start_time": session_start,
             "end_time": session_end,
+            "include_after_hours": effective_after_hours,
         }
     )
 
@@ -3463,16 +3475,58 @@ def get_historical_data_snapshot_cached(
         except Exception:
             df_existing = None
         if df_existing is not None and not df_existing.empty:
-            return df_existing
+            # Backward-compat: older runs could have written a tiny dt-window payload under a
+            # full-session cache key. For options, ensure the cached frame covers the whole
+            # regular session; otherwise refetch once and overwrite the cache.
+            if prefer_full_session and str(getattr(asset, "asset_type", "")).lower() == "option":
+                try:
+                    start_t = datetime.strptime(session_start, "%H:%M:%S").time()
+                    end_t = datetime.strptime(session_end, "%H:%M:%S").time()
+                    expected_start = _normalize_market_datetime(datetime.combine(day, start_t))
+                    expected_end = _normalize_market_datetime(datetime.combine(day, end_t))
+                    tolerance = timedelta(minutes=2)
+                    idx = df_existing.index
+                    idx_min = idx.min()
+                    idx_max = idx.max()
+                    if getattr(idx_min, "tzinfo", None) is None:
+                        idx_min = _normalize_market_datetime(idx_min)
+                    if getattr(idx_max, "tzinfo", None) is None:
+                        idx_max = _normalize_market_datetime(idx_max)
+
+                    covers = idx_min <= expected_start + tolerance and idx_max >= expected_end - tolerance
+                    if covers:
+                        return df_existing
+                except Exception:
+                    # If anything about the index is unexpected, prefer using the cached payload
+                    # rather than risking repeated refetches in production backtests.
+                    return df_existing
+            else:
+                return df_existing
+
+    fetch_start = start_dt
+    fetch_end = end_dt
+    if prefer_full_session:
+        # PERF: Cache a stable per-(asset, trading_day) quote history payload. Backtests that
+        # call `get_quote(snapshot_only=True)` many times per day (hourly strategies, option
+        # scanners, SMART_LIMIT) otherwise create one cache file per dt-window and spend most
+        # of their time enqueuing/downloading tiny payloads.
+        try:
+            start_t = datetime.strptime(session_start, "%H:%M:%S").time()
+            end_t = datetime.strptime(session_end, "%H:%M:%S").time()
+            fetch_start = _normalize_market_datetime(datetime.combine(day, start_t))
+            fetch_end = _normalize_market_datetime(datetime.combine(day, end_t))
+        except Exception:
+            fetch_start = start_dt
+            fetch_end = end_dt
 
     try:
         result_df = get_historical_data(
             asset,
-            start_dt,
-            end_dt,
+            fetch_start,
+            fetch_end,
             ivl,
             datastyle=datastyle,
-            include_after_hours=include_after_hours,
+            include_after_hours=effective_after_hours,
             username=username,
             password=password,
         )

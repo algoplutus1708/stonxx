@@ -87,7 +87,11 @@ def _install_tripwire() -> None:
         safe_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
         if parsed.query:
             safe_url = f"{safe_url}?{parsed.query}"
-        raise RuntimeError(
+        # Fail-fast in the subprocess. Many LumiBot code paths catch `Exception` and continue
+        # (treating missing remote data as a placeholder), which can turn a "cache miss" into a
+        # multi-minute hang. `SystemExit` is not caught by `except Exception`, so any downloader
+        # call immediately aborts the run and surfaces the regression.
+        raise SystemExit(
             "[ACCEPTANCE][TRIPWIRE] Attempted to call Data Downloader "
             f"({method} {safe_url}). Expected fully warm S3 cache; downloader usage is forbidden in acceptance tests."
         )
@@ -125,4 +129,3 @@ def _install_tripwire() -> None:
 
 
 _install_tripwire()
-
