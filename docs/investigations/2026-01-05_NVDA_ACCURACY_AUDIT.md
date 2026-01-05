@@ -103,3 +103,20 @@ Warm run (fresh local disk, warm S3):
 - S3 cache version: `nvda_cache_smoke_20260105_103005` (same as cold)
 - Result: ✅ completed, tearsheet produced
 - `queue_submits`: **0**
+
+## Production verification (2025 window; previously crashed)
+
+This reproduces the customer-reported “ERROR_CODE_CRASH with no traceback” class and confirms the run now completes in production.
+
+- Bot ID: `nvda_2025_prod-20250111-20251231-f03cvdft`
+- Window: `2025-01-11 -> 2025-12-31`
+- Result: ✅ `status=completed` (no crash)
+- Downloaded artifacts (BotManager API) saved under:
+  - `/Users/robertgrzesik/Documents/Development/Strategy Library/logs/prod_runs/nvda_2025/nvda_2025_prod-20250111-20251231-f03cvdft/`
+
+Artifacts confirmed present via BotManager API:
+
+- `tearsheet.html`
+- `trades.csv`
+- `stats.csv`
+- `completion.json`
