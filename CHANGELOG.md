@@ -1,5 +1,32 @@
 # Changelog
 
+## 4.4.29 - 2026-01-06
+
+### Fixed
+- Prevent production backtests from OOM-like hard exits (`ERROR_CODE_CRASH`) when refreshing multi-year intraday ThetaData caches by avoiding deep copies during cache load/write and trimming non-option intraday frames in-memory.
+
+## 4.4.28 - 2026-01-05
+
+### Added
+- Production backtest runner script (`scripts/run_backtest_prod.py`) plus investigation docs for NVDA/SPX accuracy, parity, and startup latency.
+
+### Fixed
+- ThetaData missing-day detection for intraday caches across UTC midnights (prevents “every other trading day missing” forward-fill storms).
+- Backtesting: improved intraday fills and cache end handling; deterministic drift ordering for rebalances.
+
+## 4.4.27 - 2026-01-05
+
+### Fixed
+- Reduced peak memory usage for ThetaData backtests and tear sheet generation to avoid OOM crashes in production.
+
+## 4.4.26 - 2026-01-05
+
+### Changed
+- ThetaData: cache snapshot quotes per session and fetch full-session option quote snapshots to reduce downloader fanout.
+
+### Fixed
+- Clamp future backtest end dates instead of failing.
+
 ## 4.4.25 - 2026-01-04
 
 Deploy marker: `b7f83088` ("Deploy 4.4.25")

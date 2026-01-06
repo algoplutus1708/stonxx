@@ -136,6 +136,7 @@ Follow-ups (optional):
 - Infra (ECS) improvements are required to reduce cold-node pull/provisioning:
   - reduce backtest image size and layer churn (faster pulls),
   - add capacity headroom or a capacity provider (fewer provisioning stalls),
+  - set `image-pull-behavior` to prefer cached images for the backtest cluster (BotManager `terraform/ecs.tf`; reduces ~30s pulls on warm nodes),
   - consider warming nodes/agents (keep the image cached).
 - If we want even earlier progress (before datasource init), add a “progress bootstrap row” in:
   - strategy executor startup, and/or

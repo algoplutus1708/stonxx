@@ -120,3 +120,34 @@ Artifacts confirmed present via BotManager API:
 - `trades.csv`
 - `stats.csv`
 - `completion.json`
+
+## Follow-up: OOM-like crashes when refreshing multi-year intraday caches
+
+Even with the missing-day UTC-midnight bug fixed, we observed a separate production failure mode:
+
+- BotSpot shows: `ERROR_CODE_CRASH`
+- CloudWatch logs show no Python traceback; `logs.csv` stops immediately after a downloader result
+- `download_status` shows a single intraday OHLC request (e.g., NVDA minute bars) stuck at `queue_status=processing`
+
+### Why it happens
+
+When S3 cache namespaces are shared, a symbol’s cache file can contain multi-year intraday history
+(e.g., NVDA minute bars from a prior 2013→2025 run). On a refresh boundary near the end of a
+shorter backtest window (e.g., a 2025-only run), LumiBot can:
+
+1) load that multi-year parquet into memory
+2) deep-copy it during cache update/write (`DataFrame.copy()` defaults to `deep=True`)
+
+That can **double peak RSS** and exceed the ECS task memory limit, producing an OOM-like hard exit
+with no Python traceback (surfacing as `ERROR_CODE_CRASH`).
+
+### Fix (LumiBot)
+
+- In `lumibot/tools/thetadata_helper.py`, avoid deep-copying large cached frames during:
+  - cache load (`df_cached.copy(deep=False)`), and
+  - cache writes (`update_cache()` uses shallow copies + avoids duplicative normalization copies).
+- In `lumibot/backtesting/thetadata_backtesting_pandas.py`, set `preserve_full_history=False` for
+  **non-option assets** so a 2025-only backtest doesn’t try to hold a multi-year intraday cache in RAM.
+
+Regression test added:
+- `tests/test_thetadata_helper_update_parquet_memory.py`

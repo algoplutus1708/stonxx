@@ -1498,6 +1498,18 @@ class ThetaDataBacktestingPandas(PandasData):
         use_quotes_flag = bool(getattr(self, "_use_quote_data", False)) or bool(require_quote_data)
         wants_quotes = bool(use_quotes_flag) and ts_unit in {"minute", "hour", "second"} and bool(require_quote_data)
 
+        # Memory: for non-option assets, avoid pulling/returning the full on-disk cache frame.
+        #
+        # Production backtests can reuse a cache namespace that already contains multi-year intraday
+        # history for a symbol (e.g. NVDA minute bars from a prior 2013→2025 run). Returning that
+        # entire frame to the backtester can exceed the ECS task memory limit, especially on refresh
+        # boundaries near the end of the requested window (observed as BotManager ERROR_CODE_CRASH
+        # with no Python traceback / logs ending abruptly).
+        #
+        # Options are handled differently: placeholder rows / negative caching are useful to avoid
+        # re-fetch storms, so we continue to preserve full-history semantics there.
+        preserve_full_history = bool(is_option_asset)
+
         def _fetch_ohlc():
             return thetadata_helper.get_price_data(
                 asset_separated,
@@ -1508,7 +1520,7 @@ class ThetaDataBacktestingPandas(PandasData):
                 dt=date_time_now,
                 datastyle="ohlc",
                 include_after_hours=True,  # Default to True for extended hours data
-                preserve_full_history=True,
+                preserve_full_history=preserve_full_history,
                 # Day bars use Theta's EOD endpoint which can return `close=0` on days with no trades.
                 # For options we still need NBBO (bid/ask) so `get_quote()` and ThetaData option
                 # mark-to-market / fill logic can price illiquid days even when there are no trades.
@@ -1529,7 +1541,7 @@ class ThetaDataBacktestingPandas(PandasData):
                 dt=date_time_now,
                 datastyle="quote",
                 include_after_hours=True,  # Default to True for extended hours data
-                preserve_full_history=True,
+                preserve_full_history=preserve_full_history,
             )
 
         df_ohlc = None
