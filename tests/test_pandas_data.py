@@ -82,10 +82,7 @@ class TestPandasData:
 
         source = PandasData(
             datetime_start=idx[0],
-            # NOTE(legacy): backtesting datasources treat `datetime_end` as an exclusive bound
-            # (DataSourceBacktesting subtracts 1 minute). Add 1 minute so the final bar at idx[-1]
-            # is included in the loaded dataset for this assertion.
-            datetime_end=idx[-1] + timedelta(minutes=1),
+            datetime_end=idx[-1],
             pandas_data=[data],
         )
         source.load_data()
