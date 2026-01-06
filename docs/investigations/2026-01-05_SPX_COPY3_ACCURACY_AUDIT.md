@@ -1,5 +1,7 @@
 # 2026-01-05 — SPX Copy3 Accuracy Audit (manager_bot_id=6be31002-44ec-4ae7-857a-db5e01323e7c)
 
+**Last Updated:** 2026-01-06
+
 ## Scope
 
 - Strategy code (read-only repro): `/Users/robertgrzesik/Documents/Development/Strategy Library/tmp/backtest_code/6be31002-44ec-4ae7-857a-db5e01323e7c/main.py`
@@ -68,6 +70,28 @@ See: `docs/investigations/2026-01-05_SPX_COPY2_ACCURACY_AUDIT.md`
 - Trades determinism: ✅ `trades.csv` is byte-identical vs cold
 - Artifacts:
   - `/Users/robertgrzesik/Documents/Development/Strategy Library/logs/prod_runs/spx_copy3_prod_warm/spx_copy3_prod_warm-20250107-20250117-zefyg4xe/`
+
+## Production cold→warm proof (extended window)
+
+### Cold (prod; extended)
+
+- Window: `2025-01-07 -> 2025-04-07`
+- Bot ID: `spx_copy3_prod_long_cold-20250107-20250407-kf986ptx`
+- S3 cache version: `spx_copy3_long_20260106`
+- Backtest time: `2004.8s` (~33.4m)
+- Queue submits (`Submitted to queue`): `2038`
+- Artifacts:
+  - `/Users/robertgrzesik/Documents/Development/Strategy Library/logs/prod_runs/spx_copy3_prod_long_cold/spx_copy3_prod_long_cold-20250107-20250407-kf986ptx/`
+
+### Warm (prod; same S3 version; extended)
+
+- Window: `2025-01-07 -> 2025-04-07`
+- Bot ID: `spx_copy3_prod_long_warm-20250107-20250407-pus61m2z`
+- S3 cache version: `spx_copy3_long_20260106` (same as cold)
+- Backtest time: `388.2s` (~6.5m)
+- Queue submits: `0`
+- Artifacts:
+  - `/Users/robertgrzesik/Documents/Development/Strategy Library/logs/prod_runs/spx_copy3_prod_long_warm/spx_copy3_prod_long_warm-20250107-20250407-pus61m2z/`
 
 ## Accuracy Audit Deliverables
 

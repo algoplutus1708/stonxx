@@ -2224,7 +2224,12 @@ def get_price_data(
             quote_asset,
             timespan,
         )
-        df_cached = load_cache(cache_file)
+        df_cached = load_cache(
+            cache_file,
+            start=start,
+            end=end,
+            preserve_full_history=preserve_full_history,
+        )
         if df_cached is not None and not df_cached.empty:
             if timespan == "day":
                 # Normalize cached day bars (and placeholders) to market-close timestamps to avoid lookahead.
@@ -3801,8 +3806,18 @@ def get_missing_dates(df_all, asset, start, end):
     return missing_dates
 
 
-def load_cache(cache_file):
-    """Load the data from the cache file and return a DataFrame with a DateTimeIndex"""
+def load_cache(cache_file, *, start=None, end=None, preserve_full_history: bool = False):
+    """Load the data from the cache file and return a DataFrame with a DateTimeIndex.
+
+    Performance notes
+    -----------------
+    For multi-year intraday caches (e.g., NVDA minute OHLC), reading the entire parquet frame into
+    memory can exceed production ECS task limits (often surfacing as BotManager ERROR_CODE_CRASH
+    with no Python traceback and logs ending abruptly).
+
+    When `start`/`end` are provided and `preserve_full_history=False`, we use PyArrow's dataset
+    filtering to load only the requested datetime slice.
+    """
     # DEBUG-LOG: Start loading cache
     logger.debug(
         "[THETA][DEBUG][CACHE][LOAD_START] cache_file=%s | "
@@ -3819,7 +3834,49 @@ def load_cache(cache_file):
         )
         return None
 
-    df = pd.read_parquet(cache_file, engine='pyarrow')
+    df = None
+    if start is not None and end is not None and not preserve_full_history:
+        try:
+            import pyarrow.dataset as ds
+            from datetime import date as date_type
+            from datetime import datetime as datetime_type
+            from datetime import time as time_type
+
+            def _coerce_bound(value, *, is_end: bool):
+                if value is None:
+                    return None
+
+                # Support date-only inputs (common in day-mode backtests).
+                if isinstance(value, date_type) and not isinstance(value, datetime_type):
+                    value = datetime_type.combine(value, time_type.max if is_end else time_type.min)
+
+                # Pandas Timestamp -> python datetime (keeps tzinfo).
+                if hasattr(value, "to_pydatetime"):
+                    value = value.to_pydatetime()
+
+                if getattr(value, "tzinfo", None) is None:
+                    return LUMIBOT_DEFAULT_PYTZ.localize(value).astimezone(pytz.UTC)
+                return value.astimezone(pytz.UTC)
+
+            start_bound = _coerce_bound(start, is_end=False)
+            end_bound = _coerce_bound(end, is_end=True)
+            if start_bound is not None and end_bound is not None:
+                dataset = ds.dataset(cache_file, format="parquet")
+                flt = (ds.field("datetime") >= start_bound) & (ds.field("datetime") <= end_bound)
+                table = dataset.to_table(filter=flt)
+                df = table.to_pandas()
+                logger.debug(
+                    "[THETA][DEBUG][CACHE][LOAD_FILTER] cache_file=%s start=%s end=%s rows_read=%d",
+                    cache_file.name,
+                    start_bound.isoformat() if hasattr(start_bound, "isoformat") else start_bound,
+                    end_bound.isoformat() if hasattr(end_bound, "isoformat") else end_bound,
+                    len(df),
+                )
+        except Exception:
+            df = None
+
+    if df is None:
+        df = pd.read_parquet(cache_file, engine="pyarrow")
 
     rows_after_read = len(df)
     logger.debug(
