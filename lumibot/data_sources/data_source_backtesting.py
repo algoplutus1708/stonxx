@@ -20,6 +20,20 @@ class DataSourceBacktesting(DataSource, ABC):
 
     IS_BACKTESTING_DATA_SOURCE = True
 
+    _PROGRESS_CSV_HEADER = (
+        "timestamp",
+        "percent",
+        "elapsed",
+        "eta",
+        "portfolio_value",
+        "simulation_date",
+        "cash",
+        "total_return_pct",
+        "positions_json",
+        "orders_json",
+        "download_status",
+    )
+
     def __init__(
              self,
             datetime_start: datetime | None = None,
@@ -29,6 +43,7 @@ class DataSourceBacktesting(DataSource, ABC):
             api_key: str | None = None,
             show_progress_bar: bool = True,
             log_backtest_progress_to_file = False,
+            progress_csv_path: str | None = None,
             delay: int | None = None,
             pandas_data: dict | list = None,
             **kwargs
@@ -62,8 +77,19 @@ class DataSourceBacktesting(DataSource, ABC):
         self._eta_calibration_seconds = 25
         self._eta_calibration_progress = 4  # percent
 
-        # Subtract one minute from the datetime_end so that the strategy stops right before the datetime_end
-        self.datetime_end -= timedelta(minutes=1)
+        # Subtract one minute from ``datetime_end`` for most providers so backtests stop
+        # *just before* the configured end bound.
+        #
+        # NOTE: *Pure* PandasDataBacktesting uses explicit bar timestamps provided by callers/tests.
+        # Making the end bound exclusive there commonly drops the final bar and breaks
+        # deterministic unit tests (fees/brackets/multileg cash, crypto cash regressions).
+        #
+        # Do NOT treat derived providers that inherit from PandasData (e.g., ThetaDataBacktestingPandas)
+        # as "pure pandas" here; those providers rely on the end-exclusive behavior for
+        # production-like backtests.
+        is_pure_pandas = type(self).__name__ in ("PandasData", "PandasDataBacktesting")
+        if self.datetime_end is not None and not is_pure_pandas:
+            self.datetime_end -= timedelta(minutes=1)
 
         # Legacy strategy.backtest code will always pass in a config even for DataSources that don't need it, so
         # catch it here and ignore it in this class. Child classes that need it should error check it themselves.
@@ -73,7 +99,7 @@ class DataSourceBacktesting(DataSource, ABC):
         # Quiet logs only affects INFO/WARNING/ERROR logging, not progress bar
         self._show_progress_bar = show_progress_bar
 
-        self._progress_csv_path = "logs/progress.csv"
+        self._progress_csv_path = progress_csv_path or "logs/progress.csv"
         # Add initialization for the logging timer attribute
         self._last_logging_time = None
         self._portfolio_value = None
@@ -96,6 +122,21 @@ class DataSourceBacktesting(DataSource, ABC):
         )
         self._progress_heartbeat_stop_event = threading.Event()
         self._progress_heartbeat_thread = None
+
+        # Startup latency (production backtests):
+        #
+        # BotManager uploads backtest progress by watching `logs/progress.csv`. For fast backtests,
+        # time-to-first-progress can dominate user-perceived latency (often 20–30s) because this
+        # file historically was only created once the simulation loop advanced.
+        #
+        # Write an initial progress row immediately so:
+        # - the UI shows that the backtest has started, and
+        # - the metrics uploader doesn't spin waiting for the first file to appear.
+        #
+        # This must remain lightweight and avoid importing ThetaData helpers.
+        if self.log_backtest_progress_to_file:
+            self._write_initial_progress_csv()
+
         if self.log_backtest_progress_to_file and self._progress_heartbeat_enabled:
             self._start_progress_heartbeat_thread()
 
@@ -118,6 +159,38 @@ class DataSourceBacktesting(DataSource, ABC):
         )
         self._progress_heartbeat_thread = thread
         thread.start()
+
+    def _write_initial_progress_csv(self) -> None:
+        if not self.log_backtest_progress_to_file:
+            return
+
+        with self._progress_csv_lock:
+            dir_path = os.path.dirname(self._progress_csv_path)
+            if dir_path and not os.path.exists(dir_path):
+                os.makedirs(dir_path, exist_ok=True)
+
+            if os.path.exists(self._progress_csv_path):
+                return
+
+            current_time = dt.datetime.now().isoformat()
+            row = [
+                current_time,
+                "0.00",
+                "0:00:00",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "[]",
+                "[]",
+                "{}",
+            ]
+
+            with open(self._progress_csv_path, "w", newline="") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(self._PROGRESS_CSV_HEADER)
+                writer.writerow(row)
 
     def stop_progress_heartbeat(self) -> None:
         event = getattr(self, "_progress_heartbeat_stop_event", None)
@@ -439,17 +512,5 @@ class DataSourceBacktesting(DataSource, ABC):
             with open(self._progress_csv_path, "w", newline="") as csvfile:
                 writer = csv.writer(csvfile)
                 # Header with all columns including orders and download status
-                writer.writerow([
-                    "timestamp",
-                    "percent",
-                    "elapsed",
-                    "eta",
-                    "portfolio_value",
-                    "simulation_date",
-                    "cash",
-                    "total_return_pct",
-                    "positions_json",
-                    "orders_json",
-                    "download_status"
-                ])
+                writer.writerow(self._PROGRESS_CSV_HEADER)
                 writer.writerow(row)

@@ -42,6 +42,28 @@ This page documents environment variables used by LumiBot, with an emphasis on *
 - Purpose: Enable progress bar updates.
 - Values: `true` / `false` (string).
 
+## Backtest progress file (BotSpot/BotManager UI)
+
+### `LOG_BACKTEST_PROGRESS_TO_FILE`
+- Purpose: When truthy, write `logs/progress.csv` during backtests so BotManager/BotSpot can show live progress.
+- Values: truthy enables (`1`, `true`, `yes`); unset/`0` disables.
+- Notes:
+  - On startup, LumiBot writes an initial `progress.csv` row immediately to reduce “time-to-first-progress” latency for short backtests.
+  - In BotManager, a background thread watches `/app/logs/*progress.csv` and uploads the most recent row to DynamoDB.
+- Where: `lumibot/data_sources/data_source_backtesting.py`
+
+### `BACKTESTING_PROGRESS_HEARTBEAT`
+- Purpose: Enable periodic `progress.csv` updates while a ThetaData download is active (prevents the UI appearing stuck when simulation datetime is not advancing).
+- Values: `true` / `false` (string).
+- Default: enabled (`true`).
+- Where: `lumibot/data_sources/data_source_backtesting.py`
+
+### `BACKTESTING_PROGRESS_HEARTBEAT_SECONDS`
+- Purpose: Heartbeat interval (seconds) for writing `progress.csv` while downloading.
+- Values: float seconds (string).
+- Default: `2.0`
+- Where: `lumibot/data_sources/data_source_backtesting.py`
+
 ## Trade audit telemetry (NVDA/SPX accuracy audits)
 
 ### `LUMIBOT_BACKTEST_AUDIT`

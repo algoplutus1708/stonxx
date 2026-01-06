@@ -36,12 +36,16 @@ class _StubStrategy:
         if max_spread_pct is not None:
             self.parameters["max_spread_pct"] = max_spread_pct
         self._chains = _StubChains(strikes)
+        self._now = datetime.datetime(2026, 1, 2, 10, 30)
 
     def log_message(self, *args, **kwargs):
         return None
 
     def get_chains(self, underlying_asset):
         return self._chains
+
+    def get_datetime(self):
+        return self._now
 
     def get_quote(self, option_asset):
         if option_asset.strike == 39.0:
@@ -90,3 +94,28 @@ def test_find_next_valid_option_respects_strategy_max_spread_pct_when_present():
 
     assert option is not None
     assert option.strike == 37.0
+
+
+def test_find_next_valid_option_backs_off_longer_when_no_quote_history_exists():
+    strategy = _StubStrategy(strikes=[38.0, 39.0])
+    helper = OptionsHelper(strategy)
+
+    # Force all quote probes to return "no data".
+    def _no_quote(*args, **kwargs):
+        return None
+
+    strategy.get_quote = _no_quote  # type: ignore[method-assign]
+
+    underlying = Asset("MFC", asset_type=Asset.AssetType.STOCK)
+    expiry = datetime.date(2026, 3, 20)
+
+    option = helper.find_next_valid_option(
+        underlying_asset=underlying,
+        rounded_underlying_price=39.0,
+        expiry=expiry,
+        put_or_call="call",
+    )
+
+    assert option is None
+    cooldown = getattr(helper, "_valid_option_search_cooldown", {})
+    assert cooldown[(underlying.symbol, expiry, "CALL")] == strategy.get_datetime() + datetime.timedelta(days=30)

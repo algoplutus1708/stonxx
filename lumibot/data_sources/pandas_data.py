@@ -127,6 +127,12 @@ class PandasData(DataSourceBacktesting):
         else:
             result_index = df.index
 
+        # Backtests should never iterate beyond the requested end bound. Keep any pre-start buffer
+        # (needed for lookbacks), but drop dates strictly after `datetime_end` so daily pandas
+        # backtests stop at the correct last trading day (see tests/test_momentum.py).
+        if self.datetime_end is not None:
+            result_index = result_index[result_index <= self.datetime_end]
+
         return result_index
 
     def get_trading_days_pandas(self):

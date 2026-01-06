@@ -106,9 +106,9 @@ def create_test_data_source(temp_dir, start, end):
         datetime_start=start,
         datetime_end=end,
         show_progress_bar=False,
-        log_backtest_progress_to_file=True
+        log_backtest_progress_to_file=True,
+        progress_csv_path=os.path.join(temp_dir, "logs", "progress.csv"),
     )
-    ds._progress_csv_path = os.path.join(temp_dir, "logs", "progress.csv")
     return ds
 
 

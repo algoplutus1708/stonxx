@@ -25,6 +25,10 @@ load_dotenv()
 # Global parameters
 POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
 
+# NOTE(legacy): This module hits the live Polygon API and is subject to rate limits (HTTP 429).
+# Mark as an API test so default CI runs (which use `-m "not apitest"`) stay deterministic.
+pytestmark = pytest.mark.apitest
+
 
 # LEGACY TEST CLASS (created Aug 2023)
 # These tests explicitly test PolygonDataBacktesting and must not be overridden.

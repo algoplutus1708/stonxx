@@ -375,8 +375,11 @@ class DriftOrderLogic:
         if df is None:
             raise ValueError("You must pass in a DataFrame to DriftOrderLogic.rebalance()")
 
-        # sort dataframe by the largest absolute value drift first
-        df = df.reindex(df["drift"].abs().sort_values(ascending=False).index)
+        # Sort by largest absolute drift first. Use a deterministic tie-break so rebalances
+        # are stable across Python/pandas versions and CI runners when abs(drifts) tie.
+        df = df.assign(_abs_drift=df["drift"].abs())
+        df = df.sort_values(by=["_abs_drift", "symbol"], ascending=[False, True], kind="mergesort")
+        df = df.drop(columns=["_abs_drift"])
 
         # Execute sells first
         sell_orders = []

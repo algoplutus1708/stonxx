@@ -48,7 +48,7 @@ CASES: List[Case] = [
         start_date="2020-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="AAPLDeepDipCalls_2026-01-04_19-52_w1yl8v",
+        baseline_run_id="AAPLDeepDipCalls_2026-01-05_09-33_aLJW35",
         max_backtest_time_seconds=300,
     ),
     Case(
@@ -58,7 +58,7 @@ CASES: List[Case] = [
         start_date="2025-10-01",
         end_date="2025-10-15",
         data_source="thetadata",
-        baseline_run_id="LeapsCallDebitSpread_2026-01-04_22-07_IhWXKY",
+        baseline_run_id="LeapsCallDebitSpread_2026-01-05_09-34_qqykop",
         max_backtest_time_seconds=120,
     ),
     Case(
@@ -68,7 +68,7 @@ CASES: List[Case] = [
         start_date="2013-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="TqqqSma200Strategy_2026-01-04_11-10_Wa65DX",
+        baseline_run_id="TqqqSma200Strategy_2026-01-05_09-35_IibziX",
         max_backtest_time_seconds=180,
     ),
     # NOTE: Yahoo is recorded once in docs/ACCEPTANCE_BACKTESTS.md (manual parity note),
@@ -80,7 +80,7 @@ CASES: List[Case] = [
         start_date="2025-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="BackdoorButterfly0DTE_2026-01-04_17-14_Dg5NJR",
+        baseline_run_id="BackdoorButterfly0DTE_2026-01-05_09-36_7AP0H8",
         max_backtest_time_seconds=600,
     ),
     Case(
@@ -90,7 +90,7 @@ CASES: List[Case] = [
         start_date="2013-01-01",
         end_date="2025-12-18",
         data_source="thetadata",
-        baseline_run_id="MeliDeepDrawdownCalls_2026-01-05_02-18_dKzthV",
+        baseline_run_id="MeliDeepDrawdownCalls_2026-01-05_09-42_bMjRNX",
         max_backtest_time_seconds=300,
     ),
     Case(
@@ -100,7 +100,7 @@ CASES: List[Case] = [
         start_date="2025-01-01",
         end_date="2025-12-01",
         data_source="thetadata",
-        baseline_run_id="BackdoorButterfly0DTESmartLimit_2026-01-04_20-26_qtvxlf",
+        baseline_run_id="BackdoorButterfly0DTESmartLimit_2026-01-05_09-44_qLKdxw",
         max_backtest_time_seconds=600,
     ),
     # SPX Short Straddle: CI uses the stall repro / prod parity window (docs include the speed baseline historically).
@@ -111,7 +111,7 @@ CASES: List[Case] = [
         start_date="2025-01-06",
         end_date="2025-12-26",
         data_source="thetadata",
-        baseline_run_id="SPXShortStraddle_2026-01-04_06-41_B1jF98",
+        baseline_run_id="SPXShortStraddle_2026-01-05_09-49_35TJJl",
         max_backtest_time_seconds=600,
     ),
 ]
@@ -148,12 +148,22 @@ def _read_tearsheet(tearsheet_csv: Path) -> Dict[str, Dict[str, Any]]:
             raise RuntimeError(f"Missing metric {metric_name!r} in {tearsheet_csv}")
         return str(row.iloc[0]).strip()
 
-    raw = {
+    raw_tearsheet = {
         "total_return": _get("Total Return"),
         "cagr": _get("CAGR% (Annual Return)"),
         "max_drawdown": _get("Max Drawdown"),
     }
-    centi = {k: _centipercent(v) for k, v in raw.items()}
+    centi = {k: _centipercent(v) for k, v in raw_tearsheet.items()}
+
+    def _format_centipercent(value: int) -> str:
+        """Render a centipercent integer as a canonical percent string with 2 decimals."""
+        sign = "-" if value < 0 else ""
+        value = abs(int(value))
+        whole = value // 100
+        frac = value % 100
+        return f"{sign}{whole:,}.{frac:02d}%"
+
+    raw = {k: _format_centipercent(v) for k, v in centi.items()}
     return {"raw": raw, "centipercent": centi}
 
 

@@ -64,7 +64,7 @@ Example format (repeat this on every speed row):
 
 - `macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8`
 
-## Canonical suite (currently 7 demos)
+## Canonical suite (currently 7 cases)
 
 This suite will grow over time (more strategies, data sources, and/or windows). When adding a new case:
 - add a new section below (including `#### Expected Results`)
@@ -87,12 +87,12 @@ Each strategy section includes:
 
 #### Expected Results (ThetaData / S3 v44)
 
-- Correct Total Return = 863.00%
-- Correct CAGR = 48.65%
+- Correct Total Return = 846.00%
+- Correct CAGR = 48.18%
 - Correct Max DD = -34.30%
-- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 30.6s
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 34.3s
 - CI cap (seconds) <= 300
-- Baseline `run_id` = `AAPLDeepDipCalls_2026-01-04_19-52_w1yl8v`
+- Baseline `run_id` = `AAPLDeepDipCalls_2026-01-05_09-33_aLJW35`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -100,7 +100,8 @@ Each strategy section includes:
 | `AAPLDeepDipCalls_2026-01-02_10-25_3KsjXy` | 4.4.21 | 2020-01-01 → 2025-11-30 | 237.5 | 870% | 48.86% | -34.09% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `AAPLDeepDipCalls_2026-01-04_06-02_3HO2Ds` | 4.4.24 | 2020-01-01 → 2025-11-30 | 26.9 | 862% | 48.63% | -34.09% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `AAPLDeepDipCalls_2026-01-04_11-14_lIPHBU` | 4.4.24 | 2020-01-01 → 2025-11-30 | 77.8 | 853% | 48.36% | -34.3% | historical (superseded; baseline updated under v44 cache semantics) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `AAPLDeepDipCalls_2026-01-04_19-52_w1yl8v` | 4.4.24 | 2020-01-01 → 2025-11-30 | 30.6 | 863% | 48.65% | -34.3% | prod-like (baseline; v44; queue-free) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `AAPLDeepDipCalls_2026-01-04_19-52_w1yl8v` | 4.4.24 | 2020-01-01 → 2025-11-30 | 30.6 | 863% | 48.65% | -34.3% | historical (superseded; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `AAPLDeepDipCalls_2026-01-05_09-33_aLJW35` | 4.4.27 | 2020-01-01 → 2025-11-30 | 34.3 | 846% | 48.18% | -34.30% | prod-like (baseline; v44; queue-free; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 2) Alpha Picks LEAPS (Call Debit Spread)
 
@@ -113,12 +114,12 @@ Each strategy section includes:
 
 #### Expected Results (ThetaData / S3 v44)
 
-- Correct Total Return = 1.00%
-- Correct CAGR = 18.00%
+- Correct Total Return = 0.00%
+- Correct CAGR = 8.64%
 - Correct Max DD = -1.43%
-- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 33.3s
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 34.6s
 - CI cap (seconds) <= 120
-- Baseline `run_id` = `LeapsCallDebitSpread_2026-01-04_22-07_IhWXKY`
+- Baseline `run_id` = `LeapsCallDebitSpread_2026-01-05_09-34_qqykop`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -127,7 +128,8 @@ Each strategy section includes:
 | `LeapsCallDebitSpread_2026-01-02_10-48_4UtvLT` | 4.4.21 | 2025-01-01 → 2025-11-30 | 285.5 | -3% | -3.03% | -19.33% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-04_05-13_ZpmFin` | 4.4.24 | 2025-10-01 → 2025-10-14 | 10.8 | 2% | 58.04% | -1.14% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-04_11-20_vXE88y` | 4.4.24 | 2025-10-01 → 2025-10-14 | 5.4 | 0% | 11.81% | -1.16% | historical (superseded; baseline updated under v44 cache semantics) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `LeapsCallDebitSpread_2026-01-04_22-07_IhWXKY` | 4.4.25 | 2025-10-01 → 2025-10-14 | 33.3 | 1% | 18.0% | -1.43% | prod-like (baseline; v44; queue-free) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `LeapsCallDebitSpread_2026-01-04_22-07_IhWXKY` | 4.4.25 | 2025-10-01 → 2025-10-14 | 33.3 | 1% | 18.0% | -1.43% | historical (superseded; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `LeapsCallDebitSpread_2026-01-05_09-34_qqykop` | 4.4.27 | 2025-10-01 → 2025-10-14 | 34.6 | 0% | 8.64% | -1.43% | prod-like (baseline; v44; queue-free; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-04_05-53_OtxpYi` | 4.4.24 | 2025-01-01 → 2025-11-30 | 10.7 | -74% | -77.61% | -84.04% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-04_11-22_rnMuYq` | 4.4.24 | 2025-01-01 → 2025-11-30 | 7.6 | -4% | -4.34% | -18.39% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
@@ -144,9 +146,9 @@ Each strategy section includes:
 - Correct Total Return = 8,585.00%
 - Correct CAGR = 42.16%
 - Correct Max DD = -48.40%
-- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 13.8s
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 35.4s
 - CI cap (seconds) <= 180
-- Baseline `run_id` = `TqqqSma200Strategy_2026-01-04_11-10_Wa65DX`
+- Baseline `run_id` = `TqqqSma200Strategy_2026-01-05_09-35_IibziX`
 
 Yahoo one-time baseline (manual note; do not run in CI):
 - `run_id` = `TqqqSma200Strategy_2026-01-04_04-40_2sdaIJ`
@@ -159,8 +161,9 @@ Yahoo one-time baseline (manual note; do not run in CI):
 | `TqqqSma200Strategy_2026-01-02_10-24_Uus6vb` | 4.4.21 | thetadata | 2013-01-01 → 2025-11-30 | 33.8 | 8,585% | 42.17% | -48.40% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `TqqqSma200Strategy_2026-01-02_10-25_fOI4Ek` | 4.4.21 | yahoo | 2013-01-01 → 2025-11-30 | 8.2 | 8,272% | 40.94% | -48.82% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `TqqqSma200Strategy_2026-01-04_04-39_xX9si4` | 4.4.24 | thetadata | 2013-01-01 → 2025-11-30 | 12.1 | 8,774% | 42.4% | -48.4% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `TqqqSma200Strategy_2026-01-04_11-10_Wa65DX` | 4.4.24 | thetadata | 2013-01-01 → 2025-11-30 | 16.3 | 8,585% | 42.16% | -48.4% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `TqqqSma200Strategy_2026-01-04_11-10_Wa65DX` | 4.4.24 | thetadata | 2013-01-01 → 2025-11-30 | 16.3 | 8,585% | 42.16% | -48.4% | historical (superseded; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `TqqqSma200Strategy_2026-01-04_04-40_2sdaIJ` | 4.4.24 | yahoo | 2013-01-01 → 2025-11-30 | 11.3 | 8,272% | 40.94% | -48.82% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `TqqqSma200Strategy_2026-01-05_09-35_IibziX` | 4.4.27 | thetadata | 2013-01-01 → 2025-11-30 | 35.4 | 8,585% | 42.16% | -48.40% | prod-like (baseline; v44; queue-free; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 4) Backdoor Butterfly 0DTE (regular fills; index + index options)
 
@@ -175,12 +178,12 @@ CI uses the full-year window; the shorter window is retained only as historical 
 
 #### Expected Results (ThetaData / S3 v44)
 
-- Correct Total Return = -21.00%
-- Correct CAGR = -23.12%
-- Correct Max DD = -26.42%
-- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 235.2s
+- Correct Total Return = -19.00%
+- Correct CAGR = -21.02%
+- Correct Max DD = -26.30%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 292.0s
 - CI cap (seconds) <= 600
-- Baseline `run_id` = `BackdoorButterfly0DTE_2026-01-04_17-14_Dg5NJR`
+- Baseline `run_id` = `BackdoorButterfly0DTE_2026-01-05_09-36_7AP0H8`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -193,7 +196,8 @@ CI uses the full-year window; the shorter window is retained only as historical 
 | `BackdoorButterfly0DTE_2026-01-04_06-24_KaizMH` | 4.4.24 | 2025-01-01 → 2025-11-29 | 116.4 | -21% | -23.37% | -26.62% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `BackdoorButterfly0DTE_2026-01-04_11-27_KD9Qi0` | 4.4.24 | 2025-01-01 → 2025-11-29 | 118.0 | -21% | -23.11% | -26.41% | historical (superseded; minor rounding drift) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `BackdoorButterfly0DTE_2026-01-04_11-33_sBKYi2` | 4.4.24 | 2025-01-01 → 2025-11-29 | 118.1 | -21% | -23.12% | -26.42% | historical (pre deterministic multileg parent dispatch) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `BackdoorButterfly0DTE_2026-01-04_17-14_Dg5NJR` | 4.4.24 | 2025-01-01 → 2025-11-30 | 235.2 | -21% | -23.12% | -26.42% | expected baseline (deterministic multileg parent dispatch; fresh-cache / CI-like) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTE_2026-01-04_17-14_Dg5NJR` | 4.4.24 | 2025-01-01 → 2025-11-30 | 235.2 | -21% | -23.12% | -26.42% | historical (superseded; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTE_2026-01-05_09-36_7AP0H8` | 4.4.27 | 2025-01-01 → 2025-11-30 | 292.0 | -19% | -21.02% | -26.30% | expected baseline (v44; queue-free; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 5) MELI Deep Drawdown Calls
 
@@ -207,12 +211,12 @@ This strategy was previously **under investigation** for baseline mismatch; CI u
 
 #### Expected Results (ThetaData / S3 v44)
 
-- Correct Total Return = 104.00%
-- Correct CAGR = 6.16%
-- Correct Max DD = -98.17%
-- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 111.3s
+- Correct Total Return = 125.00%
+- Correct CAGR = 7.02%
+- Correct Max DD = -99.32%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 122.6s
 - CI cap (seconds) <= 300
-- Baseline `run_id` = `MeliDeepDrawdownCalls_2026-01-05_02-18_dKzthV`
+- Baseline `run_id` = `MeliDeepDrawdownCalls_2026-01-05_09-42_bMjRNX`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | status | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -221,7 +225,8 @@ This strategy was previously **under investigation** for baseline mismatch; CI u
 | `MeliDeepDrawdownCalls_2026-01-02_19-24_kZELl5` | 4.4.21 | 2013-01-01 → 2025-12-17 | 350.4 | 14% | 1.08% | -98.26% | under investigation (daily snapshot NBBO override) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `MeliDeepDrawdownCalls_2026-01-04_09-39_hyg1f1` | 4.4.24 | 2013-01-01 → 2025-12-17 | 18.1 | 82% | 5.12% | -98.2% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O` | 4.4.24 | 2013-01-01 → 2025-12-17 | 41.1 | -89% | -16.83% | -98.96% | historical (superseded; stale snapshot placeholder refetch caused missing option marks) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `MeliDeepDrawdownCalls_2026-01-05_02-18_dKzthV` | 4.4.25 | 2013-01-01 → 2025-12-17 | 111.3 | 104% | 6.16% | -98.17% | expected baseline (queue-free; post snapshot placeholder fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `MeliDeepDrawdownCalls_2026-01-05_02-18_dKzthV` | 4.4.25 | 2013-01-01 → 2025-12-17 | 111.3 | 104% | 6.16% | -98.17% | historical (superseded; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `MeliDeepDrawdownCalls_2026-01-05_09-42_bMjRNX` | 4.4.27 | 2013-01-01 → 2025-12-17 | 122.6 | 125% | 7.02% | -99.32% | expected baseline (v44; queue-free; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 See: `docs/investigations/ACCURACY_AUDIT_2026-01-02.md` for the divergence notes and first-diff audit plan.
 
@@ -236,19 +241,20 @@ See: `docs/investigations/ACCURACY_AUDIT_2026-01-02.md` for the divergence notes
 
 #### Expected Results (ThetaData / S3 v44)
 
-- Correct Total Return = -6.00%
-- Correct CAGR = -6.43%
-- Correct Max DD = -13.41%
-- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 273.1s
+- Correct Total Return = -3.00%
+- Correct CAGR = -3.82%
+- Correct Max DD = -13.38%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 290.8s
 - CI cap (seconds) <= 600
-- Baseline `run_id` = `BackdoorButterfly0DTESmartLimit_2026-01-04_20-26_qtvxlf`
+- Baseline `run_id` = `BackdoorButterfly0DTESmartLimit_2026-01-05_09-44_qLKdxw`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
 | `BackdoorButterfly0DTESmartLimit_2026-01-02_10-34_UTFoHq` | 4.4.21 | 2025-01-01 → 2025-11-30 | 283.0 | -3% | -2.96% | -13.58% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `BackdoorButterfly0DTESmartLimit_2026-01-02_19-49_QXkWuB` | 4.4.21 | 2025-01-01 → 2025-11-29 | 107.1 | -6% | -6.2% | -13.39% | prod-like | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `BackdoorButterfly0DTESmartLimit_2026-01-04_06-29_NduXK0` | 4.4.24 | 2025-01-01 → 2025-11-30 | 120.4 | -6% | -6.42% | -14.88% | historical (superseded; baseline updated under v44 cache semantics) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `BackdoorButterfly0DTESmartLimit_2026-01-04_20-26_qtvxlf` | 4.4.24 | 2025-01-01 → 2025-11-30 | 273.1 | -6% | -6.43% | -13.41% | prod-like (baseline; v44; queue-free) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTESmartLimit_2026-01-04_20-26_qtvxlf` | 4.4.24 | 2025-01-01 → 2025-11-30 | 273.1 | -6% | -6.43% | -13.41% | historical (superseded; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `BackdoorButterfly0DTESmartLimit_2026-01-05_09-44_qLKdxw` | 4.4.27 | 2025-01-01 → 2025-11-30 | 290.8 | -3% | -3.82% | -13.38% | prod-like (baseline; v44; queue-free; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ### 7) SPX Short Straddle Intraday (production stall repro)
 
@@ -263,12 +269,12 @@ CI uses the stall repro / prod parity window; the shorter window is retained onl
 
 #### Expected Results (ThetaData / S3 v44)
 
-- Correct Total Return = -17.00%
-- Correct CAGR = -17.50%
-- Correct Max DD = -33.51%
-- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 76.1s
+- Correct Total Return = -11.00%
+- Correct CAGR = -11.72%
+- Correct Max DD = -28.72%
+- Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 193.2s
 - CI cap (seconds) <= 600
-- Baseline `run_id` = `SPXShortStraddle_2026-01-04_06-41_B1jF98`
+- Baseline `run_id` = `SPXShortStraddle_2026-01-05_09-49_35TJJl`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | notes | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -276,7 +282,8 @@ CI uses the stall repro / prod parity window; the shorter window is retained onl
 | `SPXShortStraddle_2026-01-02_10-39_XtAwjW` | 4.4.21 | 2025-01-06 → 2025-12-25 | 516.8 | -17% | -17.81% | -33.51% | stall repro window | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `SPXShortStraddle_2026-01-02_18-51_1JvQro` | 4.4.21 | 2025-01-06 → 2025-12-24 | 63.8 | -17% | -17.5% | -33.51% | stall repro window (perf fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `SPXShortStraddle_2026-01-04_06-37_sHgfVQ` | 4.4.24 | 2025-01-01 → 2025-11-30 | 70.7 | -21% | -22.96% | -30.87% | speed baseline (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `SPXShortStraddle_2026-01-04_06-41_B1jF98` | 4.4.24 | 2025-01-06 → 2025-12-25 | 76.1 | -17% | -17.5% | -33.51% | stall repro window (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `SPXShortStraddle_2026-01-04_06-41_B1jF98` | 4.4.24 | 2025-01-06 → 2025-12-25 | 76.1 | -17% | -17.5% | -33.51% | historical (superseded; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `SPXShortStraddle_2026-01-05_09-49_35TJJl` | 4.4.27 | 2025-01-06 → 2025-12-25 | 193.2 | -11% | -11.72% | -28.72% | stall repro window (baseline; v44; queue-free; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 ## Optional: Profiling artifact (opt-in)
 

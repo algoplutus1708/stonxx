@@ -1605,7 +1605,10 @@ def _get_option_query_strike(option_asset: Asset, sim_datetime: datetime = None)
                     # Multiply current strike by factor to get original pre-split strike
                     original_strike = original_strike * cumulative_split_factor
 
-                    logger.info(
+                    # PERF: Strike conversion can happen many times in option-heavy backtests.
+                    # Keep this at DEBUG so production backtests don't pay the logging cost unless
+                    # explicitly enabled.
+                    logger.debug(
                         "[ThetaData] Split adjustment for option query: %s strike $%.2f -> $%.2f "
                         "(factor %.4f from %d splits)",
                         option_asset.symbol,
@@ -3624,8 +3627,10 @@ def get_missing_dates(df_all, asset, start, end):
 
     logger.debug(
         "[THETA][DEBUG][CACHE][TRADING_DATES] asset=%s | "
+        "is_index_asset=%s | "
         "trading_dates_count=%d first=%s last=%s",
         asset.symbol if hasattr(asset, 'symbol') else str(asset),
+        is_index_asset,
         len(trading_dates),
         trading_dates[0] if trading_dates else None,
         trading_dates[-1] if trading_dates else None
@@ -3644,18 +3649,51 @@ def get_missing_dates(df_all, asset, start, end):
 
     # It is possible to have full day gap in the data if previous queries were far apart
     # Example: Query for 8/1/2023, then 8/31/2023, then 8/7/2023
-    # Whole days are easy to check for because we can just check the dates in the index
-    dates_series = pd.Series(df_working.index.date, index=df_working.index)
+    # Whole days are easy to check for because we can just check the dates in the index.
+    #
+    # IMPORTANT: Use the *market-local* trading day when computing coverage.
+    #
+    # Intraday ThetaData caches are stored with UTC timestamps (by design), and we typically request
+    # extended-hours bars (04:00-20:00 ET). Those after-hours bars cross midnight in UTC, which
+    # means `df.index.date` can "leak" into the next calendar day even when the market-local trading
+    # day has not advanced yet.
+    #
+    # If we use UTC `.date` here, we can incorrectly conclude that the *next* trading day is already
+    # covered and skip downloading it. This was observed in NVDA backtests where every other trading
+    # day was missing (e.g., ET days present: Feb 3 + Feb 5; but UTC dates included Feb 4 + Feb 6 via
+    # after-hours spillover), which then caused forward-filled prices and extreme slowness.
+    try:
+        idx = pd.to_datetime(df_working.index)
+        if getattr(idx, "tz", None) is None:
+            idx = idx.tz_localize(pytz.UTC)
+        idx_local = idx.tz_convert(LUMIBOT_DEFAULT_PYTZ)
+        dates_series = pd.Series(idx_local.date, index=df_working.index)
+    except Exception:
+        # Fall back to the index-native dates if timezone conversion fails for any reason.
+        dates_series = pd.Series(df_working.index.date, index=df_working.index)
     placeholder_mask = (
         df_working["missing"].astype(bool) if "missing" in df_working.columns else pd.Series(False, index=df_working.index)
     )
     placeholder_dates = set(dates_series[placeholder_mask].unique()) if hasattr(placeholder_mask, "__len__") else set()
     if hasattr(placeholder_mask, "__len__") and bool(placeholder_mask.all()):
-        logger.info(
-            "[THETA][CACHE][PLACEHOLDER_ONLY] asset=%s | placeholder-only cache detected; skipping refetch",
+        # If the cache is *only* placeholders:
+        # - For stocks/indices this almost always indicates a bad/incomplete cache (e.g., outage) and we
+        #   should refetch for full coverage.
+        # - For options it can legitimately mean "no prints/quotes for this contract" across the entire
+        #   window; repeatedly refetching would cause endless downloader submissions. Treat as "no
+        #   missing dates" only for options.
+        if asset.asset_type == "option":
+            logger.info(
+                "[THETA][CACHE][PLACEHOLDER_ONLY] asset=%s | placeholder-only option cache detected; skipping refetch",
+                asset.symbol if hasattr(asset, 'symbol') else str(asset),
+            )
+            return []
+
+        logger.debug(
+            "[THETA][DEBUG][CACHE][PLACEHOLDER_ONLY] asset=%s | placeholder-only cache detected; treating as missing coverage",
             asset.symbol if hasattr(asset, 'symbol') else str(asset),
         )
-        return []
+        return trading_dates
     # Placeholder rows should be treated as missing coverage for past dates so we can refetch real data
     # (e.g. when caches were populated during an outage). We suppress future/expired-placeholder refetch
     # later when computing missing_dates.
@@ -3674,6 +3712,29 @@ def get_missing_dates(df_all, asset, start, end):
     )
 
     missing_dates = sorted(set(trading_dates) - set(real_dates))
+
+    # Tail-placeholder suppression (options):
+    #
+    # For many options (especially far OTM/illiquid contracts), ThetaData can legitimately return
+    # no quotes/trades on the final trading day(s). In those cases we may record placeholders at
+    # the *tail* of the cache to preserve trading-day coverage, but we must not repeatedly refetch
+    # those same tail days on every run (it causes endless downloader queue submissions).
+    #
+    # If a day is represented only by placeholders *after* the last real cached trading day, treat
+    # it as "known unavailable" for refetch purposes.
+    if placeholder_dates and missing_dates and asset.asset_type == "option" and cached_last is not None:
+        tail_placeholder_dates = {d for d in placeholder_dates if d > cached_last}
+        if tail_placeholder_dates:
+            suppress_tail = tail_placeholder_dates & set(missing_dates)
+            if suppress_tail:
+                logger.debug(
+                    "[THETA][DEBUG][CACHE][TAIL_PLACEHOLDER_SUPPRESS] asset=%s | "
+                    "suppressing %d tail placeholder day(s) beyond last_real=%s",
+                    asset.symbol if hasattr(asset, 'symbol') else str(asset),
+                    len(suppress_tail),
+                    cached_last,
+                )
+                missing_dates = [d for d in missing_dates if d not in suppress_tail]
 
     if placeholder_dates and missing_dates:
         today_utc = datetime.now(pytz.UTC).date()
@@ -5095,9 +5156,9 @@ def get_historical_data(
     frames: List[pd.DataFrame] = []
     option_params = build_option_params() if asset_type == "option" else None
 
-    # DEBUG: Log option params to verify strike conversion
+    # DEBUG: Log option params to verify strike conversion (gated at DEBUG for perf).
     if option_params:
-        logger.info(
+        logger.debug(
             "[THETA][OPTION_PARAMS] asset=%s option_params=%s",
             asset,
             option_params,

@@ -26,10 +26,13 @@ def test_get_missing_dates_suppresses_placeholders_before_first_real_date(monkey
     asset = SimpleNamespace(symbol="TQQQ", asset_type="stock")
     idx = pd.to_datetime(
         [
-            "2020-01-01 00:00:00+00:00",  # placeholder (pre-coverage)
-            "2020-01-02 00:00:00+00:00",  # placeholder (pre-coverage)
-            "2020-01-03 00:00:00+00:00",  # real cache begins here
-            "2020-01-04 00:00:00+00:00",  # placeholder after first real date -> should refetch
+            # Use UTC timestamps that map to the *same* America/New_York trading day.
+            # (00:00 UTC is the prior ET date, which would make the test flaky under market-local
+            # date coverage logic.)
+            "2020-01-01 21:00:00+00:00",  # placeholder (pre-coverage)
+            "2020-01-02 21:00:00+00:00",  # placeholder (pre-coverage)
+            "2020-01-03 21:00:00+00:00",  # real cache begins here
+            "2020-01-04 21:00:00+00:00",  # placeholder after first real date -> should refetch
         ],
         utc=True,
     )
@@ -59,8 +62,9 @@ def test_get_missing_dates_skips_refetch_for_placeholder_only_cache(monkeypatch)
     asset = SimpleNamespace(symbol="STRL", asset_type="option")
     idx = pd.to_datetime(
         [
-            "2025-10-01 00:00:00+00:00",
-            "2025-10-02 00:00:00+00:00",
+            # Use UTC timestamps that map to the *same* America/New_York trading day.
+            "2025-10-01 21:00:00+00:00",
+            "2025-10-02 21:00:00+00:00",
         ],
         utc=True,
     )
@@ -71,6 +75,44 @@ def test_get_missing_dates_skips_refetch_for_placeholder_only_cache(monkeypatch)
         asset,
         start=datetime(2025, 10, 1, tzinfo=pytz.UTC),
         end=datetime(2025, 10, 3, tzinfo=pytz.UTC),
+    )
+
+    assert missing == []
+
+
+def test_get_missing_dates_suppresses_tail_placeholders_after_last_real_date_for_options(monkeypatch) -> None:
+    """
+    Regression test: do not refetch placeholder-only *tail* dates after the last real cached date.
+
+    Why this matters:
+    - Many illiquid options have no actionable quotes/trades on the final trading day(s).
+    - We record placeholders to preserve trading-day coverage, but repeated refetch attempts cause
+      endless downloader queue submissions (breaking the warm-cache invariant and CI acceptance gate).
+
+    This test models the common case where:
+    - The cache has real data through the prior local trading day (e.g. Jan 16),
+    - There is only placeholder coverage on the requested day (e.g. Jan 17),
+    - Some UTC timestamps on Jan 17 may still belong to the Jan 16 *local* trading day due to
+      extended-hours spillover.
+    """
+    trading_dates = [date(2025, 1, 17)]
+    monkeypatch.setattr(thetadata_helper, "get_trading_dates", lambda asset, start, end: trading_dates)
+
+    asset = SimpleNamespace(symbol="SPX", asset_type="option", expiration=date(2025, 1, 17))
+    idx = pd.to_datetime(
+        [
+            "2025-01-17 01:00:00+00:00",  # 2025-01-16 20:00 ET (real)
+            "2025-01-17 21:00:00+00:00",  # 2025-01-17 16:00 ET (placeholder)
+        ],
+        utc=True,
+    )
+    df_all = pd.DataFrame({"missing": [0, 1]}, index=idx)
+
+    missing = thetadata_helper.get_missing_dates(
+        df_all,
+        asset,
+        start=datetime(2025, 1, 17, tzinfo=pytz.UTC),
+        end=datetime(2025, 1, 18, tzinfo=pytz.UTC),
     )
 
     assert missing == []

@@ -781,13 +781,22 @@ class ThetaDataBacktestingPandas(PandasData):
                 # loops (especially pre-market when no bars exist yet). Prefetch through the session close
                 # for the current trading day so the same contract doesn't refetch every minute.
                 if (
-                    getattr(asset_separated, "asset_type", None) == "option"
-                    and start_dt is not None
+                    start_dt is not None
                     and isinstance(length, int)
                     and length <= 5
                     and ts_unit in {"minute", "hour"}
                     and not snapshot_only
+                    and (
+                        asset_type_value == "option"
+                        or (asset_type_value in {"stock", "index"} and not require_quote_data)
+                    )
                 ):
+                    # NOTE: This is perf-critical for option scanners, but it's also correctness-critical
+                    # for stock/index intraday "last trade" probes:
+                    #
+                    # Without aligning to the trading-session close, we can end up repeatedly reusing
+                    # stale prior-day closes for intraday timestamps when the cache coverage heuristic
+                    # only checks small `length` windows (observed in SPX Copy2/Copy3 cold-cache runs).
                     try:
                         # PERF: `get_trading_days()` is expensive (calendar lookup + schedule build).
                         # Point-in-time option quote/price checks can call `_update_pandas_data()` tens
@@ -818,6 +827,13 @@ class ThetaDataBacktestingPandas(PandasData):
 
                         if cached_close is not None and cached_close > end_requirement:
                             end_requirement = cached_close
+                            # Clamp to the backtest end so we don't fetch beyond the simulation window.
+                            try:
+                                normalized_end = self._normalize_default_timezone(self.datetime_end)
+                                if normalized_end is not None and end_requirement > normalized_end:
+                                    end_requirement = normalized_end
+                            except Exception:
+                                pass
                     except Exception:
                         logger.debug(
                             "[THETA][DEBUG][END_REQUIREMENT] failed to align intraday option end_requirement",
@@ -1174,10 +1190,16 @@ class ThetaDataBacktestingPandas(PandasData):
                             asset_separated.symbol if hasattr(asset_separated, "symbol") else str(asset_separated),
                         )
                 else:
-                    # FIX: For both day and minute data, use date-only comparison
-                    # For day data: prevents false negatives when existing_end is midnight and end_requirement is later
-                    # For minute data: minute data legitimately ends at market close (7:59 PM), not midnight
-                    # IMPORTANT: Convert to same timezone before extracting date to avoid UTC/local mismatch
+                    # Cache coverage end checks:
+                    #
+                    # - Day bars: compare *dates* (Theta daily bars are often timestamped at 00:00 UTC, which can
+                    #   appear as the prior-day evening in ET; date-only comparisons avoid false "stale" flags).
+                    # - Minute/hour/second: compare full timestamps. A date-only comparison (or multi-day tolerance)
+                    #   can silently reuse stale intraday datasets across days, breaking determinism and producing
+                    #   incorrect trades (observed in SPX Copy2/Copy3 cold-cache runs: intraday prices reused the
+                    #   prior-day close for multiple days).
+                    #
+                    # IMPORTANT: Convert to the same timezone before comparing to avoid UTC/local mismatch.
                     if hasattr(existing_end, 'tzinfo') and hasattr(end_requirement, 'tzinfo'):
                         target_tz = end_requirement.tzinfo
                         if target_tz is not None and existing_end.tzinfo is not None:
@@ -1186,12 +1208,18 @@ class ThetaDataBacktestingPandas(PandasData):
                             existing_end_local = existing_end
                     else:
                         existing_end_local = existing_end
-                    existing_end_date = existing_end_local.date() if hasattr(existing_end_local, 'date') else existing_end_local
-                    end_requirement_date = end_requirement.date() if hasattr(end_requirement, 'date') else end_requirement
-                    existing_end_cmp = existing_end_date
-                    end_requirement_cmp = end_requirement_date
-                    # Allow 3-day tolerance - ThetaData may not have the most recent data
-                    end_tolerance = timedelta(days=3)
+                    if ts_unit == "day":
+                        existing_end_cmp = (
+                            existing_end_local.date() if hasattr(existing_end_local, "date") else existing_end_local
+                        )
+                        end_requirement_cmp = (
+                            end_requirement.date() if hasattr(end_requirement, "date") else end_requirement
+                        )
+                        end_tolerance = timedelta(0)
+                    else:
+                        existing_end_cmp = existing_end_local
+                        end_requirement_cmp = end_requirement
+                        end_tolerance = timedelta(0)
 
                     if existing_end_cmp >= end_requirement_cmp - end_tolerance:
                         end_ok = True

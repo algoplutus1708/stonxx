@@ -170,7 +170,7 @@ To keep deployments traceable (and easy to diff):
 - **PR title convention:** `X.Y.Z` (or `Release X.Y.Z`) so the version is visible in the PR list
 
 ## Scoped instruction files
-- `tests/AGENTS.md` — rules for everything under `tests/` (legacy-test authority policy).
+- `tests/AGENTS.md` — rules for everything under `tests/` (legacy-test authority policy; treat tests before 2025-06-01 as high-authority, before 2025-01-01 as effectively frozen).
 
 ## Documentation Layout
 

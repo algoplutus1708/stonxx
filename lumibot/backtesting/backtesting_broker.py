@@ -1966,13 +1966,73 @@ class BacktestingBroker(Broker):
                 ):
                     ohlc = None
                 else:
+                    timestep = getattr(self.data_source, "_timestep", "minute")
+                    # PandasData's bar slicing is already careful about day-vs-minute lookahead
+                    # (see Data._get_bars_dict). For daily bars, a negative `timeshift` can
+                    # accidentally *advance* the slice into future sessions.
+                    #
+                    # For intraday bars, we still need the current bar available for order fills
+                    # at `self.datetime` (e.g., crypto backtests on the first bar). Use `-1` to
+                    # include the current bar without pulling future bars.
+                    timeshift = 0 if str(timestep) == "day" else -1
                     ohlc = self.data_source.get_historical_prices(
                         asset=asset,
                         length=2,
                         quote=order.quote,
-                        timeshift=-2,
-                        timestep=self.data_source._timestep,
+                        timeshift=timeshift,
+                        timestep=timestep,
                     )
+                    # ThetaData daily bars are timestamped at the end of the trading session (e.g.
+                    # 16:00 NY / 21:00 UTC). At intraday times (or midnight), PandasData slicing
+                    # (Data.get_iter_count) returns the *previous* session as "last bar <= now",
+                    # which can cause fills to incorrectly use yesterday's open.
+                    #
+                    # For ORDER FILLS ONLY, we need the current session's bar available so market
+                    # orders price off the correct day's open. If the last bar we received is from
+                    # an earlier NY date than `self.datetime`, retry once including the next bar.
+                    if str(timestep) == "day" and ohlc is not None and not ohlc.empty:
+                        try:
+                            df_check = getattr(ohlc, "df", None)
+                            last_dt = None
+                            if df_check is not None and hasattr(df_check, "index"):
+                                last_dt = df_check.index.max()
+                            elif df_check is not None and hasattr(df_check, "columns"):
+                                dt_col = None
+                                for col in df_check.columns:
+                                    try:
+                                        if df_check[col].dtype in [pl.Datetime, pl.Date]:
+                                            dt_col = col
+                                            break
+                                    except Exception:
+                                        continue
+                                if dt_col is None and "datetime" in df_check.columns:
+                                    dt_col = "datetime"
+                                if dt_col is not None:
+                                    try:
+                                        last_dt = df_check[dt_col].max()
+                                    except Exception:
+                                        last_dt = None
+
+                            def _ny_date(value):
+                                ts = pd.Timestamp(value)
+                                if ts.tz is None:
+                                    ts = ts.tz_localize("America/New_York")
+                                else:
+                                    ts = ts.tz_convert("America/New_York")
+                                return ts.date()
+
+                            if last_dt is not None and _ny_date(last_dt) < _ny_date(self.datetime):
+                                ohlc_next = self.data_source.get_historical_prices(
+                                    asset=asset,
+                                    length=2,
+                                    quote=order.quote,
+                                    timeshift=-1,
+                                    timestep=timestep,
+                                )
+                                if ohlc_next is not None and not ohlc_next.empty:
+                                    ohlc = ohlc_next
+                        except Exception:
+                            pass
                 # Check if we got any ohlc data
                 if ohlc is None or ohlc.empty:
                     # SmartLimit should attempt quote-based fills regardless of asset type or data source.
@@ -3035,13 +3095,39 @@ class BacktestingBroker(Broker):
         for leg in order.child_orders:
             asset = leg.asset if getattr(leg.asset, "asset_type", None) != "crypto" else (leg.asset, leg.quote)
             try:
+                timestep = getattr(self.data_source, "_timestep", "minute")
                 ohlc = self.data_source.get_historical_prices(
                     asset=asset,
                     length=2,
                     quote=leg.quote,
-                    timeshift=-2,
-                    timestep=getattr(self.data_source, "_timestep", "minute"),
+                    timeshift=0 if str(timestep) == "day" else -1,
+                    timestep=timestep,
                 )
+                if str(timestep) == "day" and ohlc is not None and not ohlc.empty:
+                    try:
+                        df_check = getattr(ohlc, "df", None)
+                        last_dt = df_check.index.max() if df_check is not None and hasattr(df_check, "index") else None
+
+                        def _ny_date(value):
+                            ts = pd.Timestamp(value)
+                            if ts.tz is None:
+                                ts = ts.tz_localize("America/New_York")
+                            else:
+                                ts = ts.tz_convert("America/New_York")
+                            return ts.date()
+
+                        if last_dt is not None and _ny_date(last_dt) < _ny_date(self.datetime):
+                            ohlc_next = self.data_source.get_historical_prices(
+                                asset=asset,
+                                length=2,
+                                quote=leg.quote,
+                                timeshift=-1,
+                                timestep=timestep,
+                            )
+                            if ohlc_next is not None and not ohlc_next.empty:
+                                ohlc = ohlc_next
+                    except Exception:
+                        pass
             except Exception:
                 ohlc = None
 

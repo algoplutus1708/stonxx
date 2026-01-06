@@ -560,7 +560,9 @@ def test_get_historical_data_uses_v3_option_params(mock_get_trading_dates, mock_
 
     query = mock_get_request.call_args.kwargs["querystring"]
     assert query["symbol"] == "CVNA"
-    assert query["expiration"] == "2026-01-16"
+    # NOTE(legacy): ThetaData v3 option queries expect OCC-style monthly expirations on Saturday.
+    # CVNA 2026-01-16 is the 3rd-Friday monthly; the query uses 2026-01-17.
+    assert query["expiration"] == "2026-01-17"
     assert query["strike"] == "210"
     assert query["right"] == "call"
     assert query["date"] == "2024-10-16"
@@ -684,18 +686,21 @@ def test_get_price_data_without_cached_data(mock_build_cache_filename, mock_get_
     # Arrange
     mock_build_cache_filename.return_value.exists.return_value = False
     mock_get_missing_dates.return_value = [datetime.datetime(2025, 9, 2)]
+    # NOTE(legacy): `get_price_data()` now trims intraday results to the requested [start, end] window
+    # even on a cache miss (parity with the cache-hit path). Keep the fixture timestamps aligned with
+    # the requested window so we assert on the returned content instead of an out-of-range slice.
     raw_df = pd.DataFrame({
-        "datetime": pd.date_range("2023-07-01 09:30:00", periods=5, freq="min", tz="UTC"),
+        "datetime": pd.date_range("2025-09-02 09:30:00", periods=5, freq="min", tz="UTC"),
         "price": [100, 101, 102, 103, 104]
     }).set_index("datetime")
     mock_get_historical_data.return_value = raw_df.reset_index()
     mock_update_df.return_value = raw_df
     
     asset = Asset(asset_type="stock", symbol="AAPL")
-    start = datetime.datetime(2025, 9, 2)
-    end = datetime.datetime(2025, 9, 3)
+    start = LUMIBOT_DEFAULT_PYTZ.localize(datetime.datetime(2025, 9, 2))
+    end = LUMIBOT_DEFAULT_PYTZ.localize(datetime.datetime(2025, 9, 3))
     timespan = "minute"
-    dt = datetime.datetime(2023, 7, 1, 9, 30)
+    dt = LUMIBOT_DEFAULT_PYTZ.localize(datetime.datetime(2025, 9, 2, 9, 30))
 
     # Act
     df = thetadata_helper.get_price_data(asset, start, end, timespan,dt=dt)
@@ -719,7 +724,7 @@ def test_get_price_data_partial_cache_hit(mock_build_cache_filename, mock_load_c
                                           mock_get_historical_data, mock_update_df, mock_update_cache):
     # Arrange
     cached_data = pd.DataFrame({
-        "datetime": pd.date_range("2023-07-01 09:30:00", periods=5, freq='min', tz="UTC"),
+        "datetime": pd.date_range("2025-09-02 09:30:00", periods=5, freq='min', tz="UTC"),
         "price": [100, 101, 102, 103, 104],
         "missing": [False] * 5,
     }).set_index("datetime")
@@ -727,7 +732,7 @@ def test_get_price_data_partial_cache_hit(mock_build_cache_filename, mock_load_c
     mock_load_cache.return_value = cached_data
     mock_get_missing_dates.return_value = [datetime.datetime(2025, 9, 3)]
     new_chunk = pd.DataFrame({
-        "datetime": pd.date_range("2023-07-02 09:30:00", periods=5, freq='min', tz="UTC"),
+        "datetime": pd.date_range("2025-09-03 09:30:00", periods=5, freq='min', tz="UTC"),
         "price": [110, 111, 112, 113, 114],
         "missing": [False] * 5,
     }).set_index("datetime")
@@ -736,10 +741,10 @@ def test_get_price_data_partial_cache_hit(mock_build_cache_filename, mock_load_c
     mock_update_df.return_value = updated_data
     
     asset = Asset(asset_type="stock", symbol="AAPL")
-    start = datetime.datetime(2025, 9, 2)
-    end = datetime.datetime(2025, 9, 3)
+    start = LUMIBOT_DEFAULT_PYTZ.localize(datetime.datetime(2025, 9, 2))
+    end = LUMIBOT_DEFAULT_PYTZ.localize(datetime.datetime(2025, 9, 3))
     timespan = "minute"
-    dt = datetime.datetime(2023, 7, 1, 9, 30)
+    dt = LUMIBOT_DEFAULT_PYTZ.localize(datetime.datetime(2025, 9, 2, 9, 30))
 
     # Act
     df = thetadata_helper.get_price_data(asset, start, end, timespan,dt=dt)

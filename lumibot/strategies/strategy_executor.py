@@ -1920,7 +1920,21 @@ class StrategyExecutor(Thread):
                         # Can't advance to next day (end of backtest period)
                         break
             try:
-                self._on_strategy_end()
+                # In backtesting we sometimes use ``stop_event`` as an internal sentinel to end the
+                # simulation loop (e.g., the pure Pandas daily fast-path sets it when the data index
+                # is exhausted). The lifecycle decorator blocks execution when ``stop_event`` is set,
+                # which unintentionally skips ``on_strategy_end`` and leaves ``strategy.stats`` unset.
+                #
+                # Always allow ``on_strategy_end`` to run for backtests so stats/analysis are finalized
+                # deterministically for unit tests and CI.
+                if self.strategy.is_backtesting and hasattr(self, "stop_event") and self.stop_event.is_set():
+                    self.stop_event.clear()
+                    try:
+                        self._on_strategy_end()
+                    finally:
+                        self.stop_event.set()
+                else:
+                    self._on_strategy_end()
             except Exception as e:
                 self.strategy.logger.error(e)
                 self.strategy.logger.error(traceback.format_exc())

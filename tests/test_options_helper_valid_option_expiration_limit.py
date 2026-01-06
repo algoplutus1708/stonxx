@@ -82,5 +82,5 @@ def test_find_next_valid_option_limits_expiration_probes_for_equities(monkeypatc
     result = helper.find_next_valid_option(underlying, 110.0, base_expiry, put_or_call="call")
     assert result is None
 
-    # Equity Theta backtest cap: 1 expiration × 5 strikes (intraday max_strikes_to_try=5).
-    assert calls["count"] == 5
+    # Equity Theta backtest cap: 1 expiration × 3 strikes (tight scan for long-window backtests).
+    assert calls["count"] == 3

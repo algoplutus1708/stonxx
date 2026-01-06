@@ -240,3 +240,128 @@ def test_get_expiration_on_or_after_date_disabled_window_still_requires_nearby_s
         )
 
     assert expiry is None
+
+
+def test_get_expiration_on_or_after_date_reuses_horizon_cache_for_fallback_expiries():
+    """Backtests should reuse a cached fallback expiry (prior to target horizon) for a short TTL.
+
+    Without this, strategies that ask for a fixed horizon (e.g., 30–60D) during periods where the
+    chain does not yet list far-dated expirations will re-run quote validation on every attempt,
+    generating many downloader submits and slowing long-window backtests.
+    """
+
+    class _RecordingStrategy(_StubStrategy):
+        def __init__(self, *, now, chains, underlying_price=60.0):
+            super().__init__(underlying_price=underlying_price)
+            self._now = now
+            self._chains = chains
+
+        def get_datetime(self):
+            return self._now
+
+        def get_chains(self, _underlying_asset):
+            return self._chains
+
+    class _StubBroker:
+        IS_BACKTESTING_BROKER = True
+
+        def __init__(self):
+            self.data_source = None
+
+    chains = {
+        "UnderlyingSymbol": "UBER",
+        "Chains": {
+            # A far-dated expiry exists but has no strikes near the underlying price (validation should
+            # reject it), forcing a fallback to the near-dated expiry.
+            "CALL": {
+                "2027-06-10": [50.0, 60.0, 70.0],
+                "2027-07-15": [120.0, 125.0, 130.0],
+            },
+            "PUT": {
+                "2027-06-10": [50.0, 60.0, 70.0],
+                "2027-07-15": [120.0, 125.0, 130.0],
+            },
+        },
+    }
+
+    strategy = _RecordingStrategy(now=datetime.datetime(2027, 6, 1, 10, 0), chains=chains, underlying_price=60.0)
+    strategy.broker = _StubBroker()
+    helper = OptionsHelper(strategy)
+
+    underlying = Asset("UBER", asset_type=Asset.AssetType.STOCK)
+
+    # First call: resolve via fallback prior expiry and populate the horizon cache.
+    with patch.object(helper, "_get_option_mark_from_quote", return_value=(1.0, None, None)):
+        expiry1 = helper.get_expiration_on_or_after_date(
+            dt=datetime.date(2027, 7, 1),  # 30d horizon from 2027-06-01
+            chains=chains,
+            call_or_put="call",
+            underlying_asset=underlying,
+            allow_prior=False,
+        )
+
+    assert expiry1 == datetime.date(2027, 6, 10)
+
+    # Advance the as-of date but keep the same horizon_days; should reuse cached fallback expiry
+    # without re-probing quotes.
+    strategy._now = datetime.datetime(2027, 6, 5, 10, 0)
+    with patch.object(helper, "_get_option_mark_from_quote", side_effect=AssertionError("should not validate quotes")):
+        expiry2 = helper.get_expiration_on_or_after_date(
+            dt=datetime.date(2027, 7, 5),  # same 30d horizon from 2027-06-05
+            chains=chains,
+            call_or_put="call",
+            underlying_asset=underlying,
+            allow_prior=False,
+        )
+
+    assert expiry2 == datetime.date(2027, 6, 10)
+
+
+def test_get_expiration_on_or_after_date_disabled_window_does_not_return_expired_prior_expiry():
+    """When quote validation is temporarily disabled, never return expirations before the current date.
+
+    This guards against a backtesting-only failure mode:
+    - Expiration validation fails (no quote history) and disables quote validation for a short window.
+    - Subsequent calls would return a "prior-to-target-horizon" expiry even if it is already expired
+      relative to the current simulation date, causing strategies to thrash.
+    """
+
+    class _RecordingStrategy(_StubStrategy):
+        def __init__(self, *, now, underlying_price=60.0):
+            super().__init__(underlying_price=underlying_price)
+            self._now = now
+
+        def get_datetime(self):
+            return self._now
+
+    class _StubBroker:
+        IS_BACKTESTING_BROKER = True
+
+        def __init__(self):
+            self.data_source = None
+
+    now = datetime.datetime(2027, 6, 10, 10, 0)
+    strategy = _RecordingStrategy(now=now, underlying_price=60.0)
+    strategy.broker = _StubBroker()
+    helper = OptionsHelper(strategy)
+
+    # Force quote-validation-disabled state for the underlying.
+    helper._expiration_validation_disabled_until = {"UBER": now.date() + datetime.timedelta(days=7)}
+
+    chains_only_expired = {
+        "UnderlyingSymbol": "UBER",
+        "Chains": {
+            "CALL": {"2027-05-01": [50.0, 60.0, 70.0]},
+            "PUT": {"2027-05-01": [50.0, 60.0, 70.0]},
+        },
+    }
+
+    expiry = helper.get_expiration_on_or_after_date(
+        dt=datetime.date(2027, 7, 25),
+        chains=chains_only_expired,
+        call_or_put="call",
+        underlying_asset=None,
+        allow_prior=False,
+    )
+
+    assert expiry is None
