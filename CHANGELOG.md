@@ -2,6 +2,8 @@
 
 ## 4.4.29 - 2026-01-06
 
+Deploy marker: `b8c6a839` ("deploy 4.4.29")
+
 ### Fixed
 - Prevent production backtests from OOM-like hard exits (`ERROR_CODE_CRASH`) when refreshing multi-year intraday ThetaData caches by avoiding deep copies during cache load/write and trimming non-option intraday frames in-memory.
 
