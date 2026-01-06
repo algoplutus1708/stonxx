@@ -3494,7 +3494,23 @@ def get_historical_data_snapshot_cached(
                     if "missing" in df_existing.columns:
                         missing_flags = df_existing["missing"].fillna(False).astype(bool)
                         if bool(missing_flags.all()):
-                            return df_existing
+                            # Some underlyings have provider-specific expiration conventions (Friday vs
+                            # OCC Saturday). Older LumiBot versions used a heuristic mapping that could
+                            # generate 472/empty responses and permanently cache a placeholder-only
+                            # snapshot under the tradable expiry key.
+                            #
+                            # If we now know (via chain-derived mapping) that the provider expects a
+                            # different expiration representation than the heuristic, treat this
+                            # placeholder as stale and allow a refetch to repair the cache.
+                            try:
+                                symbol = _thetadata_option_root_symbol(asset)
+                                mapped = _thetadata_option_query_expiration(asset.expiration, symbol=symbol)
+                                heuristic = _thetadata_option_query_expiration_heuristic(asset.expiration)
+                                if mapped == heuristic:
+                                    return df_existing
+                            except Exception:
+                                return df_existing
+                            df_existing = None
                 except Exception:
                     # If the missing column is malformed, treat this as a stable negative cache
                     # rather than risk infinite refetch loops in production backtests.
@@ -3503,7 +3519,10 @@ def get_historical_data_snapshot_cached(
             # Backward-compat: older runs could have written a tiny dt-window payload under a
             # full-session cache key. For options, ensure the cached frame covers the whole
             # regular session; otherwise refetch once and overwrite the cache.
-            if prefer_full_session and str(getattr(asset, "asset_type", "")).lower() == "option":
+            if df_existing is None:
+                # Stale placeholder: fall through to fetch and overwrite the cache.
+                pass
+            elif prefer_full_session and str(getattr(asset, "asset_type", "")).lower() == "option":
                 try:
                     start_t = datetime.strptime(session_start, "%H:%M:%S").time()
                     end_t = datetime.strptime(session_end, "%H:%M:%S").time()
@@ -5138,7 +5157,10 @@ def get_historical_data(
         # FIX (2025-12-12): Convert split-adjusted strike back to original for ThetaData API query
         # Uses start_dt from enclosing scope as the simulation datetime
         query_strike = _get_option_query_strike(asset, sim_datetime=start_dt)
-        query_expiration = _thetadata_option_query_expiration(asset.expiration)
+        query_expiration = _thetadata_option_query_expiration(
+            asset.expiration,
+            symbol=_thetadata_option_root_symbol(asset),
+        )
         return {
             "symbol": _thetadata_option_root_symbol(asset),
             "expiration": query_expiration.strftime("%Y-%m-%d"),
@@ -5252,29 +5274,114 @@ def _normalize_expiration_value(raw_value: object) -> Optional[str]:
     return None
 
 
-def _thetadata_option_query_expiration(expiration: date) -> date:
-    """Map LumiBot's tradable option expiry to the value expected by ThetaData endpoints.
+# ---------------------------------------------------------------------------
+# ThetaData option expiration mapping (provider-specific)
+# ---------------------------------------------------------------------------
+#
+# ThetaData does not use a single expiration-date convention for all underlyings:
+# - some expiration lists use OCC Saturday dates for standard monthlies,
+# - others use Friday for the same calendar month.
+#
+# LumiBot strategies typically reason in terms of "last tradable session" (Friday). To query
+# ThetaData history endpoints reliably, we maintain a per-(symbol, tradable_expiry) mapping to the
+# provider's expected expiration representation.
+#
+# We learn this mapping from option chain payloads (which contain the provider expiry keys).
+_THETADATA_EXPIRY_MAP: Dict[Tuple[str, date], date] = {}
+_THETADATA_EXPIRY_MAP_LOCK = threading.Lock()
 
-    Background:
-    - Many strategies (and LumiBot's internal trading model) treat the *last tradable day* as the
-      option "expiration" (usually Friday).
-    - ThetaData chain payloads can represent standard monthly expirations using the OCC "Saturday"
-      date (with last trading on Friday). Weeklies are often represented as Friday; some holiday
-      expirations are represented as Thursday.
 
-    For ThetaData history endpoints we need the provider's expiry representation, not necessarily
-    the tradable session date, or requests can return placeholder-only (status_code=472, size=0).
-    """
+def _normalize_symbol_key(symbol: object) -> str:
+    return str(symbol or "").strip().upper()
+
+
+def _thetadata_option_query_expiration_heuristic(expiration: date) -> date:
+    """Legacy fallback: map 3rd-Friday trade dates to OCC Saturday (works for some symbols)."""
     if isinstance(expiration, datetime):
         expiration = expiration.date()
 
-    # Standard monthly options: 3rd Friday last-trading-date, OCC expiration is Saturday.
-    # Heuristic: if the provided expiry is a Friday between the 15th and 21st (inclusive), treat it
-    # as a "monthly" trading expiry and map to the OCC Saturday.
     if expiration.weekday() == 4 and 15 <= expiration.day <= 21:
         return expiration + timedelta(days=1)
 
     return expiration
+
+
+def _register_thetadata_expiry_map_from_chain(symbol: str, chains_dict: dict) -> None:
+    """Populate provider-expiry mapping from a chain payload (best-effort, in-process only)."""
+    symbol_key = _normalize_symbol_key(symbol)
+    if not symbol_key or not isinstance(chains_dict, dict):
+        return
+
+    chains_section = chains_dict.get("Chains")
+    if not isinstance(chains_section, dict):
+        return
+
+    expiry_strings: set[str] = set()
+    for side in ("CALL", "PUT"):
+        side_map = chains_section.get(side)
+        if isinstance(side_map, dict):
+            expiry_strings.update([str(k).strip() for k in side_map.keys() if k is not None])
+
+    def _parse_expiry(expiry_str: str) -> Optional[date]:
+        cleaned = str(expiry_str or "").strip()
+        if not cleaned:
+            return None
+        try:
+            return date.fromisoformat(cleaned)
+        except Exception:
+            digits = cleaned.replace("-", "")
+            if len(digits) == 8 and digits.isdigit():
+                try:
+                    return datetime.strptime(digits, "%Y%m%d").date()
+                except Exception:
+                    return None
+        return None
+
+    updates: Dict[Tuple[str, date], date] = {}
+    for expiry_str in expiry_strings:
+        provider_expiry = _parse_expiry(expiry_str)
+        if provider_expiry is None:
+            continue
+
+        tradable_expiry = provider_expiry
+        if provider_expiry.weekday() == 5:
+            tradable_expiry = provider_expiry - timedelta(days=1)
+        elif provider_expiry.weekday() == 6:
+            tradable_expiry = provider_expiry - timedelta(days=2)
+
+        updates[(symbol_key, tradable_expiry)] = provider_expiry
+
+    if not updates:
+        return
+
+    with _THETADATA_EXPIRY_MAP_LOCK:
+        for key, provider_expiry in updates.items():
+            _, tradable_expiry = key
+            existing = _THETADATA_EXPIRY_MAP.get(key)
+            if existing is None:
+                _THETADATA_EXPIRY_MAP[key] = provider_expiry
+                continue
+
+            # If both Friday and Saturday exist for the same tradable date, prefer the provider key
+            # that matches the tradable expiry exactly (weekly-style). This prevents persistent 472s
+            # for symbols whose provider uses Fridays for monthly expirations (e.g. CVNA).
+            if existing != tradable_expiry and provider_expiry == tradable_expiry:
+                _THETADATA_EXPIRY_MAP[key] = provider_expiry
+
+
+def _thetadata_option_query_expiration(expiration: date, *, symbol: Optional[str] = None) -> date:
+    """Map LumiBot's tradable option expiry to the value expected by ThetaData endpoints."""
+    if isinstance(expiration, datetime):
+        expiration = expiration.date()
+
+    symbol_key = _normalize_symbol_key(symbol)
+    if symbol_key:
+        with _THETADATA_EXPIRY_MAP_LOCK:
+            mapped = _THETADATA_EXPIRY_MAP.get((symbol_key, expiration))
+        if isinstance(mapped, date):
+            return mapped
+
+    return _thetadata_option_query_expiration_heuristic(expiration)
 
 
 def _normalize_strike_value(raw_value: object) -> Optional[float]:
@@ -6031,6 +6138,13 @@ def get_chains_cached(
                     exc_info=True,
                 )
 
+            # Best-effort: learn provider-specific expiration representation from the chain keys so
+            # option history queries can use the correct expiration value (Friday vs OCC Saturday).
+            try:
+                _register_thetadata_expiry_map_from_chain(asset.symbol, data)
+            except Exception:
+                pass
+
             return data
 
     # 4) No suitable file => fetch from ThetaData using exp=0 chain builder
@@ -6060,6 +6174,13 @@ def get_chains_cached(
             "Exchange": "SMART",
             "Chains": {"CALL": {}, "PUT": {}},
         }
+
+    # Best-effort: learn provider-specific expiration representation from the chain keys so option
+    # history queries can use the correct expiration value (Friday vs OCC Saturday).
+    try:
+        _register_thetadata_expiry_map_from_chain(asset.symbol, chains_dict)
+    except Exception:
+        pass
 
     # 5) Save to cache file for future reuse
     df_to_cache = pd.DataFrame({"data": [chains_dict]})
