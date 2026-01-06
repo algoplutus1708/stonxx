@@ -46,6 +46,29 @@ See: `docs/investigations/2026-01-05_SPX_COPY2_ACCURACY_AUDIT.md`
   - **Trades are identical** to the cold run (40 rows in `*_trades.csv`).
   - Warm-cache invariant holds: **0** queue submits.
 
+## Production cold→warm proof (short window)
+
+### Cold (prod)
+
+- Window: `2025-01-07 -> 2025-01-17`
+- Bot ID: `spx_copy3_prod_cold-20250107-20250117-m4fiqq28`
+- S3 cache version: `spx_copy3_cold_20260105_235109`
+- Wall time: `295.2s`
+- Queue submits (`Submitted to queue`): `337`
+- Artifacts:
+  - `/Users/robertgrzesik/Documents/Development/Strategy Library/logs/prod_runs/spx_copy3_prod_cold/spx_copy3_prod_cold-20250107-20250117-m4fiqq28/`
+
+### Warm (prod; same S3 version)
+
+- Window: `2025-01-07 -> 2025-01-17`
+- Bot ID: `spx_copy3_prod_warm-20250107-20250117-zefyg4xe`
+- S3 cache version: `spx_copy3_cold_20260105_235109` (same as cold)
+- Wall time: `73.3s`
+- Queue submits: `0`
+- Trades determinism: ✅ `trades.csv` is byte-identical vs cold
+- Artifacts:
+  - `/Users/robertgrzesik/Documents/Development/Strategy Library/logs/prod_runs/spx_copy3_prod_warm/spx_copy3_prod_warm-20250107-20250117-zefyg4xe/`
+
 ## Accuracy Audit Deliverables
 
 - Audit artifact(s) (CSV recommended):

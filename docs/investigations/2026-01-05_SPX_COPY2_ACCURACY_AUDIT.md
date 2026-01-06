@@ -55,6 +55,33 @@
   - **Trades are identical** to the cold run (40 rows in `*_trades.csv`).
   - Warm-cache invariant holds: **0** queue submits.
 
+## Production cold→warm proof (short window)
+
+This validates the same invariants in production ECS:
+
+- Cold run is allowed to enqueue downloader work to hydrate S3.
+- Warm run (same S3 version, fresh container disk) must be **near-zero queue submits** and **identical trades**.
+
+### Cold (prod)
+
+- Window: `2025-01-07 -> 2025-01-17`
+- Bot ID: `spx_copy2_prod_cold-20250107-20250117-d92xwdam`
+- S3 cache version: `spx_cold_20260105_234405`
+- Queue submits (`Submitted to queue`): `340`
+- Artifacts:
+  - `/Users/robertgrzesik/Documents/Development/Strategy Library/logs/prod_runs/spx_copy2_prod_cold/spx_copy2_prod_cold-20250107-20250117-d92xwdam/`
+
+### Warm (prod; same S3 version)
+
+- Window: `2025-01-07 -> 2025-01-17`
+- Bot ID: `spx_copy2_prod_warm-20250107-20250117-j5ongzo7`
+- S3 cache version: `spx_cold_20260105_234405` (same as cold)
+- Wall time: `66.7s`
+- Queue submits: `0`
+- Trades determinism: ✅ `trades.csv` is byte-identical vs cold
+- Artifacts:
+  - `/Users/robertgrzesik/Documents/Development/Strategy Library/logs/prod_runs/spx_copy2_prod_warm/spx_copy2_prod_warm-20250107-20250117-j5ongzo7/`
+
 ## Accuracy Audit Deliverables
 
 - Audit artifact(s) (CSV recommended):
