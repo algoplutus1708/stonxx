@@ -68,11 +68,14 @@ such as Polygon or DataBento. Option-chain caches now live at
 `<asset-folder>` matches `thetadata_helper._resolve_asset_folder(...)` (for
 example `stock` or `index`).
 
-Snapshot quote caches (used by `get_quote(snapshot_only=True)`) are stored under
-`thetadata/<asset-folder>/snapshot/quote/` and include the `trading_day`,
-interval label, and session bounds in the filename. For **option** assets we
-cache the full **regular session** per day (09:30–16:00) so hourly/iterative
-strategies don’t create one cache object per dt-window.
+Snapshot quote/history caches (used by `get_quote(snapshot_only=True)`) are stored under
+`thetadata/<asset-folder>/snapshot/<datastyle>/` (datastyle is usually `quote`) and include the
+`trading_day`, interval label, and session bounds in the filename.
+
+For **option** assets, snapshot requests are kept strictly aligned to the **regular session**
+(09:30–16:00) and, by default, LumiBot caches the full regular session per trading day. This
+prevents hourly/iterative strategies from creating one cache object per tiny dt-window and keeps
+warm S3 runs from enqueuing repeated downloader work.
 
 ## Implementation Overview
 

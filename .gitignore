@@ -63,6 +63,7 @@ AGENTS.md
 
 # Acceptance backtest run artifacts (local + CI)
 tests/backtest/_acceptance_runs/
+tests/backtest/_acceptance_warm_runs/
 
 # Local tool configs (untracked, user-specific)
 context*.json
