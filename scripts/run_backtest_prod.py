@@ -119,6 +119,8 @@ def _build_backtest_env(dotenv: Dict[str, str], *, profile: Optional[str], audit
     env: Dict[str, str] = {
         "IS_BACKTESTING": "True",
         "BACKTESTING_DATA_SOURCE": "thetadata",
+        # Production backtests rely on injected env vars; recursive .env scanning is both slow and risky.
+        "LUMIBOT_DISABLE_DOTENV": "1",
         "DATADOWNLOADER_BASE_URL": dotenv["DATADOWNLOADER_BASE_URL"],
         "DATADOWNLOADER_API_KEY": dotenv["DATADOWNLOADER_API_KEY"],
         "DATADOWNLOADER_API_KEY_HEADER": dotenv["DATADOWNLOADER_API_KEY_HEADER"],

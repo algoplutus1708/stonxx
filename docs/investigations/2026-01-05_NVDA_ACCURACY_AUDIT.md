@@ -164,8 +164,12 @@ with no Python traceback (surfacing as `ERROR_CODE_CRASH`).
 - In `lumibot/tools/thetadata_helper.py`, avoid deep-copying large cached frames during:
   - cache load (`df_cached.copy(deep=False)`), and
   - cache writes (`update_cache()` uses shallow copies + avoids duplicative normalization copies).
+- In `lumibot/tools/thetadata_helper.py`, when `preserve_full_history=False` and a `start/end` bound
+  is provided, load cached parquet slices via PyArrow dataset filtering instead of reading the full
+  multi-year intraday frame into memory.
 - In `lumibot/backtesting/thetadata_backtesting_pandas.py`, set `preserve_full_history=False` for
   **non-option assets** so a 2025-only backtest doesn’t try to hold a multi-year intraday cache in RAM.
 
 Regression test added:
 - `tests/test_thetadata_helper_update_parquet_memory.py`
+- `tests/test_thetadata_helper_load_parquet_filter.py`

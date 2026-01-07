@@ -16,6 +16,7 @@ We optimize for:
 
 - Handoffs: `docs/handoffs/`
 - Investigations: `docs/investigations/`
+- Performance + parity + startup: `docs/BACKTESTING_PERFORMANCE.md`
 - Latest session handoff: `docs/handoffs/2025-12-26_THETADATA_SESSION_HANDOFF.md`
 
 ## Directory Structure
@@ -226,6 +227,25 @@ For ThetaData daily option pricing, we rely heavily on **EOD NBBO bid/ask** colu
 One major failure mode is in the data normalization/repair path:
 - `Data.repair_times_and_fill()` (in `lumibot/entities/data.py`) historically treated quote columns like OHLC and could incorrectly clear or mis-fill `bid`/`ask` across session gaps.
 - Once `bid`/`ask` are missing for some bars, option MTM becomes intermittently “unpriceable”.
+
+### Secondary root cause: ThetaData option EOD gaps (quotes exist, EOD missing)
+
+ThetaData can return “no data” / placeholder responses for some option **EOD/day history** requests even when the same contract has
+actionable **intraday quote history** (NBBO bid/ask).
+
+In daily-cadence strategies, if MTM pricing relies exclusively on the EOD/day history path, the strategy can become unable to
+value or exit an option position and may log:
+
+- “Skipping valuation … because no price was available …”
+
+This can produce flat or misleading equity curves and tearsheets, even if the strategy logic is correct.
+
+**Fix direction (implemented):**
+- For ThetaData option backtests, daily cadence now falls back to an **intraday snapshot quote mark** (`snapshot_only=True`) when the
+  day/EOD quote path has no actionable bid/ask mark.
+
+Investigation write-up:
+- `docs/investigations/2026-01-06_THETADATA_OPTION_EOD_GAPS_DAILY_MTM.md`
 
 ### Fixes that prevent the sawtooth
 

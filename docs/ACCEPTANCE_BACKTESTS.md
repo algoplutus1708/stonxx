@@ -17,6 +17,40 @@ This document is the **canonical manual acceptance suite** for LumiBot backtesti
   `Strategy Library/logs/` via `scripts/generate_acceptance_backtests_baselines.py`).
 - When updating expected outputs: append rows here *and* update the baseline JSON from the chosen baseline `run_id`s.
 
+## Current status (2026-01-06) — why acceptance is failing right now
+
+As of **2026-01-06**, the acceptance suite is **not currently green** when run with the tripwire enabled, even locally:
+
+- `pytest -q tests/backtest/test_acceptance_backtests_ci.py` is failing for multiple strategies because the subprocess
+  attempts to use the Data Downloader and is hard-killed by the tripwire (`exit=86`).
+
+This is *not* a “mysterious CI-only flake”. It is the expected consequence of two deliberate design choices:
+
+1) The acceptance harness forces a **fresh disk cache per run** via:
+   - `LUMIBOT_CACHE_FOLDER=<run_dir>/cache`
+   This prevents a developer’s warm local cache from hiding missing S3 objects.
+2) The acceptance harness enforces a **warm S3 invariant**:
+   - canonical windows are expected to already exist in S3 v44,
+   - so any downloader/queue usage is treated as a regression and fails the test.
+
+Recent correctness work (daily-cadence option MTM fallback to intraday NBBO snapshots) increased the set of required
+quote snapshot/history objects. S3 v44 must be re-warmed for those objects before acceptance will be queue-free again.
+
+### What to do next (operator runbook)
+
+1) Warm the missing objects in S3 v44 **outside CI** (tripwire OFF):
+   - use `scripts/warm_acceptance_backtests_cache.py` (runs the same acceptance scripts but allows downloader usage).
+2) Re-run acceptance with tripwire ON and confirm:
+   - no downloader tripwire triggers,
+   - `thetadata_queue_telemetry.submit_requests == 0` in each `*_settings.json`.
+3) If headline metrics drift after data becomes complete:
+   - rebaseline via `scripts/generate_acceptance_backtests_baselines.py`
+   - update this doc’s `#### Expected Results` blocks in lockstep with the baseline JSON.
+
+For full details, see:
+- `docs/handoffs/2026-01-06_ACCEPTANCE_BACKTESTS_HANDOFF.md`
+- `docs/investigations/2026-01-06_THETADATA_OPTION_EOD_GAPS_DAILY_MTM.md`
+
 ## Window semantics (avoid false “drift”)
 
 - LumiBot treats `BACKTESTING_END` as **exclusive**.

@@ -37,9 +37,18 @@ def find_and_load_dotenv(base_dir) -> bool:
 # Get the directory of the original script being run
 script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
 logger.debug(f"script_dir: {script_dir}")
-found_dotenv = find_and_load_dotenv(script_dir)
+_disable_dotenv = os.environ.get("LUMIBOT_DISABLE_DOTENV", "").lower() in ("1", "true", "yes")
 
-if not found_dotenv:
+if _disable_dotenv:
+    # In production backtests we should rely on injected environment variables rather than scanning
+    # large directory trees for `.env` files. Recursive scanning can add seconds of startup latency and,
+    # worse, can accidentally load an unrelated `.env` if the working directory contains nested repos.
+    logger.debug("Skipping .env discovery because LUMIBOT_DISABLE_DOTENV is set.")
+    found_dotenv = False
+else:
+    found_dotenv = find_and_load_dotenv(script_dir)
+
+if not found_dotenv and not _disable_dotenv:
     # Get the root directory of the project
     cwd_dir = os.getcwd()
     logger.debug(f"cwd_dir: {cwd_dir}")

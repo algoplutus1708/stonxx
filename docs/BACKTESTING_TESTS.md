@@ -38,6 +38,29 @@ The latest “why are we changing this?” investigation context (stalls/perf hi
 
 - `docs/handoffs/2026-01-01_THETADATA_SESSION_HANDOFF.md`
 
+### When acceptance backtests fail due to downloader usage
+
+If you see acceptance failures like:
+
+- `exit=86` and `[ACCEPTANCE][TRIPWIRE] Attempted to call Data Downloader …`
+
+that means one of:
+
+1) S3 is missing a required cache object for the canonical window, or
+2) cache keying/schema changed and the code is looking under a new key/version, or
+3) a placeholder-only cache object is suppressing a needed refresh.
+
+The intended workflow is:
+
+- **Warm/fill S3 outside CI** (tripwire OFF) using:
+  - `scripts/warm_acceptance_backtests_cache.py`
+- Then re-run acceptance (tripwire ON) and confirm:
+  - no downloader calls,
+  - `thetadata_queue_telemetry.submit_requests == 0` in `*_settings.json`.
+
+See the detailed handoff:
+- `docs/handoffs/2026-01-06_ACCEPTANCE_BACKTESTS_HANDOFF.md`
+
 ## Backtest profiling (opt-in)
 
 Backtests can produce a profiling artifact to help explain production-vs-local speed differences.

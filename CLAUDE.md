@@ -141,6 +141,7 @@ To keep deployments traceable (and easy to diff):
 ## Documentation Layout
 
 - `docs/` = hand-authored markdown (architecture, investigations, handoffs, ops notes)
+- Backtesting speed/parity playbook: `docs/BACKTESTING_PERFORMANCE.md`
 - Handoffs: `docs/handoffs/`
 - Investigations: `docs/investigations/`
 - `docsrc/` = Sphinx source for the public docs site

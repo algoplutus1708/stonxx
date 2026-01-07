@@ -10,7 +10,17 @@ LumiBot supports configuring many behaviors via environment variables. This page
    **Never commit secrets** (API keys, passwords, AWS secret keys) into any repo or docs. Document variable names and semantics only.
 
 Backtesting configuration
-------------------------
+-------------------------
+
+LUMIBOT_DISABLE_DOTENV
+^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Disable recursive ``.env`` discovery (directory scanning) at startup.
+- Values: truthy enables (``1``, ``true``, ``yes``); unset/``0`` disables.
+- Default: disabled.
+- Notes:
+  - Recursive ``.env`` scanning can add startup latency and can accidentally load the wrong ``.env`` when running in a directory with nested repos.
+  - In production/BotManager backtests we rely on injected environment variables, so ``.env`` discovery should be off.
 
 IS_BACKTESTING
 ^^^^^^^^^^^^^^
@@ -31,6 +41,18 @@ BACKTESTING_DATA_SOURCE
 - Values (case-insensitive):
   - ``thetadata``, ``yahoo``, ``polygon``, ``alpaca``, ``ccxt``, ``databento``
   - ``none`` to disable the env override and rely on code.
+
+Testing / CI guardrails
+-----------------------
+
+LUMIBOT_ACCEPTANCE_TRIPWIRE
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: **Acceptance backtests only** — when truthy, a Python startup hook aborts the subprocess the moment it attempts to call the remote Data Downloader.
+- Values: truthy enables (``1``, ``true``, ``yes``); unset/``0`` disables.
+- Notes:
+  - This is an engineering/CI guardrail to enforce “warm-cache” acceptance backtests. It should not be used for normal production backtests.
+  - When triggered, it prints a marker and exits the subprocess with a non-zero code so the test fails reliably.
 
 Backtest artifacts + UX flags
 -----------------------------
@@ -126,7 +148,7 @@ DATADOWNLOADER_SKIP_LOCAL_START
 - Values: ``1`` / ``true`` enable; unset/``0`` disable.
 
 ThetaData option-chain building (performance)
---------------------------------------------
+---------------------------------------------
 
 THETADATA_CHAIN_DEFAULT_MAX_DAYS_OUT
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -166,10 +188,10 @@ THETADATA_CHAIN_STRIKES_BATCH_SIZE
 - Default: ``0`` (use queue client concurrency).
 
 ThetaData corporate action normalization (accuracy)
---------------------------------------------------
+------------------------------------------------------------
 
 THETADATA_APPLY_CORPORATE_ACTIONS_INTRADAY
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Purpose: Apply split/dividend adjustments to **intraday** frames (minute/second/hour) in backtests so intraday prices match daily split-adjusted prices and option-chain strike normalization stays consistent.
 - Values: ``1`` / ``true`` enable; ``0`` / ``false`` disable.

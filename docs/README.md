@@ -13,6 +13,7 @@ This folder contains **human-authored** documentation for the LumiBot trading an
 | File | Purpose | When to Read |
 |------|---------|--------------|
 | `BACKTESTING_ARCHITECTURE.md` | **START HERE** - Data flow diagrams, component relationships, how backtests execute | Before modifying any backtesting code |
+| `BACKTESTING_PERFORMANCE.md` | How to measure and improve backtest speed (startup, downloader, caching, parity, cost) | When investigating slowness or production/local parity |
 | `ENV_VARS.md` | Complete environment variable reference with defaults and examples | When adding/changing env vars or debugging config issues |
 | `ACCEPTANCE_BACKTESTS.md` | Release gate criteria - what must pass before deployment | Before any release or version bump |
 | `BACKTESTING_TESTS.md` | Test suite organization and how to run backtest-related tests | When writing or debugging tests |

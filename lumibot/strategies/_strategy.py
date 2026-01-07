@@ -895,6 +895,11 @@ class _Strategy:
                 get_quote = getattr(source, "get_quote", None)
                 if callable(get_quote):
                     quote_asset = getattr(self, "_quote_asset", None)
+                    # ThetaData backtesting option MTM should be quote-driven when available.
+                    # Prefer the normal quote path first (usually day/EOD for daily cadence),
+                    # then fall back to a minimal intraday NBBO snapshot when day/EOD pricing
+                    # is missing (ThetaData can return 472/no-data for option EOD history even
+                    # when intraday quote history exists).
                     if quote_asset is not None:
                         quote = get_quote(base_asset, quote=quote_asset, timestep=timestep_hint or "minute")
                     else:
@@ -902,6 +907,18 @@ class _Strategy:
                     quote_mark = _thetadata_quote_mark(quote)
                     if quote_mark is not None:
                         return quote_mark
+
+                    # Daily-cadence fallback: intraday quote snapshots are the most robust source
+                    # of option marks when EOD/history endpoints are missing for a contract.
+                    if timestep_hint == "day":
+                        quote_kwargs = {"timestep": "minute", "snapshot_only": True}
+                        if quote_asset is not None:
+                            quote = get_quote(base_asset, quote=quote_asset, **quote_kwargs)
+                        else:
+                            quote = get_quote(base_asset, **quote_kwargs)
+                        quote_mark = _thetadata_quote_mark(quote)
+                        if quote_mark is not None:
+                            return quote_mark
             except Exception as e:
                 self.logger.debug("ThetaData quote-mark lookup failed for %s: %s", base_asset, e)
             return None

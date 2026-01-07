@@ -6695,3 +6695,5 @@ timestamp,test_name,data_source,trading_days,execution_time_seconds,git_commit,l
 2026-01-05T11:13:39.505870,test_acceptance_tqqq_sma200,unknown,,43.223,472682ec,4.4.27,,,,,Auto-tracked from test_acceptance_backtests_ci
 2026-01-05T11:15:52.602392,test_acceptance_meli_deep_drawdown,unknown,,126.224,472682ec,4.4.27,,,,,Auto-tracked from test_acceptance_backtests_ci
 2026-01-05T11:26:32.002264,test_acceptance_spx_short_straddle,unknown,,194.622,472682ec,4.4.27,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-06T13:59:49.562343,test_acceptance_tqqq_sma200,unknown,,39.052,e4a86e48,4.4.29,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-07T03:27:36.584559,test_acceptance_tqqq_sma200,unknown,,41.798,76b31467,4.4.30,,,,,Auto-tracked from test_acceptance_backtests_ci
