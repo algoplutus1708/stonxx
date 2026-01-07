@@ -18,8 +18,20 @@ making them suitable for CI/CD environments like GitHub Actions.
 
 import pytest
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, Mock
 import logging
+import time
+import requests
+from datetime import datetime
+from types import SimpleNamespace
+
+from lumibot.brokers.broker import Broker
+
+
+@pytest.fixture(autouse=True)
+def disable_tradovate_stream(monkeypatch):
+    """Prevent background polling threads during unit tests."""
+    monkeypatch.setattr(Broker, "_launch_stream", lambda self: None)
 
 
 class TestTradovateImports:
@@ -249,9 +261,9 @@ class TestTradovateBroker:
         empty_config = {}
         
         # Mock the requests to avoid actual API calls
-        with patch('requests.post') as mock_post:
+        with patch('requests.request') as mock_request:
             # Mock a failure response that would happen with missing credentials
-            mock_response = mock_post.return_value
+            mock_response = mock_request.return_value
             mock_response.status_code = 400
             mock_response.json.return_value = {"errorText": "Missing credentials"}
             mock_response.raise_for_status.side_effect = Exception("Bad Request")
@@ -398,86 +410,61 @@ class TestTradovateSymbolResolution:
     """Test Tradovate-specific symbol resolution with 1-digit year format."""
     
     def test_tradovate_symbol_format(self):
-        """Test that Tradovate broker generates correct symbol format with 1-digit year."""
+        """Tradovate broker should request 1-digit contracts from Asset resolver."""
         from lumibot.brokers.tradovate import Tradovate
-        from unittest.mock import patch
-        
-        # Mock datetime to control the current date
-        with patch('datetime.datetime') as mock_datetime:
-            # Set current date to July 9, 2025
-            mock_datetime.now.return_value.month = 7
-            mock_datetime.now.return_value.year = 2025
-            
-            # Create a mock Tradovate broker instance
-            broker = Tradovate.__new__(Tradovate)
-            
-            # Create a mock asset
-            from lumibot.entities import Asset
-            asset = Asset("MNQ", asset_type=Asset.AssetType.CONT_FUTURE)
-            
-            # Test the Tradovate-specific symbol resolution
-            symbol = broker._resolve_tradovate_futures_symbol(asset)
-            
-            # July should resolve to September (U) with 1-digit year (5 for 2025)
-            expected_symbol = "MNQU5"
-            assert symbol == expected_symbol, f"Expected {expected_symbol}, got {symbol}"
-            
-            print(f"✅ Tradovate symbol format test passed: MNQ -> {symbol}")
-    
-    def test_tradovate_symbol_different_months(self):
-        """Test symbol resolution for different months."""
-        from lumibot.brokers.tradovate import Tradovate
-        from unittest.mock import patch
-        
-        broker = Tradovate.__new__(Tradovate)
         from lumibot.entities import Asset
-        asset = Asset("MES", asset_type=Asset.AssetType.CONT_FUTURE)
-        
-        test_cases = [
-            (1, 2025, "MESM5"),   # January -> June (M5)
-            (3, 2025, "MESM5"),   # March -> June (M5) 
-            (5, 2025, "MESU5"),   # May -> September (U5)
-            (7, 2025, "MESU5"),   # July -> September (U5)
-            (9, 2025, "MESU5"),   # September -> September (U5)
-            (11, 2025, "MESZ5"),  # November -> December (Z5)
-            (12, 2026, "MESZ6"),  # December 2026 -> December (Z6)
-        ]
-        
-        for month, year, expected in test_cases:
-            with patch('datetime.datetime') as mock_datetime:
-                mock_datetime.now.return_value.month = month
-                mock_datetime.now.return_value.year = year
-                
-                symbol = broker._resolve_tradovate_futures_symbol(asset)
-                assert symbol == expected, f"Month {month}/{year}: Expected {expected}, got {symbol}"
-        
-        print("✅ Tradovate symbol resolution for different months test passed")
-    
+
+        broker = Tradovate.__new__(Tradovate)
+        asset = Asset("MNQ", asset_type=Asset.AssetType.CONT_FUTURE)
+
+        with patch.object(
+            asset,
+            "resolve_continuous_futures_contract",
+            return_value="MNQZ5",
+        ) as mock_resolve:
+            symbol = broker._resolve_tradovate_futures_symbol(asset)
+
+        mock_resolve.assert_called_once_with(year_digits=1)
+        assert symbol == "MNQZ5"
+
+    def test_tradovate_converts_specific_contract_to_single_digit(self):
+        """Specific futures contracts should be normalized to single-digit year."""
+        from lumibot.brokers.tradovate import Tradovate
+        from lumibot.entities import Asset
+
+        broker = Tradovate.__new__(Tradovate)
+
+        future_asset = Asset("MESZ25", asset_type=Asset.AssetType.FUTURE)
+        assert broker._resolve_tradovate_futures_symbol(future_asset) == "MESZ5"
+
+        already_single_digit = Asset("MESZ5", asset_type=Asset.AssetType.FUTURE)
+        assert broker._resolve_tradovate_futures_symbol(already_single_digit) == "MESZ5"
+
     def test_tradovate_vs_standard_symbol_difference(self):
         """Test that Tradovate symbols differ from standard 2-digit year format."""
         from lumibot.brokers.tradovate import Tradovate
         from lumibot.entities import Asset
         from unittest.mock import patch
-        
+
         broker = Tradovate.__new__(Tradovate)
         asset = Asset("MNQ", asset_type=Asset.AssetType.CONT_FUTURE)
-        
-        with patch('datetime.datetime') as mock_datetime:
-            mock_datetime.now.return_value.month = 7
-            mock_datetime.now.return_value.year = 2025
-            
-            # Get Tradovate-specific symbol (1-digit year)
+        reference_date = datetime(2025, 9, 16)
+
+        standard_symbol = asset.resolve_continuous_futures_contract(
+            reference_date=reference_date, year_digits=2
+        )
+        tradovate_expected = asset.resolve_continuous_futures_contract(
+            reference_date=reference_date, year_digits=1
+        )
+
+        with patch.object(
+            asset, "resolve_continuous_futures_contract", return_value=tradovate_expected
+        ) as mock_resolve:
             tradovate_symbol = broker._resolve_tradovate_futures_symbol(asset)
-            
-            # Get standard symbol (2-digit year)
-            standard_symbol = asset.resolve_continuous_futures_contract()
-            
-            # They should be different
-            assert tradovate_symbol != standard_symbol
-            assert tradovate_symbol == "MNQU5"  # 1-digit year
-            assert standard_symbol == "MNQU25"  # 2-digit year
-            
-        print(f"✅ Symbol format difference test passed: Tradovate={tradovate_symbol}, Standard={standard_symbol}")
+
+        mock_resolve.assert_called_once_with(year_digits=1)
+        assert tradovate_symbol == tradovate_expected
+        assert tradovate_symbol != standard_symbol
 
 
 class TestTradovateAPIPayload:
@@ -488,13 +475,19 @@ class TestTradovateAPIPayload:
         from lumibot.brokers.tradovate import Tradovate
         from lumibot.entities import Asset, Order
         from unittest.mock import MagicMock, patch
-        
+        from collections import deque
+
         # Mock the broker initialization
         broker = Tradovate.__new__(Tradovate)
         broker.account_spec = "TEST_ACCOUNT"
         broker.account_id = 12345
         broker.trading_token = "fake_token"
         broker.trading_api_url = "https://demo.tradovateapi.com/v1"
+        broker._rate_limit_per_minute = 60
+        broker._rate_limit_window = 60.0
+        broker._request_times = deque()
+        import threading
+        broker._request_lock = threading.Lock()
         
         # Create test order
         asset = Asset("MNQ", asset_type=Asset.AssetType.CONT_FUTURE)
@@ -508,30 +501,30 @@ class TestTradovateAPIPayload:
             limit_price=20000.0
         )
         
-        # Mock the symbol resolution
-        with patch.object(broker, '_resolve_tradovate_futures_symbol', return_value='MNQU5'):
-            with patch.object(broker, '_get_headers') as mock_headers:
-                with patch('lumibot.brokers.tradovate.requests.post') as mock_post:
-                    # Mock successful response
-                    mock_response = MagicMock()
-                    mock_response.status_code = 200
-                    mock_response.json.return_value = {"orderId": 123456}
-                    mock_post.return_value = mock_response
-                    
-                    # Submit the order
-                    result = broker._submit_order(order)
-                    
-                    # Check that the request was made with correct payload
-                    assert mock_post.called
-                    call_args = mock_post.call_args
-                    payload = call_args[1]['json']  # Get the JSON payload
-                    
-                    # Verify correct field names per Tradovate API
-                    assert 'price' in payload, "Limit orders should use 'price' field"
-                    assert 'limitPrice' not in payload, "Should not use 'limitPrice' field"
-                    assert payload['price'] == 20000.0
-                    assert payload['symbol'] == 'MNQU5'
-                    assert payload['orderType'] == 'Limit'
+        # Mock the symbol resolution and _request method to capture the payload
+        with patch.object(broker, '_resolve_tradovate_futures_symbol', return_value='MNQZ5'):
+            # Mock _request to capture the payload and return a successful response
+            with patch.object(broker, '_request') as mock_request:
+                # Mock successful response
+                mock_response = MagicMock()
+                mock_response.status_code = 200
+                mock_response.json.return_value = {"orderId": 123456}
+                mock_request.return_value = mock_response
+
+                # Submit the order
+                result = broker._submit_order(order)
+
+                # Check that the request was made with correct payload
+                assert mock_request.called
+                call_args = mock_request.call_args
+                payload = call_args[1]['json']  # Get the JSON payload
+
+                # Verify correct field names per Tradovate API
+                assert 'price' in payload, "Limit orders should use 'price' field"
+                assert 'limitPrice' not in payload, "Should not use 'limitPrice' field"
+                assert payload['price'] == 20000.0
+                assert payload['symbol'] == 'MNQZ5'
+                assert payload['orderType'] == 'Limit'
                     
         print("✅ Limit order payload format test passed")
     
@@ -540,13 +533,19 @@ class TestTradovateAPIPayload:
         from lumibot.brokers.tradovate import Tradovate
         from lumibot.entities import Asset, Order
         from unittest.mock import MagicMock, patch
-        
+        from collections import deque
+
         # Mock the broker initialization
         broker = Tradovate.__new__(Tradovate)
         broker.account_spec = "TEST_ACCOUNT"
         broker.account_id = 12345
         broker.trading_token = "fake_token"
         broker.trading_api_url = "https://demo.tradovateapi.com/v1"
+        broker._rate_limit_per_minute = 60
+        broker._rate_limit_window = 60.0
+        broker._request_times = deque()
+        import threading
+        broker._request_lock = threading.Lock()
         
         # Create test order
         asset = Asset("MES", asset_type=Asset.AssetType.CONT_FUTURE)
@@ -560,30 +559,638 @@ class TestTradovateAPIPayload:
             stop_price=4500.0
         )
         
-        # Mock the symbol resolution and submission
+        # Mock the symbol resolution and _request method to capture the payload
         with patch.object(broker, '_resolve_tradovate_futures_symbol', return_value='MESU5'):
-            with patch.object(broker, '_get_headers') as mock_headers:
-                with patch('lumibot.brokers.tradovate.requests.post') as mock_post:
-                    # Mock successful response
-                    mock_response = MagicMock()
-                    mock_response.status_code = 200
-                    mock_response.json.return_value = {"orderId": 123457}
-                    mock_post.return_value = mock_response
-                    
-                    # Submit the order
-                    result = broker._submit_order(order)
-                    
-                    # Check payload
-                    call_args = mock_post.call_args
-                    payload = call_args[1]['json']
-                    
-                    # Verify stop price field
-                    assert 'stopPrice' in payload
-                    assert payload['stopPrice'] == 4500.0
-                    assert payload['symbol'] == 'MESU5'
-                    assert payload['orderType'] == 'Stop'
+            # Mock _request to capture the payload and return a successful response
+            with patch.object(broker, '_request') as mock_request:
+                # Mock successful response
+                mock_response = MagicMock()
+                mock_response.status_code = 200
+                mock_response.json.return_value = {"orderId": 123457}
+                mock_request.return_value = mock_response
+
+                # Submit the order
+                result = broker._submit_order(order)
+
+                # Check payload
+                call_args = mock_request.call_args
+                payload = call_args[1]['json']
+
+                # Verify stop price field
+                assert 'stopPrice' in payload
+                assert payload['stopPrice'] == 4500.0
+                assert payload['symbol'] == 'MESU5'
+                assert payload['orderType'] == 'Stop'
                     
         print("✅ Stop order payload format test passed")
+
+
+class TestTradovateLifecycle:
+    """Tests for Tradovate order lifecycle wiring (polling, submit, cancel)."""
+
+    def _make_broker(self):
+        from lumibot.brokers import Tradovate
+        base_config = {
+            "USERNAME": "test_user",
+            "DEDICATED_PASSWORD": "test_pass",
+            "CID": "test_cid",
+            "SECRET": "test_secret",
+            "IS_PAPER": True,
+        }
+        tokens = {
+            "accessToken": "token",
+            "marketToken": "market",
+            "hasMarketData": True,
+        }
+        account_info = {"accountSpec": "TEST", "accountId": 123}
+        user_info = "user"
+
+        with patch.object(Tradovate, "_get_tokens", return_value=tokens), \
+             patch.object(Tradovate, "_get_account_info", return_value=account_info), \
+             patch.object(Tradovate, "_get_user_info", return_value=user_info):
+            broker = Tradovate(config=base_config)
+        return broker
+
+    def test_submit_order_emits_new_event(self):
+        from lumibot.entities import Asset, Order
+
+        broker = self._make_broker()
+        asset = Asset("MES", asset_type=Asset.AssetType.CONT_FUTURE)
+        strategy_name = "Strategy"
+        order = Order(
+            strategy=strategy_name,
+            asset=asset,
+            quantity=1,
+            side="buy",
+            order_type=Order.OrderType.MARKET,
+        )
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"orderId": 999}
+
+        with patch.object(broker, "_request", return_value=mock_response), \
+             patch.object(broker, "_process_trade_event") as mock_process:
+            broker._submit_order(order)
+
+        mock_process.assert_called_once_with(order, broker.NEW_ORDER)
+
+    def test_do_polling_dispatches_fill_event(self):
+        from lumibot.entities import Asset, Order
+
+        broker = self._make_broker()
+        broker.stream = SimpleNamespace(dispatch=lambda event, **payload: broker._dispatched.append((event, payload)))
+        broker._dispatched = []
+
+        filled_order = Order(
+            strategy="Strategy",
+            asset=Asset("ESZ5", asset_type=Asset.AssetType.FUTURE),
+            quantity=2,
+            side="sell",
+            order_type=Order.OrderType.MARKET,
+        )
+        filled_order.set_identifier("321")
+        filled_order.status = Order.OrderStatus.FILLED
+
+        with patch.object(broker, "sync_positions", return_value=None), \
+             patch.object(broker, "_pull_broker_all_orders", return_value=[{"id": "321"}]), \
+             patch.object(broker, "_parse_broker_order", return_value=filled_order), \
+             patch.object(broker, "_extract_fill_details", return_value=(100.0, 2)):
+            broker.do_polling()
+
+        events = broker._dispatched
+        assert any(event == broker.FILLED_ORDER for event, _ in events)
+
+    def test_cancel_order_dispatches_cancel_event(self):
+        from lumibot.entities import Asset, Order
+
+        broker = self._make_broker()
+        dispatched = []
+        broker.stream = SimpleNamespace(dispatch=lambda event, **payload: dispatched.append((event, payload)))
+
+        order = Order(
+            strategy="Strategy",
+            asset=Asset("ESZ5", asset_type=Asset.AssetType.FUTURE),
+            quantity=1,
+            side="sell",
+            order_type=Order.OrderType.MARKET,
+        )
+        order.set_identifier("654")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {}
+
+        with patch.object(broker, "_request", return_value=mock_response):
+            broker.cancel_order(order)
+
+        assert any(event == broker.CANCELED_ORDER for event, _ in dispatched)
+
+    def test_pull_all_orders_skips_first_iteration(self):
+        broker = self._make_broker()
+        broker._first_iteration = True
+        result = broker._pull_all_orders("Strategy", None)
+        assert result == []
+
+        broker._first_iteration = False
+        with patch("lumibot.brokers.broker.Broker._pull_all_orders", return_value=["order"]) as mock_super:
+            result = broker._pull_all_orders("Strategy", None)
+            mock_super.assert_called_once()
+        assert result == ["order"]
+
+    def test_do_polling_dispatches_new_for_active_order(self):
+        from lumibot.entities import Asset, Order
+
+        broker = self._make_broker()
+        broker.stream = SimpleNamespace(dispatch=lambda event, **payload: broker._dispatched.append((event, payload)))
+        broker._dispatched = []
+
+        active_order = Order(
+            strategy="Strategy",
+            asset=Asset("ESZ5", asset_type=Asset.AssetType.FUTURE),
+            quantity=1,
+            side="buy",
+            order_type=Order.OrderType.MARKET,
+        )
+        active_order.set_identifier("999")
+        active_order.status = Order.OrderStatus.NEW
+
+        with patch.object(broker, "sync_positions", return_value=None), \
+             patch.object(broker, "_pull_broker_all_orders", return_value=[{"id": "999"}]), \
+             patch.object(broker, "_parse_broker_order", return_value=active_order), \
+             patch.object(broker, "_extract_fill_details", return_value=(None, None)):
+            broker.do_polling()
+
+        events = broker._dispatched
+        assert any(event == broker.NEW_ORDER for event, _ in events)
+
+    def test_do_polling_skips_new_for_closed_order_even_after_startup(self):
+        from lumibot.entities import Asset, Order
+
+        broker = self._make_broker()
+        broker.stream = SimpleNamespace(dispatch=lambda event, **payload: broker._dispatched.append((event, payload)))
+        broker._dispatched = []
+
+        closed_order = Order(
+            strategy="Strategy",
+            asset=Asset("ESZ5", asset_type=Asset.AssetType.FUTURE),
+            quantity=1,
+            side="sell",
+            order_type=Order.OrderType.MARKET,
+        )
+        closed_order.set_identifier("777")
+        closed_order.status = Order.OrderStatus.FILLED
+
+        broker._first_iteration = False
+
+        with patch.object(broker, "sync_positions", return_value=None), \
+             patch.object(broker, "_pull_broker_all_orders", return_value=[{"id": "777"}]), \
+             patch.object(broker, "_parse_broker_order", return_value=closed_order), \
+             patch.object(broker, "_extract_fill_details", return_value=(100.0, 1)):
+            broker.do_polling()
+
+        events = broker._dispatched
+        assert any(event == broker.FILLED_ORDER for event, _ in events)
+        assert not any(event == broker.NEW_ORDER for event, _ in events)
+
+    def test_extract_fill_details_uses_fill_list_fallback(self):
+        from lumibot.entities import Asset, Order
+
+        broker = self._make_broker()
+
+        raw_order = {"id": "900", "ordStatus": "Filled"}
+        parsed_order = Order(
+            strategy="Strategy",
+            asset=Asset("ESZ5", asset_type=Asset.AssetType.FUTURE),
+            quantity=0,
+            side="buy",
+            order_type=Order.OrderType.MARKET,
+        )
+        parsed_order.set_identifier("900")
+
+        with patch.object(broker, "_fetch_recent_fill_details", return_value=(6788.5, 1)):
+            price, qty = broker._extract_fill_details(raw_order, parsed_order)
+
+        assert qty == 1
+        assert price == 6788.5
+
+    def test_missing_order_reconciles_to_fill_instead_of_cancel(self):
+        from lumibot.entities import Asset, Order
+
+        broker = self._make_broker()
+        broker.stream = SimpleNamespace(dispatch=lambda event, **payload: broker._dispatched.append((event, payload)))
+        broker._dispatched = []
+
+        missing_order = Order(
+            strategy="Strategy",
+            asset=Asset("ESZ5", asset_type=Asset.AssetType.FUTURE),
+            quantity=1,
+            side="buy",
+            order_type=Order.OrderType.MARKET,
+        )
+        missing_order.set_identifier("555")
+        missing_order.status = Order.OrderStatus.NEW
+
+        quote = SimpleNamespace(last=6788.25)
+
+        with patch.object(broker, "sync_positions", return_value=None), \
+             patch.object(broker, "_pull_broker_all_orders", return_value=[]), \
+             patch.object(broker, "get_all_orders", return_value=[missing_order]), \
+             patch.object(broker, "_fetch_recent_fill_details", return_value=(6788.5, 1)), \
+             patch.object(broker, "get_quote", return_value=quote):
+            broker.do_polling()
+
+        events = broker._dispatched
+        assert any(event == broker.FILLED_ORDER for event, _ in events)
+        assert not any(event == broker.CANCELED_ORDER for event, _ in events)
+
+    def test_cancel_open_orders_prunes_stale_locals(self):
+        from lumibot.entities import Asset, Order
+
+        broker = self._make_broker()
+
+        stale_order = Order(
+            strategy="Strategy",
+            asset=Asset("ESZ5", asset_type=Asset.AssetType.FUTURE),
+            quantity=1,
+            side="buy",
+            order_type=Order.OrderType.MARKET,
+        )
+        stale_order.set_identifier("111")
+        stale_order.status = Order.OrderStatus.NEW
+
+        live_order = Order(
+            strategy="Strategy",
+            asset=Asset("ESZ5", asset_type=Asset.AssetType.FUTURE),
+            quantity=1,
+            side="sell",
+            order_type=Order.OrderType.MARKET,
+        )
+        live_order.set_identifier("222")
+        live_order.status = Order.OrderStatus.NEW
+
+        broker._new_orders.append(stale_order)
+        broker._new_orders.append(live_order)
+        broker._active_broker_identifiers = {"222"}
+
+        with patch.object(broker, "_refresh_active_identifiers_snapshot", return_value={"222"}) as mock_refresh, \
+             patch.object(broker, "cancel_orders") as mock_cancel:
+            broker.cancel_open_orders("Strategy")
+
+        mock_refresh.assert_not_called()
+        mock_cancel.assert_called_once()
+        args, _ = mock_cancel.call_args
+        assert args[0] == [live_order]
+        assert stale_order.status == broker.CANCELED_ORDER
+        assert not stale_order.is_active()
+
+    def test_cancel_open_orders_refreshes_cache_when_missing(self):
+        from lumibot.entities import Asset, Order
+
+        broker = self._make_broker()
+
+        live_order = Order(
+            strategy="Strategy",
+            asset=Asset("ESZ5", asset_type=Asset.AssetType.FUTURE),
+            quantity=1,
+            side="sell",
+            order_type=Order.OrderType.MARKET,
+        )
+        live_order.set_identifier("333")
+        live_order.status = Order.OrderStatus.NEW
+        broker._new_orders.append(live_order)
+        broker._active_broker_identifiers = None
+
+        with patch.object(broker, "_refresh_active_identifiers_snapshot", return_value={"333"}) as mock_refresh, \
+             patch.object(broker, "cancel_orders") as mock_cancel:
+            broker.cancel_open_orders("Strategy")
+
+        mock_refresh.assert_called_once()
+        mock_cancel.assert_called_once()
+
+
+class TestTradovateTokenRenewal:
+    """Test the token renewal functionality."""
+    
+    def test_token_renewal_on_expiry(self):
+        """Test that tokens are renewed when they're about to expire."""
+        from lumibot.brokers.tradovate import Tradovate
+        from unittest.mock import patch, MagicMock
+        
+        # Mock the broker initialization
+        with patch.object(Tradovate, '_get_tokens') as mock_get_tokens, \
+             patch.object(Tradovate, '_get_account_info') as mock_get_account_info, \
+             patch.object(Tradovate, '_get_user_info') as mock_get_user_info:
+            
+            # Initial token response
+            mock_get_tokens.return_value = {
+                'accessToken': 'initial_token',
+                'marketToken': 'initial_market_token',
+                'hasMarketData': True
+            }
+            
+            mock_get_account_info.return_value = {
+                'accountSpec': 'TEST_ACCOUNT',
+                'accountId': 12345
+            }
+            
+            mock_get_user_info.return_value = 'test_user_id'
+            
+            # Create broker instance
+            config = {
+                "USERNAME": "test_user",
+                "DEDICATED_PASSWORD": "test_pass",
+                "CID": "test_cid",
+                "SECRET": "test_secret",
+                "IS_PAPER": True
+            }
+            
+            broker = Tradovate(config=config)
+            
+            # Verify initial token
+            assert broker.trading_token == 'initial_token'
+            assert broker.market_token == 'initial_market_token'
+            
+            # Mock time to simulate token aging
+            original_time = broker.token_acquired_time
+            broker.token_acquired_time = original_time - (broker.token_lifetime * 0.95)  # 95% expired
+            
+            # Update mock to return new tokens
+            mock_get_tokens.return_value = {
+                'accessToken': 'renewed_token',
+                'marketToken': 'renewed_market_token',
+                'hasMarketData': True
+            }
+            
+            # Call token check method
+            broker._check_and_renew_token()
+            
+            # Verify tokens were renewed
+            assert broker.trading_token == 'renewed_token'
+            assert broker.market_token == 'renewed_market_token'
+            assert broker.token_acquired_time > original_time
+            
+        print("✅ Token renewal on expiry test passed")
+    
+    def test_automatic_retry_on_401(self):
+        """Test that API requests automatically retry on 401 errors."""
+        from lumibot.brokers.tradovate import Tradovate
+        from unittest.mock import patch, MagicMock
+        
+        # Mock the broker initialization
+        with patch.object(Tradovate, '_get_tokens') as mock_get_tokens, \
+             patch.object(Tradovate, '_get_account_info') as mock_get_account_info, \
+             patch.object(Tradovate, '_get_user_info') as mock_get_user_info:
+            
+            # Initial setup
+            mock_get_tokens.return_value = {
+                'accessToken': 'expired_token',
+                'marketToken': 'expired_market_token',
+                'hasMarketData': True
+            }
+            
+            mock_get_account_info.return_value = {
+                'accountSpec': 'TEST_ACCOUNT', 
+                'accountId': 12345
+            }
+            
+            mock_get_user_info.return_value = 'test_user_id'
+            
+            config = {
+                "USERNAME": "test_user",
+                "DEDICATED_PASSWORD": "test_pass",
+                "CID": "test_cid",
+                "SECRET": "test_secret",
+                "IS_PAPER": True
+            }
+            
+            broker = Tradovate(config=config)
+            
+            # Force token to be expired
+            broker.token_acquired_time = time.time() - (broker.token_lifetime * 0.95)
+            
+            # Create a mock request function that fails with 401 first time
+            call_count = 0
+            def mock_request_func():
+                nonlocal call_count
+                call_count += 1
+                
+                if call_count == 1:
+                    # First call: simulate 401 error
+                    response = Mock()
+                    response.status_code = 401
+                    error = requests.exceptions.HTTPError()
+                    error.response = response
+                    raise error
+                else:
+                    # Second call: success after token renewal
+                    response = Mock()
+                    response.json.return_value = {"success": True}
+                    return response
+            
+            # Update the mock to return new tokens when called again
+            mock_get_tokens.return_value = {
+                'accessToken': 'new_token',
+                'marketToken': 'new_market_token', 
+                'hasMarketData': True
+            }
+            
+            # Test the retry mechanism
+            result = broker._handle_api_request(mock_request_func)
+            
+            # Verify it retried and succeeded
+            assert call_count == 2
+            assert result.json() == {"success": True}
+            assert broker.trading_token == 'new_token'
+            
+        print("✅ Automatic retry on 401 test passed")
+    
+    @pytest.mark.skipif(not os.environ.get('TRADOVATE_USERNAME'), reason="This test requires Tradovate credentials")
+    def test_get_balances_with_token_renewal(self):
+        """Test that _get_balances_at_broker handles token renewal correctly."""
+        from lumibot.brokers.tradovate import Tradovate
+        from lumibot.entities import Asset
+        from unittest.mock import patch, MagicMock, Mock
+        
+        # Mock the broker initialization
+        with patch.object(Tradovate, '_get_tokens') as mock_get_tokens, \
+             patch.object(Tradovate, '_get_account_info') as mock_get_account_info, \
+             patch.object(Tradovate, '_get_user_info') as mock_get_user_info:
+            
+            # Initial setup
+            mock_get_tokens.return_value = {
+                'accessToken': 'initial_token',
+                'marketToken': 'initial_market_token',
+                'hasMarketData': True
+            }
+            
+            mock_get_account_info.return_value = {
+                'accountSpec': 'TEST_ACCOUNT',
+                'accountId': 12345
+            }
+            
+            mock_get_user_info.return_value = 'test_user_id'
+            
+            config = {
+                "USERNAME": "test_user",
+                "DEDICATED_PASSWORD": "test_pass",
+                "CID": "test_cid",
+                "SECRET": "test_secret",
+                "IS_PAPER": True
+            }
+            
+            broker = Tradovate(config=config)
+            
+            # Mock requests.request to simulate 401 then success
+            call_count = 0
+            def mock_post(*args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+                
+                response = Mock()
+                if call_count == 1:
+                    # First call: 401 error
+                    response.status_code = 401
+                    response.raise_for_status.side_effect = requests.exceptions.HTTPError()
+                    response.raise_for_status.side_effect.response = response
+                    return response
+                else:
+                    # Second call: success
+                    response.status_code = 200
+                    response.json.return_value = {
+                        "totalCashValue": 100000,
+                        "netLiq": 105000
+                    }
+                    response.raise_for_status.return_value = None
+                    return response
+            
+            # Force token to be expired  
+            broker.token_acquired_time = time.time() - (broker.token_lifetime * 0.95)
+            
+            # Update the mock to return new tokens when called again
+            mock_get_tokens.return_value = {
+                'accessToken': 'renewed_token',
+                'marketToken': 'renewed_market_token',
+                'hasMarketData': True
+            }
+            
+            with patch('requests.get', side_effect=mock_post) as mock_get:
+                # Call get_balances (which uses GET request)
+                quote_asset = Asset("USD", asset_type=Asset.AssetType.FOREX)
+                cash, positions_value, portfolio_value = broker._get_balances_at_broker(quote_asset, None)
+                
+                # Verify results
+                assert cash == 100000
+                assert positions_value == 5000  # netLiq - cash
+                assert portfolio_value == 105000
+                assert call_count == 2  # Should have retried
+                assert broker.trading_token == 'renewed_token'
+            
+        print("✅ Get balances with token renewal test passed")
+    
+    def test_proactive_token_check(self):
+        """Test the public check_token_expiry method."""
+        from lumibot.brokers.tradovate import Tradovate
+        from unittest.mock import patch
+        
+        with patch.object(Tradovate, '_get_tokens') as mock_get_tokens, \
+             patch.object(Tradovate, '_get_account_info') as mock_get_account_info, \
+             patch.object(Tradovate, '_get_user_info') as mock_get_user_info:
+            
+            # Initial setup
+            mock_get_tokens.return_value = {
+                'accessToken': 'initial_token',
+                'marketToken': 'initial_market_token',
+                'hasMarketData': True
+            }
+            
+            mock_get_account_info.return_value = {
+                'accountSpec': 'TEST_ACCOUNT',
+                'accountId': 12345
+            }
+            
+            mock_get_user_info.return_value = 'test_user_id'
+            
+            config = {
+                "USERNAME": "test_user",
+                "DEDICATED_PASSWORD": "test_pass",
+                "CID": "test_cid",
+                "SECRET": "test_secret",
+                "IS_PAPER": True
+            }
+            
+            broker = Tradovate(config=config)
+            
+            # Age the token
+            broker.token_acquired_time = time.time() - (broker.token_lifetime * 0.95)
+            
+            # Mock renewal response
+            mock_get_tokens.return_value = {
+                'accessToken': 'renewed_token',
+                'marketToken': 'renewed_market_token',
+                'hasMarketData': True
+            }
+            
+            # Call public method
+            broker.check_token_expiry()
+            
+            # Verify renewal happened
+            assert broker.trading_token == 'renewed_token'
+            assert broker.market_token == 'renewed_market_token'
+            
+        print("✅ Proactive token check test passed")
+    
+    def test_token_not_renewed_when_fresh(self):
+        """Test that tokens are NOT renewed when they're still fresh."""
+        from lumibot.brokers.tradovate import Tradovate
+        from unittest.mock import patch
+        
+        with patch.object(Tradovate, '_get_tokens') as mock_get_tokens, \
+             patch.object(Tradovate, '_get_account_info') as mock_get_account_info, \
+             patch.object(Tradovate, '_get_user_info') as mock_get_user_info:
+            
+            # Initial setup
+            initial_call_count = 0
+            def token_getter():
+                nonlocal initial_call_count
+                initial_call_count += 1
+                return {
+                    'accessToken': f'token_{initial_call_count}',
+                    'marketToken': f'market_token_{initial_call_count}',
+                    'hasMarketData': True
+                }
+            
+            mock_get_tokens.side_effect = token_getter
+            
+            mock_get_account_info.return_value = {
+                'accountSpec': 'TEST_ACCOUNT',
+                'accountId': 12345
+            }
+            
+            mock_get_user_info.return_value = 'test_user_id'
+            
+            config = {
+                "USERNAME": "test_user",
+                "DEDICATED_PASSWORD": "test_pass",
+                "CID": "test_cid",
+                "SECRET": "test_secret",
+                "IS_PAPER": True
+            }
+            
+            broker = Tradovate(config=config)
+            
+            # Token should be fresh (just created)
+            assert broker.trading_token == 'token_1'
+            assert initial_call_count == 1
+            
+            # Call check method - should NOT renew
+            broker._check_and_renew_token()
+            
+            # Verify no renewal happened
+            assert broker.trading_token == 'token_1'  # Still the same
+            assert initial_call_count == 1  # No additional calls
+            
+        print("✅ Token not renewed when fresh test passed")
 
 
 if __name__ == "__main__":

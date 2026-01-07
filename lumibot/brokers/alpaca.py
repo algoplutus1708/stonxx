@@ -1,32 +1,28 @@
 import asyncio
 import datetime
-import logging
+import time
 import traceback
 from asyncio import CancelledError
-import time
 from datetime import timezone
 from decimal import Decimal
-from typing import Union
 
 import pandas_market_calendars as mcal
 from alpaca.trading.client import TradingClient
+from alpaca.trading.enums import QueryOrderStatus, PositionSide
+from alpaca.trading.requests import GetOrdersRequest, ReplaceOrderRequest
 from alpaca.trading.stream import TradingStream
-from alpaca.trading.requests import ReplaceOrderRequest, GetOrdersRequest
-from alpaca.data.historical.option import OptionHistoricalDataClient
-from alpaca.data.requests import OptionSnapshotRequest
-from alpaca.trading.enums import QueryOrderStatus
-
 from dateutil import tz
 from termcolor import colored
 
 from lumibot.data_sources import AlpacaData
 from lumibot.entities import Asset, Order, Position, Quote
 from lumibot.tools.helpers import has_more_than_n_decimal_places
+from lumibot.tools.lumibot_logger import get_logger
 from lumibot.trading_builtins import PollingStream
 
 from .broker import Broker
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # Create our own OrderData class to pass to the API because this is easier to work with
@@ -133,8 +129,8 @@ class Alpaca(Broker):
         self.is_oauth_only = bool(self.oauth_token and not (self.api_key and self.api_secret))
 
         # Debug logging for OAuth detection
-        logging.debug(f"Alpaca Broker Init: oauth_token={'present' if self.oauth_token else 'missing'}, api_key={'present' if self.api_key else 'missing'}, api_secret={'present' if self.api_secret else 'missing'}")
-        logging.debug(f"Alpaca Broker Init: is_oauth_only={self.is_oauth_only}")
+        logger.debug(f"Alpaca Broker Init: oauth_token={'present' if self.oauth_token else 'missing'}, api_key={'present' if self.api_key else 'missing'}, api_secret={'present' if self.api_secret else 'missing'}")
+        logger.debug(f"Alpaca Broker Init: is_oauth_only={self.is_oauth_only}")
 
         if not data_source:
             data_source = AlpacaData(config, max_workers=max_workers, chunk_size=chunk_size)
@@ -147,12 +143,12 @@ class Alpaca(Broker):
             max_workers=max_workers,
         )
 
-        # Initialize TradingClient based on available authentication method
+        # Initialize TradingClient based on available authentication method (API keys have precedence)
         try:
-            if self.oauth_token:
-                self.api = TradingClient(oauth_token=self.oauth_token, paper=self.is_paper)
-            elif self.api_key and self.api_secret:
+            if self.api_key and self.api_secret:
                 self.api = TradingClient(self.api_key, self.api_secret, paper=self.is_paper)
+            elif self.oauth_token:
+                self.api = TradingClient(oauth_token=self.oauth_token, paper=self.is_paper)
             else:
                 raise ValueError("Either OAuth token or API key/secret must be provided for Alpaca authentication")
         except Exception as e:
@@ -166,47 +162,66 @@ class Alpaca(Broker):
                 )
                 if self.oauth_token:
                     error_msg += (
-                        f"1. Check that your ALPACA_OAUTH_TOKEN environment variable is set correctly\n"
-                        f"2. Verify your OAuth token is valid and not expired\n"
-                        f"3. Re-authenticate at: https://localhost:3000/oauth/alpaca/success\n"
-                        f"4. Or use API key/secret instead by setting ALPACA_API_KEY and ALPACA_API_SECRET\n\n"
+                        "1. Check that your ALPACA_OAUTH_TOKEN environment variable is set correctly\n"
+                        "2. Verify your OAuth token is valid and not expired\n"
+                        "3. Re-authenticate at: https://localhost:3000/oauth/alpaca/success\n"
+                        "4. Or use API key/secret instead by setting ALPACA_API_KEY and ALPACA_API_SECRET\n\n"
                     )
                 else:
                     error_msg += (
-                        f"1. Check that your ALPACA_API_KEY and ALPACA_API_SECRET environment variables are set correctly\n"
-                        f"2. Verify your API credentials are valid\n"
-                        f"3. Check that your account has trading permissions\n\n"
+                        "1. Check that your ALPACA_API_KEY and ALPACA_API_SECRET environment variables are set correctly\n"
+                        "2. Verify your API credentials are valid\n"
+                        "3. Check that your account has trading permissions\n\n"
                     )
                 error_msg += f"Original error: {e}"
-                logging.error(error_msg)
+                logger.error(error_msg)
                 raise ValueError(error_msg)
             else:
                 # Re-raise the original exception for other errors
                 raise e
 
     def _update_attributes_from_config(self, config):
-        """Override parent method to handle OAuth token configuration."""
+        """Override parent method to handle OAuth token configuration with API key precedence."""
         value_dict = config
         if not isinstance(config, dict):
             value_dict = config.__dict__
 
+        # Initialize credentials
+        temp_api_key = ""
+        temp_api_secret = ""
+        temp_oauth_token = ""
+        
+        # Extract all credential values
         for key in value_dict:
-            # Special handling for OAuth token
             if key == "OAUTH_TOKEN":
-                self.oauth_token = config[key] or ""
-            # Special handling for paper trading
+                temp_oauth_token = config[key] or ""
+            elif key == "API_KEY":
+                temp_api_key = config[key] or ""
+            elif key == "API_SECRET":
+                temp_api_secret = config[key] or ""
+            # Handle paper trading
             elif "paper" in key.lower():
                 self.is_paper = config[key]
-            # Special handling for API key and secret
-            elif key == "API_KEY":
-                self.api_key = config[key] or ""
-            elif key == "API_SECRET":
-                self.api_secret = config[key] or ""
             # Handle other attributes normally
             else:
                 attr = key.lower()
                 if hasattr(self, attr):
                     setattr(self, attr, config[key])
+        
+        # Apply precedence logic: API key/secret takes precedence over OAuth token
+        if temp_api_key and temp_api_secret:
+            self.api_key = temp_api_key
+            self.api_secret = temp_api_secret
+            self.oauth_token = ""  # Clear OAuth token when using API keys
+        elif temp_oauth_token:
+            self.oauth_token = temp_oauth_token
+            self.api_key = ""
+            self.api_secret = ""
+        else:
+            # Keep empty values
+            self.api_key = ""
+            self.api_secret = ""
+            self.oauth_token = ""
 
     # =========Clock functions=====================
 
@@ -374,18 +389,28 @@ class Alpaca(Broker):
                 symbol=position.symbol.replace("USD", ""),
                 asset_type=Asset.AssetType.CRYPTO,
             )
-        elif position.asset_class == "option":
-            asset = Asset(
-                symbol=position.symbol,
-                asset_type=Asset.AssetType.OPTION,
-            )
+        elif position.asset_class == "option" or position.asset_class == "us_option":
+            asset = Asset.symbol2asset(position.symbol)
         else:
             asset = Asset(
                 symbol=position.symbol,
             )
 
         quantity = position.qty
-        position = Position(strategy, asset, quantity, orders=orders)
+
+        try:
+            avg_fill_price = float(position.avg_entry_price) if position.avg_entry_price else None
+        except (ValueError, TypeError):
+            avg_fill_price = None
+
+        position = Position(strategy, asset, quantity, orders=orders, avg_fill_price=avg_fill_price)
+
+        position.pnl = float(broker_position.unrealized_pl) if broker_position.unrealized_pl else None
+        position.current_price = float(broker_position.current_price) if broker_position.current_price else None
+        position.side = Position.PositionSide.LONG if broker_position.side == PositionSide.LONG else Position.PositionSide.SHORT
+        position.market_value = float(broker_position.market_value) if broker_position.market_value else None
+        
+
         return position
 
     def _pull_broker_position(self, asset):
@@ -466,7 +491,7 @@ class Alpaca(Broker):
             first_leg_symbol = None
             legs = resp_raw.get('legs') if isinstance(resp_raw, dict) else None
             if legs is None and hasattr(response, 'legs'):
-                legs = getattr(response, 'legs')
+                legs = response.legs
             if isinstance(legs, list) and legs:
                 first_leg = legs[0]
                 if isinstance(first_leg, dict):
@@ -501,7 +526,7 @@ class Alpaca(Broker):
         if asset_class_value is None:
             legs = resp_raw.get('legs') if isinstance(resp_raw, dict) else None
             if legs is None and hasattr(response, 'legs'):
-                legs = getattr(response, 'legs')
+                legs = response.legs
             if isinstance(legs, list) and legs:
                 first_leg = legs[0]
                 if isinstance(first_leg, dict):
@@ -541,7 +566,11 @@ class Alpaca(Broker):
 
         # Handle None quantity - skip invalid orders
         if qty_value is None:
-            logger.warning(f"Skipping order {identifier_value} - quantity is None (invalid order data from Alpaca)")
+            logger.warning(
+                f"Skipping order {identifier_value} - quantity is None (invalid order data from Alpaca). "
+                f"Order details: symbol={symbol}, side={side_value}, status={status_value}, "
+                f"order_type={order_type_value}, raw_data={resp_raw}"
+            )
             return None
 
         # Construct Order object
@@ -629,8 +658,10 @@ class Alpaca(Broker):
         - The sign of the limit price (positive/negative) is not used by Alpaca to distinguish credit/debit.
         - Alpaca requires that the leg ratio quantities are relatively prime (GCD == 1).
         """
+        requested_multileg_type = order_type if order_type in ("credit", "debit", "even") else None
+
         # Convert Tradier-specific order types to Alpaca-supported types
-        if order_type in ("credit", "debit", "even"):
+        if requested_multileg_type is not None:
             order_type = "limit"
         # All legs must have the same underlying symbol
         symbol = orders[0].asset.symbol
@@ -646,35 +677,38 @@ class Alpaca(Broker):
                 option_symbol = f"{order.asset.symbol}{date}{order.asset.right[0]}{strike_formatted}"
             else:
                 option_symbol = order.asset.symbol
-            # Determine position_intent (buy_to_open, sell_to_open, etc.)
+            # Determine leg side + position intent for Alpaca's mleg payload.
+            # - leg.side must be "buy" or "sell"
+            # - leg.position_intent must be one of: buy_to_open, buy_to_close, sell_to_open, sell_to_close
             position_intent = getattr(order, "position_intent", None)
-            if not position_intent:
-                # Check if we have an open position in this option
-                pos = self.get_tracked_position(order.strategy, order.asset)
-                if pos is not None and pos.quantity != 0:
-                    # Closing position
-                    if order.side == "buy":
-                        position_intent = "buy_to_close"
-                    elif order.side == "sell":
-                        position_intent = "sell_to_close"
-                else:
-                    # Opening position
-                    if order.side == "buy":
-                        position_intent = "buy_to_open"
-                    elif order.side == "sell":
-                        position_intent = "sell_to_open"
+            raw_side = order.side
+            if raw_side in ("buy_to_open", "buy_to_close"):
+                leg_side = "buy"
+                position_intent = position_intent or raw_side
+            elif raw_side in ("sell_to_open", "sell_to_close"):
+                leg_side = "sell"
+                position_intent = position_intent or raw_side
+            else:
+                leg_side = "buy" if order.is_buy_order() else "sell"
+                if not position_intent:
+                    # Fall back to position-based intent inference when the side doesn't encode open/close.
+                    pos = self.get_tracked_position(order.strategy, order.asset)
+                    if pos is not None and pos.quantity != 0:
+                        position_intent = "buy_to_close" if leg_side == "buy" else "sell_to_close"
+                    else:
+                        position_intent = "buy_to_open" if leg_side == "buy" else "sell_to_open"
             # Collect leg quantities for GCD check
             leg_qty = int(abs(order.quantity))
             leg_quantities.append(leg_qty)
             legs.append({
                 "symbol": option_symbol,
                 "ratio_qty": str(order.quantity),
-                "side": order.side,
+                "side": leg_side,
                 "position_intent": position_intent
             })
         # Ensure leg ratio quantities are relatively prime (GCD == 1)
-        from math import gcd
         from functools import reduce
+        from math import gcd
         if len(leg_quantities) > 1:
             leg_gcd = reduce(gcd, leg_quantities)
             if leg_gcd > 1:
@@ -684,13 +718,34 @@ class Alpaca(Broker):
                     new_qty = int(orig_qty // leg_gcd)
                     leg["ratio_qty"] = str(new_qty)
                 qty = str(int(qty) // leg_gcd)
+        # For multi-leg orders, we need to set the primary asset info from the first leg
+        first_order = orders[0]
+        
+        # Determine top-level side for Alpaca.
+        # Alpaca mleg orders require a primary side; for debit/credit packages, this should
+        # reflect the net debit/credit rather than the first leg ordering.
+        if requested_multileg_type == "debit":
+            side = "buy"
+        elif requested_multileg_type == "credit":
+            side = "sell"
+        else:
+            side = first_order.side
+            if side in ("buy_to_open", "buy_to_close"):
+                side = "buy"
+            elif side in ("sell_to_open", "sell_to_close"):
+                side = "sell"
+        
+        # multileg is not a valid order_class for Alpaca. It is mleg now, and cannot be combined with a symbol.
+
         # Compose order payload
         kwargs = {
-            "order_class": "mleg",
-            "qty": qty,
-            "type": order_type or "limit",
-            "time_in_force": duration,
-            "legs": legs,
+            # "symbol": symbol,  # Required: Primary symbol.   Not allowed for mleg order
+            "qty": qty,        # Required: Total quantity
+            "side": side,      # Required: Primary side (buy/sell)
+            "type": order_type or "limit",  # Required: Order type
+            "order_class": "mleg",      # Required: Must be "mleg" for multi-leg orders
+            "time_in_force": duration,      # Required: Duration
+            "legs": legs,      # Required: Individual legs
         }
         # For limit/credit/debit orders, price is required
         if (order_type in ["limit", "credit", "debit", None]) and price is None:
@@ -999,10 +1054,24 @@ class Alpaca(Broker):
 
             # Try to replace the order on Alpaca, handle APIError for accepted status
             try:
-                self.api.replace_order_by_id(
+                replaced = self.api.replace_order_by_id(
                     order_id=order.identifier,
                     order_data=replace_req,
                 )
+                # Alpaca can return a *new* order id when replacing. Keep LumiBot's order object
+                # aligned so SMART_LIMIT can continue repricing/canceling reliably.
+                new_id = getattr(replaced, "id", None)
+                if new_id:
+                    order.identifier = new_id
+                    try:
+                        for child in getattr(order, "child_orders", []) or []:
+                            child.parent_identifier = new_id
+                    except Exception:
+                        pass
+                    try:
+                        order.update_raw(replaced)
+                    except Exception:
+                        pass
             except Exception as e:
                 # If error is "cannot replace order in accepted status", just log and skip
                 if hasattr(e, "args") and e.args and "cannot replace order in accepted status" in str(e.args[0]):
@@ -1036,11 +1105,11 @@ class Alpaca(Broker):
         """
         if self.is_oauth_only:
             # OAuth-only configurations use polling since TradingStream doesn't support OAuth tokens
-            logging.debug("Alpaca Stream: Using PollingStream for OAuth-only configuration")
+            logger.debug("Alpaca Stream: Using PollingStream for OAuth-only configuration")
             return PollingStream(self.polling_interval)
         elif self.api_key and self.api_secret:
             # Traditional API key/secret authentication
-            logging.debug("Alpaca Stream: Using TradingStream for API key/secret authentication")
+            logger.debug("Alpaca Stream: Using TradingStream for API key/secret authentication")
             return TradingStream(self.api_key, self.api_secret, paper=self.is_paper)
         else:
             raise ValueError("Either OAuth token or API key/secret must be provided for Alpaca authentication")
@@ -1050,28 +1119,28 @@ class Alpaca(Broker):
         to be executed on each trade_update event"""
         if self.is_oauth_only:
             # For OAuth-only, use polling events
-            logging.debug("Alpaca Stream: Registering OAuth polling events")
+            logger.debug("Alpaca Stream: Registering OAuth polling events")
             broker = self
 
             @broker.stream.add_action(PollingStream.POLL_EVENT)
             def on_trade_event_poll():
-                logging.debug("Alpaca Stream: Polling event triggered, calling do_polling()")
+                logger.debug("Alpaca Stream: Polling event triggered, calling do_polling()")
                 self.do_polling()
 
             @broker.stream.add_action(broker.NEW_ORDER)
             def on_trade_event_new(order):
                 # Log that the order was submitted
-                logging.info(f"Processing action for new order {order}")
+                logger.info(f"Processing action for new order {order}")
                 try:
                     broker._process_trade_event(order, broker.NEW_ORDER)
                     return True
                 except:
-                    logging.error(traceback.format_exc())
+                    logger.error(traceback.format_exc())
 
             @broker.stream.add_action(broker.FILLED_ORDER)
             def on_trade_event_fill(order, price, filled_quantity):
                 # Log that the order was filled
-                logging.info(f"Processing action for filled order {order} | {price} | {filled_quantity}")
+                logger.info(f"Processing action for filled order {order} | {price} | {filled_quantity}")
                 try:
                     broker._process_trade_event(
                         order,
@@ -1082,21 +1151,21 @@ class Alpaca(Broker):
                     )
                     return True
                 except:
-                    logging.error(traceback.format_exc())
+                    logger.error(traceback.format_exc())
 
             @broker.stream.add_action(broker.CANCELED_ORDER)
             def on_trade_event_cancel(order):
                 # Log that the order was cancelled
-                logging.info(f"Processing action for cancelled order {order}")
+                logger.info(f"Processing action for cancelled order {order}")
                 try:
                     broker._process_trade_event(order, broker.CANCELED_ORDER)
                 except:
-                    logging.error(traceback.format_exc())
+                    logger.error(traceback.format_exc())
 
             @broker.stream.add_action(broker.ERROR_ORDER)
             def on_trade_event_error(order, error_msg):
                 # Log that the order had an error
-                logging.error(f"Processing action for error order {order} | {error_msg}")
+                logger.error(f"Processing action for error order {order} | {error_msg}")
                 try:
                     if order.is_active():
                         # If the order has children, cancel them first upon error
@@ -1107,10 +1176,10 @@ class Alpaca(Broker):
 
                         # Then cancel the parent order
                         broker._process_trade_event(order, broker.ERROR_ORDER)
-                    logging.error(error_msg)
+                    logger.error(error_msg)
                     order.set_error(error_msg)
                 except:
-                    logging.error(traceback.format_exc())
+                    logger.error(traceback.format_exc())
         else:
             # For API key/secret, use traditional streaming (existing code)
             pass
@@ -1135,14 +1204,19 @@ class Alpaca(Broker):
             stored_orders = {x.identifier: x for x in self.get_all_orders()}
 
             # Only log summary, not detailed per-order processing
-            logging.debug(f"OAuth Polling: Found {len(raw_orders)} raw orders from Alpaca, {len(stored_orders)} stored orders in Lumibot")
+            logger.debug(f"OAuth Polling: Found {len(raw_orders)} raw orders from Alpaca, {len(stored_orders)} stored orders in Lumibot")
 
             for alpaca_order in raw_orders:
                 # Use strategy name if available, otherwise use a default
                 strategy_name = strategy.name if strategy else "default"
                 order = self._parse_broker_order(alpaca_order, strategy_name=strategy_name)
 
-                logging.debug(f"OAuth Polling: Processing Alpaca order {order.identifier} with status {order.status}")
+                # Skip if parsing returned None (invalid order data)
+                if order is None:
+                    logger.warning(f"OAuth Polling: Skipping invalid order from Alpaca - _parse_broker_order returned None")
+                    continue
+
+                logger.debug(f"OAuth Polling: Processing Alpaca order {order.identifier} with status {order.status}")
 
                 # Check if this order exists in our stored orders
                 if order.identifier in stored_orders:
@@ -1150,7 +1224,7 @@ class Alpaca(Broker):
 
                     # Check if the status has changed
                     if stored_order.status != order.status:
-                        logging.debug(f"OAuth Polling: Order status changed - {order.identifier}: {stored_order.status} -> {order.status}")
+                        logger.debug(f"OAuth Polling: Order status changed - {order.identifier}: {stored_order.status} -> {order.status}")
 
                         # Update the stored order with new data and dispatch the event
                         stored_order.update_raw(alpaca_order)
@@ -1169,19 +1243,19 @@ class Alpaca(Broker):
                         # Dispatch the appropriate event based on the new status
                         if order.status == "filled" or order.status == "fill": 
                             # Get price and quantity with proper fallbacks for Alpaca API
-                            price = (getattr(alpaca_order, 'filled_avg_price', None) or 
+                            price = (getattr(alpaca_order, 'filled_avg_price', None) or
                                    getattr(alpaca_order, 'avg_fill_price', None) or
                                    getattr(order, 'limit_price', None))
-                            filled_qty = (getattr(alpaca_order, 'filled_qty', None) or 
+                            filled_qty = (getattr(alpaca_order, 'filled_qty', None) or
                                         getattr(alpaca_order, 'qty', None) or
                                         getattr(order, 'quantity', None))
                             self.stream.dispatch(self.FILLED_ORDER, order=stored_order, price=price, filled_quantity=filled_qty)
                         elif order.status == "partially_filled":
-                            # Get price and quantity with proper fallbacks for Alpaca API  
-                            price = (getattr(alpaca_order, 'filled_avg_price', None) or 
+                            # Get price and quantity with proper fallbacks for Alpaca API
+                            price = (getattr(alpaca_order, 'filled_avg_price', None) or
                                    getattr(alpaca_order, 'avg_fill_price', None) or
                                    getattr(order, 'limit_price', None))
-                            filled_qty = (getattr(alpaca_order, 'filled_qty', None) or 
+                            filled_qty = (getattr(alpaca_order, 'filled_qty', None) or
                                         getattr(alpaca_order, 'qty', None) or
                                         getattr(order, 'quantity', None))
                             self.stream.dispatch(self.PARTIALLY_FILLED_ORDER, order=stored_order, price=price, filled_quantity=filled_qty)
@@ -1197,7 +1271,7 @@ class Alpaca(Broker):
             tracked_orders = {x.identifier: x for x in self.get_tracked_orders()}
             broker_ids = [getattr(o, 'id', None) for o in raw_orders if hasattr(o, 'id')]
 
-            logging.debug(f"OAuth Polling: Checking {len(tracked_orders)} tracked orders against {len(broker_ids)} broker order IDs")
+            logger.debug(f"OAuth Polling: Checking {len(tracked_orders)} tracked orders against {len(broker_ids)} broker order IDs")
 
             for order_id, order in tracked_orders.items():
                 if order_id not in broker_ids and order.is_active():
@@ -1206,11 +1280,11 @@ class Alpaca(Broker):
                     try:
                         # Try to fetch this specific order from Alpaca
                         individual_order = self.api.get_order_by_id(order_id)
-                        logging.debug(f"OAuth Polling: Individual lookup found order {order_id} with status {individual_order.status}")
+                        logger.debug(f"OAuth Polling: Individual lookup found order {order_id} with status {individual_order.status}")
 
                         # Update status based on individual lookup
                         if individual_order.status != order.status:
-                            logging.debug(f"OAuth Polling: Individual order status changed - {order_id}: {order.status} -> {individual_order.status}")
+                            logger.debug(f"OAuth Polling: Individual order status changed - {order_id}: {order.status} -> {individual_order.status}")
                             order.update_raw(individual_order)
 
                             # Capture and propagate average filled price for individual lookup
@@ -1227,10 +1301,10 @@ class Alpaca(Broker):
                             # Dispatch appropriate event based on new status
                             if individual_order.status in ["filled", "fill"]:
                                 # Get price and quantity with proper fallbacks for Alpaca API
-                                price = (getattr(individual_order, 'filled_avg_price', None) or 
+                                price = (getattr(individual_order, 'filled_avg_price', None) or
                                        getattr(individual_order, 'avg_fill_price', None) or
                                        getattr(order, 'limit_price', None))
-                                filled_qty = (getattr(individual_order, 'filled_qty', None) or 
+                                filled_qty = (getattr(individual_order, 'filled_qty', None) or
                                             getattr(individual_order, 'qty', None) or
                                             getattr(order, 'quantity', None))
                                 self.stream.dispatch(self.FILLED_ORDER, order=order, price=price, filled_quantity=filled_qty)
@@ -1240,11 +1314,11 @@ class Alpaca(Broker):
                     except Exception as e:
                         if "404" in str(e) or "not found" in str(e).lower():
                             # Order truly doesn't exist - it was cancelled/rejected
-                            logging.debug(f"OAuth Polling: Order {order_id} not found at broker, marking as cancelled")
+                            logger.debug(f"OAuth Polling: Order {order_id} not found at broker, marking as cancelled")
                             self.stream.dispatch(self.CANCELED_ORDER, order=order)
                         else:
                             # Network/API error - don't assume anything, just log and continue
-                            logging.debug(f"OAuth Polling: Could not verify order {order_id}: {e}")
+                            logger.debug(f"OAuth Polling: Could not verify order {order_id}: {e}")
 
         except Exception as e:
             # Handle authentication errors by stopping execution
@@ -1257,22 +1331,33 @@ class Alpaca(Broker):
                 )
                 if self.oauth_token:
                     error_msg += (
-                        f"1. Check that your ALPACA_OAUTH_TOKEN environment variable is set correctly\n"
-                        f"2. Verify your OAuth token is valid and not expired\n"
-                        f"3. Re-authenticate at: https://localhost:3000/oauth/alpaca/success\n"
-                        f"4. Or use API key/secret instead by setting ALPACA_API_KEY and ALPACA_API_SECRET\n\n"
+                        "1. Check that your ALPACA_OAUTH_TOKEN environment variable is set correctly\n"
+                        "2. Verify your OAuth token is valid and not expired\n"
+                        "3. Re-authenticate at: https://localhost:3000/oauth/alpaca/success\n"
+                        "4. Or use API key/secret instead by setting ALPACA_API_KEY and ALPACA_API_SECRET\n\n"
                     )
                 else:
                     error_msg += (
-                        f"1. Check that your ALPACA_API_KEY and ALPACA_API_SECRET environment variables are set correctly\n"
-                        f"2. Verify your API credentials are valid\n"
-                        f"3. Check that your account has trading permissions\n\n"
+                        "1. Check that your ALPACA_API_KEY and ALPACA_API_SECRET environment variables are set correctly\n"
+                        "2. Verify your API credentials are valid\n"
+                        "3. Check that your account has trading permissions\n\n"
                     )
                 error_msg += f"Original error: {e}"
-                logging.error(error_msg)
+                logger.error(error_msg)
                 raise ValueError(error_msg)
             else:
-                logging.error(f"OAuth Polling error: {e}")
+                is_rate_limited = (
+                    "rate limit" in error_message
+                    or "too many requests" in error_message
+                    or "42910000" in error_message
+                    or "status code: 429" in error_message
+                )
+                if is_rate_limited:
+                    logger.warning(f"OAuth Polling error (rate-limited): {e}")
+                    logger.debug(f"Full traceback: {traceback.format_exc()}")
+                else:
+                    logger.error(f"OAuth Polling error: {e}")
+                    logger.error(f"Full traceback: {traceback.format_exc()}")
         # No need to schedule next poll - PollingStream handles this automatically via timeout
 
     def _run_stream(self):
@@ -1284,8 +1369,8 @@ class Alpaca(Broker):
             try:
                 self.stream._run()
             except Exception as e:
-                logging.error(f"Error while running polling stream: {e}")
-                logging.error(traceback.format_exc())
+                logger.error(f"Error while running polling stream: {e}")
+                logger.error(traceback.format_exc())
         else:
             # For API key/secret, use traditional WebSocket streaming
             async def _trade_update(trade_update):

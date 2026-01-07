@@ -5,7 +5,27 @@
 
 Lumibot is a backtesting and trading library for stocks, options, crypto, futures and more. It is made so that the same code you use for backtesting can be used for live trading, making it easy to transition from backtesting to live trading. Lumibot is a highly flexible library that allows you to create your own strategies and indicators, and backtest them on historical data. It is also highly optimized for speed, so you can backtest your strategies quickly and efficiently.
 
-**IMPORTANT: This library requires data for backtesting. The recommended data source is [Polygon.io](https://polygon.io/?utm_source=affiliate&utm_campaign=lumi10) (a free tier is available too). Please click the link to give us credit for the sale, it helps support this project. You can use the coupon code 'LUMI10' for 10% off.**
+**IMPORTANT: This library requires data for backtesting. Our recommended data source is [ThetaData](https://www.thetadata.net/) because they provide the deepest historical coverage we’ve found and directly support BotSpot. Use the promo code `BotSpot10` at checkout for 10% off the first order (the code also tells ThetaData you were referred by us).**
+
+> **Contributor note:** Read `AGENTS.md` before running anything Theta-related. That file spells out the hard rules—never launch ThetaTerminal or the shared downloader locally, always point LumiBot at the AWS-hosted downloader, and wrap all long
+> commands with `/Users/robertgrzesik/bin/safe-timeout`. Breaking these rules kills the only licensed Theta session.
+
+## Architecture Documentation
+
+- `docs/BACKTESTING_ARCHITECTURE.md` - Detailed documentation of the backtesting data flow (Yahoo, ThetaData, Polygon data sources, caching, and data flow diagrams)
+- `docs/ACCEPTANCE_BACKTESTS.md` - Manual end-to-end acceptance backtest suite + performance gate (ThetaData)
+- `docsrc/environment_variables.rst` - Public documentation page for environment variables (update when env vars change)
+- `CHANGELOG.md` - Deployment/release notes (keep this updated)
+- `CLAUDE.md` - AI assistant instructions for working with the codebase
+- `AGENTS.md` - Critical rules for ThetaData and production safety
+
+## Releases / Deployments (internal)
+
+For production deployments (BotSpot / BotManager), keep releases traceable:
+
+- Update `CHANGELOG.md` for every deploy (include the deploy commit hash)
+- Tag the deploy commit as `vX.Y.Z` and push the tag
+- Create a GitHub Release from that tag using the `CHANGELOG.md` entry
 
 ## Documentation - 👇 Start Here 👇
 
@@ -24,11 +44,12 @@ Want to build trading bots without code? Check out our new platform [BotSpot](ht
 
 **Visit [BotSpot.trade](https://botspot.trade/sales?utm_source=lumibot+docs&utm_medium=documentation&utm_campaign=GitHub+Readme) to get started building AI-powered trading bots today!**
 
-## Blog
+## Learn More
 
-Our blog has lots of example strategies and shows you how to run a bot using LumiBot. Check the blog out here:
+Check out example strategies and tutorials on our blog, or use our AI agent to build strategies for you:
 
-**https://lumiwealth.com/blog/**
+**Blog:** https://lumiwealth.com/blog/
+**AI Strategy Builder:** https://www.botspot.trade/?utm_source=github&utm_medium=referral&utm_campaign=lumibot_readme
 
 ## Run a backtest
 
@@ -80,6 +101,13 @@ To run an individual test file, you can run the following command:
 ```bash
 pytest tests/test_asset.py
 ```
+
+## Remote Cache Configuration
+
+Lumibot can mirror its local parquet caches to AWS S3 when you enable the new
+backtest cache manager. The feature is optional and defaults to local storage.
+To configure the environment variables, understand the key naming convention,
+and follow the manual validation checklist, review `docs/remote_cache.md`.
 
 ### Showing Code Coverage
 
@@ -226,17 +254,21 @@ If you want to learn more about Lumibot or Algorithmic Trading then you will lov
 
 **Build AI-powered trading bots on [BotSpot.trade](https://botspot.trade/)** - Our platform for creating, testing, and deploying trading strategies with AI assistance!
 
-## Courses
+## AI Bootcamp
 
-If you need extra help building your algorithm, we have courses to help you out.
+Need hands-on help building your trading bots? Join our **AI Bootcamp** where you'll learn to build, backtest, and deploy trading strategies using AI—no coding required.
 
-**For our Algorithmic Trading course: <https://lumiwealth.com/algorithmic-trading-landing-page>**
+**What you'll learn:**
+- Build stock, crypto, options, and futures bots using plain English prompts
+- Master professional tools like VS Code with Copilot and Cursor
+- Backtest and deploy your strategies to live brokers
+- Join 2,400+ traders in our community
 
-**For our Machine Learning for Trading course: <https://www.lumiwealth.com/product-category/machine-learning-purchase/>**
+**[Learn more about the AI Bootcamp](https://www.botspot.trade/ai-bot-builder-bootcamp?utm_source=github&utm_medium=referral&utm_campaign=lumibot_readme)**
 
-**For our Options Trading course: <https://www.lumiwealth.com/product-category/options-trading-purchase/>**
+---
 
-**Looking for a no-code solution? Build trading bots with AI on [BotSpot](https://botspot.trade/)**
+**Just want to try the AI?** [Start your free trial at BotSpot.trade](https://www.botspot.trade/?utm_source=github&utm_medium=referral&utm_campaign=lumibot_readme) — build strategies in minutes, no coding required.
 
 ## License
 

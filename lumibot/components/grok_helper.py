@@ -1,11 +1,12 @@
 import json
-import time
-import logging
 import re
+import time
+
 from openai import OpenAI
 
-# Configure basic logging
-logging.basicConfig(level=logging.INFO)
+from lumibot.tools.lumibot_logger import get_logger
+
+logger = get_logger(__name__)
 
 class GrokHelper:
     """
@@ -15,7 +16,7 @@ class GrokHelper:
     (as a dict or string) that thoroughly describes the expected JSON response.
     If no custom schema is provided, a default schema is used.
     """
-    
+
     def __init__(self, api_key: str):
         """
         Initializes the GrokHelper with your API key and creates an OpenAI-compatible client.
@@ -36,13 +37,13 @@ class GrokHelper:
             api_key = os.getenv("GROK_API_KEY") or os.getenv("XAI_API_KEY")
             if not api_key:
                 raise ValueError("API key is required for GrokHelper. Set it as GROK_API_KEY or XAI_API_KEY in your environment or pass it directly.")
-        
+
         self.api_key = api_key
         self.client = OpenAI(
             api_key=self.api_key,
             base_url="https://api.x.ai/v1",
         )
-    
+
     def _clean_response(self, response_text: str) -> str:
         """
         Cleans the raw API response by removing markdown code fences and any extraneous text 
@@ -205,9 +206,9 @@ Return only valid JSON following the schema.
                     raise ValueError("Received empty response from API.")
                 return response_text
             except Exception as e:
-                logging.error(f"Attempt {attempt} failed: {e}")
+                logger.error(f"Attempt {attempt} failed: {e}")
                 if attempt == retries:
-                    logging.error(f"Final attempt failed. System prompt was: {system_msg}")
+                    logger.error(f"Final attempt failed. System prompt was: {system_msg}")
                     raise e
                 time.sleep(1)
         raise RuntimeError("Failed to get a valid response after retries.")
@@ -329,19 +330,19 @@ Return only valid JSON following the schema.
                 "detailed_response": "",
                 "symbols": []
             }
-        
+
         cleaned_text = self._clean_response(assistant_text)
         try:
             data = json.loads(cleaned_text)
         except json.JSONDecodeError as e:
-            logging.error(f"JSON decoding failed. Raw response: {cleaned_text}")
+            logger.error(f"JSON decoding failed. Raw response: {cleaned_text}")
             return {
                 "query": user_query,
                 "response_summary": f"Error: Output was not valid JSON. {str(e)}",
                 "detailed_response": "",
                 "symbols": []
             }
-        
+
         return data
 
 # ------------------------------------------------------------------------------
@@ -349,6 +350,7 @@ Return only valid JSON following the schema.
 # ------------------------------------------------------------------------------
 if __name__ == "__main__":
     import os
+
     import dotenv
 
     dotenv.load_dotenv()

@@ -1,10 +1,9 @@
 import contextlib
-import logging
 import math
 import os
 import webbrowser
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -18,7 +17,165 @@ from plotly.subplots import make_subplots
 
 from .yahoo_helper import YahooHelper as yh
 
-logger = logging.getLogger(__name__)
+from lumibot.tools.lumibot_logger import get_logger
+
+logger = get_logger(__name__)
+
+TERMINAL_TRADE_STATUSES_FOR_MARKERS = {
+    "fill",
+    "filled",
+    "partial_fill",
+    "cash_settled",
+    "assigned",
+    "assignment",
+    "exercise",
+    "exercised",
+    "expired",
+    "expire",
+}
+
+
+def _build_trade_marker_tooltip(row: pd.Series):
+    """Return tooltip text for a trade marker; None when the row lacks required data."""
+    status_value = row.get("status")
+    if pd.isna(status_value) or str(status_value).strip() == "":
+        return None
+
+    status_text = str(status_value)
+    if status_text.lower() not in TERMINAL_TRADE_STATUSES_FOR_MARKERS:
+        return None
+
+    for key in ("filled_quantity", "price"):
+        value = row.get(key)
+        if pd.isna(value):
+            return None
+
+    try:
+        filled_quantity_dec = Decimal(str(row["filled_quantity"]))
+        price_dec = Decimal(str(row["price"]))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+    multiplier_value = row.get("asset.multiplier")
+    if pd.isna(multiplier_value) or multiplier_value == "":
+        return None
+    try:
+        multiplier_dec = Decimal(str(multiplier_value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+    try:
+        amount_transacted_dec = price_dec * filled_quantity_dec * multiplier_dec
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+    trade_cost_value = row.get("trade_cost")
+    trade_cost_dec = None
+    if not (pd.isna(trade_cost_value) or trade_cost_value == ""):
+        try:
+            trade_cost_dec = Decimal(str(trade_cost_value))
+        except (InvalidOperation, TypeError, ValueError):
+            trade_cost_dec = None
+
+    if trade_cost_dec is None:
+        trade_cost_dec = amount_transacted_dec
+
+    slippage_value = row.get("trade_slippage")
+    slippage_dec = None
+    if not (pd.isna(slippage_value) or slippage_value == ""):
+        try:
+            slippage_dec = Decimal(str(slippage_value))
+        except (InvalidOperation, TypeError, ValueError):
+            slippage_dec = None
+
+    if row.get("asset.asset_type") == "option":
+        try:
+            return (
+                status_text
+                + "<br>"
+                + str(filled_quantity_dec.quantize(Decimal("0.01")).__format__(",f"))
+                + " "
+                + str(row.get("symbol"))
+                + " "
+                + str(row.get("asset.right"))
+                + " Option"
+                + "<br>"
+                + "Strike: "
+                + str(row.get("asset.strike"))
+                + "<br>"
+                + "Expiration: "
+                + str(row.get("asset.expiration"))
+                + "<br>"
+                + "Price: "
+                + str(price_dec.quantize(Decimal("0.0001")).__format__(",f"))
+                + "<br>"
+                + "Order Type: "
+                + str(row.get("type"))
+                + "<br>"
+                + "Amount Transacted: "
+                + str(
+                    (
+                        price_dec
+                        * filled_quantity_dec
+                        * (multiplier_dec if multiplier_dec != Decimal("0") else Decimal("1"))
+                    )
+                    .quantize(Decimal("0.01"))
+                    .__format__(",f")
+                )
+                + "<br>"
+                + "Trade Cost: "
+                + str(trade_cost_dec.quantize(Decimal("0.01")).__format__(",f"))
+                + "<br>"
+                + "Slippage: "
+                + (
+                    str(slippage_dec.quantize(Decimal("0.01")).__format__(",f"))
+                    if slippage_dec is not None
+                    else "0.00"
+                )
+                + "<br>"
+            )
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+
+    if multiplier_dec == Decimal("0"):
+        return None
+
+    try:
+        amount_transacted = amount_transacted_dec.quantize(Decimal("0.01")).__format__(",f")
+        price_text = str(price_dec.quantize(Decimal("0.0001")).__format__(",f"))
+        filled_qty_text = str(filled_quantity_dec.quantize(Decimal("0.01")).__format__(",f"))
+        trade_cost_text = str(trade_cost_dec.quantize(Decimal("0.01")).__format__(",f"))
+        slippage_text = (
+            str(slippage_dec.quantize(Decimal("0.01")).__format__(",f"))
+            if slippage_dec is not None
+            else "0.00"
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+    return (
+        status_text
+        + "<br>"
+        + filled_qty_text
+        + " "
+        + str(row.get("symbol"))
+        + "<br>"
+        + "Price: "
+        + price_text
+        + "<br>"
+        + "Order Type: "
+        + str(row.get("type"))
+        + "<br>"
+        + "Amount Transacted: "
+        + amount_transacted
+        + "<br>"
+        + "Trade Cost: "
+        + trade_cost_text
+        + "<br>"
+        + "Slippage: "
+        + slippage_text
+        + "<br>"
+    )
 
 
 def total_return(_df):
@@ -206,6 +363,31 @@ def get_symbol_returns(symbol, start=datetime(1900, 1, 1), end=datetime.now()):
     return returns_df
 
 
+SAFE_COLOR_CYCLE = [
+    "#FF6B6B",  # coral
+    "#F4A261",  # sand
+    "#2EC4B6",  # teal
+    "#7E57C2",  # purple
+    "#F9C74F",  # gold
+    "#34A0A4",  # aquamarine
+    "#E63946",  # crimson
+]
+_BLACK_VALUES = {"black", "#000", "#000000", "rgb(0,0,0)", "rgba(0,0,0,1)"}
+
+
+def _safe_color(raw_color, key_hint=""):
+    """Return a color guaranteed to be visible against dark backgrounds."""
+    if isinstance(raw_color, str):
+        color_text = raw_color.strip().lower()
+        if color_text and color_text not in _BLACK_VALUES:
+            return raw_color
+    if raw_color is not None and not isinstance(raw_color, str):
+        return raw_color
+
+    idx = abs(hash(key_hint)) % len(SAFE_COLOR_CYCLE)
+    return SAFE_COLOR_CYCLE[idx]
+
+
 def calculate_returns(symbol, start=datetime(1900, 1, 1), end=datetime.now()):
     start = to_datetime_aware(start)
     end = to_datetime_aware(end)
@@ -290,15 +472,36 @@ def plot_indicators(
         for plot_name, plot_df in chart_markers_df.groupby("plot_name"):
             # Loop over the marker names for this plot_name
             for marker_name, group_df in plot_df.groupby("name"):
+                group_df = group_df.copy()
                 # Get the marker symbol
                 marker_symbol = group_df["symbol"].iloc[0]
 
-                # Get the marker size
-                marker_size = group_df["size"].iloc[0]
-                marker_size = marker_size if marker_size else 25
+                # Determine marker size(s), falling back to sensible defaults when unspecified
+                default_marker_size = 25
+                raw_sizes = group_df.get("size")
+                marker_size = default_marker_size
 
-                # If color is not set, set it to white
-                group_df.loc[:, "color"] = group_df["color"].fillna("white")
+                if raw_sizes is not None:
+                    marker_sizes = pd.to_numeric(raw_sizes, errors="coerce")
+
+                    if isinstance(marker_sizes, pd.Series):
+                        marker_sizes = marker_sizes.fillna(default_marker_size).clip(lower=1)
+                        unique_sizes = marker_sizes.unique()
+                        if len(unique_sizes) == 1:
+                            marker_size = float(unique_sizes[0])
+                        else:
+                            marker_size = marker_sizes.tolist()
+                    else:
+                        if pd.isna(marker_sizes) or marker_sizes <= 0:
+                            marker_size = default_marker_size
+                        else:
+                            marker_size = float(marker_sizes)
+
+                if "color" not in group_df.columns:
+                    group_df["color"] = None
+                group_df.loc[:, "color"] = group_df["color"].apply(
+                    lambda val: _safe_color(val, f"{plot_name}:{marker_name}")
+                )
 
                 # Determine which subplot to use
                 row = plot_names.index(plot_name) + 1
@@ -340,8 +543,9 @@ def plot_indicators(
         for plot_name, plot_df in chart_lines_df.groupby("plot_name"):
             # Loop over the line names for this plot_name
             for line_name, group_df in plot_df.groupby("name"):
-                # Get the color for this line name
-                color = group_df["color"].iloc[0]
+                if "color" not in group_df.columns:
+                    group_df = group_df.assign(color=None)
+                color = _safe_color(group_df["color"].iloc[0], f"{plot_name}:{line_name}")
 
                 # Determine which subplot to use
                 row = plot_names.index(plot_name) + 1
@@ -378,7 +582,7 @@ def plot_indicators(
             title_font_size=30,
             template="plotly_dark",
             height=height,  # Dynamic height based on number of subplots
-            margin=dict(t=150)  # Add more space between title and first subplot
+            margin=dict(t=150),  # Add more space between title and first subplot
         )
 
         # Range selector buttons
@@ -466,10 +670,10 @@ def plot_returns(
 ):
     # If show plot is False, then we don't want to open the plot in the browser
     if not show_plot:
-        logging.info("show_plot is False, not creating the plot file or CSV.")
+        logger.info("show_plot is False, not creating the plot file or CSV.")
         return
 
-    logging.info("\nCreating trades plot and CSV...")
+    logger.info("\nCreating trades plot and CSV...")
 
     # --- Start: CSV Generation for trades_df ---
     trades_csv_file = plot_file_html.replace(".html", ".csv")
@@ -477,11 +681,11 @@ def plot_returns(
     standard_trade_columns = [
         "time", "side", "status", "filled_quantity", "symbol", "asset.asset_type",
         "asset.right", "asset.strike", "asset.expiration", "price", "type",
-        "asset.multiplier", "trade_cost"
+        "asset.multiplier", "trade_cost", "trade_slippage"
     ]
 
     if trades_df is None or trades_df.empty:
-        logging.info(f"No trades provided. Empty trades CSV file will be created: {trades_csv_file}")
+        logger.info(f"No trades provided. Empty trades CSV file will be created: {trades_csv_file}")
         # Create an empty DataFrame with standard headers for the CSV
         empty_trades_for_csv = pd.DataFrame(columns=standard_trade_columns)
         empty_trades_for_csv.to_csv(trades_csv_file, index=False)
@@ -495,7 +699,7 @@ def plot_returns(
         # Select and reorder to standard columns, dropping any non-standard ones
         trades_df_for_csv = trades_df_for_csv[standard_trade_columns]
         trades_df_for_csv.to_csv(trades_csv_file, index=False)
-        logging.info(f"Trades data saved to CSV: {trades_csv_file}")
+        logger.info(f"Trades data saved to CSV: {trades_csv_file}")
     # --- End: CSV Generation for trades_df ---
 
     dfs_concat = []
@@ -536,7 +740,7 @@ def plot_returns(
     # Prepare trades data for merging into df_final for the plot
     # `processed_trades_for_merge` will be indexed by 'time' and contain standard trade columns (excluding 'time')
     if trades_df is None or trades_df.empty:
-        logging.info("There were no trades in this backtest. Plot will not show trade markers.")
+        logger.info("There were no trades in this backtest. Plot will not show trade markers.")
         # Create a DataFrame with standard trade columns (all NaN) and df_final's index (if any)
         # This ensures df_final gets all standard trade columns for consistent plotting.
         _columns_for_merge = [col for col in standard_trade_columns if col != "time"]
@@ -561,7 +765,7 @@ def plot_returns(
             # Select only the standard columns for merging
             processed_trades_for_merge = processed_trades_for_merge[[col for col in _columns_to_ensure_in_merge if col in processed_trades_for_merge.columns]]
         else:
-            logging.warning("Trades data provided but 'time' column is missing. Cannot merge trades for plotting. Plot will not show trade markers.")
+            logger.warning("Trades data provided but 'time' column is missing. Cannot merge trades for plotting. Plot will not show trade markers.")
             # Fallback to empty trades for merge to avoid errors and ensure consistent columns in df_final
             _columns_for_merge = [col for col in standard_trade_columns if col != "time"]
             if not df_final.index.empty:
@@ -647,81 +851,11 @@ def plot_returns(
     # Buy ticks
     buys = df_final.copy()
     buys[strategy_name] = buys[strategy_name].bfill()
-    buys = buys.loc[df_final["side"] == "buy"]
+    # Include all buy-type sides: buy, buy_to_open, buy_to_cover, buy_to_close
+    buys = buys.loc[df_final["side"].isin(["buy", "buy_to_open", "buy_to_cover", "buy_to_close"])]
 
     def generate_buysell_plotly_text(row):
-        if row["status"] != "canceled" and row["status"] != "new":
-            if row["asset.asset_type"] == "option":
-                return (
-                    row["status"]
-                    + "<br>"
-                    + str(Decimal(row["filled_quantity"]).quantize(Decimal("0.01")).__format__(",f"))
-                    + " "
-                    + row["symbol"]
-                    + " "
-                    + row["asset.right"]
-                    + " Option"
-                    + "<br>"
-                    + "Strike: "
-                    + str(row["asset.strike"])
-                    + "<br>"
-                    + "Expiration: "
-                    + str(row["asset.expiration"])
-                    + "<br>"
-                    + "Price: "
-                    + str(Decimal(row["price"]).quantize(Decimal("0.0001")).__format__(",f"))
-                    + "<br>"
-                    + "Order Type: "
-                    + row["type"]
-                    + "<br>"
-                    + "Amount Transacted: "
-                    + str(
-                        # Round to 2 decimal places and add commas for thousands
-                        (
-                            (Decimal(row["price"]) if row["price"] else 0)
-                            * (Decimal(row["filled_quantity"]) if row["filled_quantity"] else 0)
-                            * (Decimal(row["asset.multiplier"]) if row["asset.multiplier"] else 0)
-                        )
-                        .quantize(Decimal("0.01"))
-                        .__format__(",f")
-                    )
-                    + "<br>"
-                    + "Trade Cost: "
-                    + str(Decimal(row["trade_cost"]).quantize(Decimal("0.01")).__format__(",f"))
-                    + "<br>"
-                )
-            else:
-                return (
-                    row["status"]
-                    + "<br>"
-                    + str(Decimal(row["filled_quantity"]).quantize(Decimal("0.01")).__format__(",f"))
-                    + " "
-                    + row["symbol"]
-                    + "<br>"
-                    + "Price: "
-                    + str(Decimal(row["price"]).quantize(Decimal("0.0001")).__format__(",f"))
-                    + "<br>"
-                    + "Order Type: "
-                    + row["type"]
-                    + "<br>"
-                    + "Amount Transacted: "
-                    + str(
-                        # Round to 2 decimal places and add commas for thousands
-                        (
-                            (Decimal(row["price"]) if row["price"] else 0)
-                            * (Decimal(row["filled_quantity"]) if row["filled_quantity"] else 0)
-                            * (Decimal(row["asset.multiplier"]) if row["asset.multiplier"] else 0)
-                        )
-                        .quantize(Decimal("0.01"))
-                        .__format__(",f")
-                    )
-                    + "<br>"
-                    + "Trade Cost: "
-                    + str(Decimal(row["trade_cost"]).quantize(Decimal("0.01")).__format__(",f"))
-                    + "<br>"
-                )
-        else:
-            return None
+        return _build_trade_marker_tooltip(row)
 
     buy_ticks_df = buys.apply(generate_buysell_plotly_text, axis=1)
 
@@ -759,7 +893,8 @@ def plot_returns(
     # Sell ticks
     sells = df_final.copy()
     sells[strategy_name] = sells[strategy_name].bfill()
-    sells = sells.loc[df_final["side"] == "sell"]
+    # Include all sell-type sides: sell, sell_to_close, sell_short, sell_to_open
+    sells = sells.loc[df_final["side"].isin(["sell", "sell_to_close", "sell_short", "sell_to_open"])]
 
     sells_ticks_df = sells.apply(generate_buysell_plotly_text, axis=1)
 
@@ -829,6 +964,82 @@ def plot_returns(
     fig.write_html(plot_file_html, auto_open=show_plot)
 
 
+def _prepare_tearsheet_returns(strategy_df: pd.DataFrame, benchmark_df: pd.DataFrame):
+    if strategy_df is None or benchmark_df is None:
+        return None
+
+    if strategy_df.empty or benchmark_df.empty:
+        return None
+
+    # PERF/MEMORY: Backtests can carry very wide `strategy_df` frames (positions, orders, debug
+    # columns, etc.). QuantStats only needs the portfolio value series and the benchmark cumprod.
+    # Copying the full frame can spike RSS and has caused production backtests to OOM (exit code -9).
+    try:
+        _strategy_df = strategy_df.loc[:, ["portfolio_value"]].copy()
+    except Exception:
+        return None
+
+    if "symbol_cumprod" in benchmark_df.columns:
+        _benchmark_df = benchmark_df.loc[:, ["symbol_cumprod"]].copy()
+    else:
+        # Maintain backward-compat for benchmark frames that don't include `symbol_cumprod`.
+        _benchmark_df = pd.DataFrame(index=benchmark_df.index)
+        _benchmark_df["symbol_cumprod"] = 1
+
+    _strategy_df.index = pd.to_datetime(_strategy_df.index)
+    _benchmark_df.index = pd.to_datetime(_benchmark_df.index)
+
+    df = pd.merge(_strategy_df, _benchmark_df, left_index=True, right_index=True, how="outer")
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index()
+
+    df["portfolio_value"] = df["portfolio_value"].ffill()
+    df["portfolio_value"] = df["portfolio_value"].bfill()
+
+    if "symbol_cumprod" in df.columns:
+        df["symbol_cumprod"] = df["symbol_cumprod"].ffill()
+        first_symbol = df["symbol_cumprod"].dropna().iloc[0] if not df["symbol_cumprod"].dropna().empty else 1
+    else:
+        first_symbol = 1
+        df["symbol_cumprod"] = 1
+
+    df.loc[df.index[0], "symbol_cumprod"] = 1 if pd.isna(first_symbol) else first_symbol
+
+    # Seed the resample with the true initial equity so that pct_change sees day 0 -> day 1 moves
+    first_strategy_idx = _strategy_df.index.min()
+    if pd.notna(first_strategy_idx):
+        first_strategy_idx = pd.to_datetime(first_strategy_idx)
+        initial_equity = _strategy_df.loc[first_strategy_idx, "portfolio_value"]
+        anchor_idx = first_strategy_idx.normalize() - pd.Timedelta(microseconds=1)
+        anchor_row = pd.DataFrame(
+            {
+                "portfolio_value": [initial_equity],
+                "symbol_cumprod": [first_symbol if not pd.isna(first_symbol) else 1],
+            },
+            index=[anchor_idx],
+        )
+        df = pd.concat([anchor_row, df], axis=0, sort=True)
+        df = df[~df.index.duplicated(keep="last")]
+
+    # Resample to daily cadence and forward-fill non-trading days.
+    # NOTE: Use forward-fill (not backfill) so weekends/holidays carry the last known value.
+    # Backfilling would leak future values into prior days and can distort volatility-matched charts.
+    df = df.resample("D").last()
+    df["portfolio_value"] = df["portfolio_value"].ffill()
+    df["symbol_cumprod"] = df["symbol_cumprod"].ffill()
+    df["strategy"] = df["portfolio_value"].pct_change(fill_method=None).fillna(0)
+    df["benchmark"] = df["symbol_cumprod"].pct_change(fill_method=None).fillna(0)
+
+    df_final = df.loc[:, ["strategy", "benchmark"]]
+    df_final.index = pd.to_datetime(df_final.index)
+    df_final.index = df_final.index.tz_localize(None)
+
+    if df_final.empty or df_final["benchmark"].isnull().all() or df_final["strategy"].isnull().all():
+        return None
+
+    return df_final
+
+
 def create_tearsheet(
     strategy_df: pd.DataFrame,
     strat_name: str,
@@ -839,53 +1050,45 @@ def create_tearsheet(
     save_tearsheet: bool,
     risk_free_rate: float,
     strategy_parameters: dict = None,
+    lumibot_version: str | None = None,
+    backtesting_data_source: str | None = None,
+    backtesting_data_sources: str | None = None,
+    backtest_time_seconds: float | None = None,
 ):
     # If show tearsheet is False, then we don't want to open the tearsheet in the browser
     # IMS create the tearsheet even if we are not showinbg it
     if not save_tearsheet:
-        logging.info("save_tearsheet is False, not creating the tearsheet file.")
+        logger.info("save_tearsheet is False, not creating the tearsheet file.")
         return
 
-    logging.info("\nCreating tearsheet...")
+    logger.info("\nCreating tearsheet...")
 
-    # Check if df1 or df2 are empty and return if they are
-    if strategy_df is None or benchmark_df is None or strategy_df.empty or benchmark_df.empty:
-        logging.error("No data to create tearsheet, skipping")
+    df_final = _prepare_tearsheet_returns(strategy_df, benchmark_df)
+
+    if df_final is None:
+        logger.warning("No data to create tearsheet, skipping")
         return
 
-    _strategy_df = strategy_df.copy()
-    _benchmark_df = benchmark_df.copy()
-
-    # Convert _strategy_df and _benchmark_df indexes to a date object instead of datetime
-    _strategy_df.index = pd.to_datetime(_strategy_df.index)
-
-    # Merge the strategy and benchmark dataframes on the index column
-    df = pd.merge(_strategy_df, _benchmark_df, left_index=True, right_index=True, how="outer")
-
-    df.index = pd.to_datetime(df.index)
-    df["portfolio_value"] = df["portfolio_value"].ffill()
-
-    # If the portfolio_value is NaN, backfill it because sometimes the benchmark starts before the strategy
-    df["portfolio_value"] = df["portfolio_value"].bfill()
-
-    df["symbol_cumprod"] = df["symbol_cumprod"].ffill()
-    df.loc[df.index[0], "symbol_cumprod"] = 1
-
-    df = df.resample("D").last()
-    df["strategy"] = df["portfolio_value"].bfill().pct_change(fill_method=None).fillna(0)
-    df["benchmark"] = df["symbol_cumprod"].bfill().pct_change(fill_method=None).fillna(0)
-
-    # Merge the strategy and benchmark columns into a new dataframe called df_final
-    df_final = df.loc[:, ["strategy", "benchmark"]]
-
-    # df_final = df.loc[:, ["strategy", "benchmark"]]
-    df_final.index = pd.to_datetime(df_final.index)
-    df_final.index = df_final.index.tz_localize(None)
-
-    # Check if df_final is empty and return if it is
-    if df_final.empty or df_final["benchmark"].isnull().all() or df_final["strategy"].isnull().all():
-        logging.warning("No data to create tearsheet, skipping")
-        return
+    def _write_placeholder_tearsheet(reason: str) -> None:
+        """Write a small HTML file explaining why QuantStats was skipped/failed."""
+        try:
+            placeholder = f"""<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>{strat_name} tearsheet unavailable</title>
+  </head>
+  <body>
+    <h1>{strat_name}</h1>
+    <p><strong>Tearsheet not generated.</strong></p>
+    <p>{reason}</p>
+  </body>
+</html>
+"""
+            with open(str(tearsheet_file), "w", encoding="utf-8") as f:
+                f.write(placeholder)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Failed to write placeholder tearsheet to %s: %s", tearsheet_file, exc)
 
     # Uncomment for debugging
     # _df1.to_csv(f"df1.csv")
@@ -895,32 +1098,55 @@ def create_tearsheet(
 
     bm_text = f"Compared to {benchmark_asset}" if benchmark_asset else ""
     title = f"{strat_name} {bm_text}"
-    
+
+    # QuantStats (via seaborn/scipy) can raise (e.g., LinAlgError) when the return series is
+    # degenerate, such as no trades and a flat portfolio value. In these cases we must not
+    # crash the backtest; write a placeholder tearsheet instead.
+    strategy_returns = df_final["strategy"].dropna()
+    benchmark_returns = df_final["benchmark"].dropna()
+    if strategy_returns.empty or benchmark_returns.empty or strategy_returns.nunique() <= 1 or benchmark_returns.nunique() <= 1:
+        logger.warning(
+            "Not enough return variation to generate QuantStats tearsheet (strategy unique=%d, benchmark unique=%d); writing placeholder.",
+            int(strategy_returns.nunique()) if not strategy_returns.empty else 0,
+            int(benchmark_returns.nunique()) if not benchmark_returns.empty else 0,
+        )
+        _write_placeholder_tearsheet("Return series is flat/degenerate (often caused by zero trades).")
+        return
+
     '''
     # Check if all the values are equal to 0
     if df_final["benchmark"].sum() == 0:
-        logging.error("Not enough data to create a tearsheet, at least 2 days of data are required. Skipping")
+        logger.error("Not enough data to create a tearsheet, at least 2 days of data are required. Skipping")
         return
 
     # Check if all the values are equal to 0
     if df_final["strategy"].sum() == 0:
-        logging.error("Not enough data to create a tearsheet, at least 2 days of data are required. Skipping")
+        logger.error("Not enough data to create a tearsheet, at least 2 days of data are required. Skipping")
         return
     '''
     # Set the name of the benchmark column so that quantstats can use it in the report
     df_final["benchmark"].name = str(benchmark_asset)
 
     # Run quantstats reports surpressing any logs because it can be noisy for no reason
-    with open(os.devnull, "w") as f, contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
-        result = qs.reports.html(
-            df_final["strategy"],
-            df_final["benchmark"],
-            title=title,
-            output=tearsheet_file,
-            download_filename=tearsheet_file,  # Consider if you need a different name for clarity
-            rf=risk_free_rate,
-            parameters=strategy_parameters,
-        )
+    try:
+        with open(os.devnull, "w") as f, contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
+            result = qs.reports.html(
+                df_final["strategy"],
+                df_final["benchmark"],
+                title=title,
+                output=tearsheet_file,
+                download_filename=tearsheet_file,  # Consider if you need a different name for clarity
+                rf=risk_free_rate,
+                parameters=strategy_parameters,
+                lumibot_version=lumibot_version,
+                backtesting_data_source=backtesting_data_source,
+                backtesting_data_sources=backtesting_data_sources,
+                backtest_time_seconds=backtest_time_seconds,
+            )
+    except Exception as exc:
+        logger.warning("QuantStats tearsheet generation failed: %s", exc)
+        _write_placeholder_tearsheet(f"QuantStats error: {exc}")
+        return
 
     if show_tearsheet:
         url = "file://" + os.path.abspath(str(tearsheet_file))
@@ -933,7 +1159,7 @@ def get_risk_free_rate(dt: datetime = None):
     try:
         result = yh.get_risk_free_rate(dt=dt)
     except Exception as e:
-        logging.error(f"Error getting the risk free rate: {e}")
+        logger.error(f"Error getting the risk free rate: {e}")
         result = 0
 
     return result

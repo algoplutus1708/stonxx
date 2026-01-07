@@ -1,8 +1,9 @@
-import os
 import logging
+import json
+import os
 import time
+import threading
 from abc import ABC, abstractmethod
-from asyncio.log import logger
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -15,8 +16,14 @@ import pandas_market_calendars as mcal
 from dateutil import tz
 from termcolor import colored
 
+from lumibot.tools.lumibot_logger import get_logger
+
+logger = get_logger(__name__)
+
+from lumibot.tools.lumibot_logger import get_logger, get_strategy_logger
 from ..data_sources import DataSource
 from ..entities import Asset, Order, Position, Quote
+from ..entities.chains import normalize_option_chains
 from ..trading_builtins import SafeList
 
 DEFAULT_CLEANUP_CONFIG = {
@@ -51,22 +58,6 @@ DEFAULT_CLEANUP_CONFIG = {
 class LumibotBrokerAPIError(Exception):
     pass
 
-
-class CustomLoggerAdapter(logging.LoggerAdapter):
-    def process(self, msg, kwargs):
-        # Check if the level is enabled to avoid formatting costs if not necessary
-        if self.logger.isEnabledFor(kwargs.get('level', logging.INFO)):
-            # Lazy formatting of the message
-            return f'[{self.extra["strategy_name"]}] {msg}', kwargs
-        else:
-            return msg, kwargs
-
-    def update_strategy_name(self, new_strategy_name):
-        self.extra['strategy_name'] = new_strategy_name
-        # Pre-format part of the log message that's static or changes infrequently
-        self.formatted_prefix = f'[{new_strategy_name}]'
-
-
 class Broker(ABC):
     # Metainfo
     IS_BACKTESTING_BROKER = False
@@ -81,12 +72,17 @@ class Broker(ABC):
     ERROR_ORDER = "error"
     PLACEHOLDER_ORDER = "placeholder"
 
+    @staticmethod
+    def _truthy_env(value: str | None) -> bool:
+        return (value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
     def __init__(self, name="", connect_stream=True, data_source: DataSource = None, option_source: DataSource = None,
                  config=None, max_workers=20, extended_trading_minutes=0, cleanup_config=None):
         """Broker constructor"""
         # Shared Variables between threads
         self.name = name
         self._lock = RLock()
+        self._stop_event = threading.Event()  # Add stop event for clean shutdown
         self._unprocessed_orders = SafeList(self._lock)
         self._placeholder_orders = SafeList(self._lock)
         self._new_orders = SafeList(self._lock)
@@ -97,7 +93,12 @@ class Broker(ABC):
         self._filled_positions = SafeList(self._lock)
         self._subscribers = SafeList(self._lock)
         self._is_stream_subscribed = False
-        self._trade_event_log_df = pd.DataFrame()
+        # PERF: appending to a pandas DataFrame with concat on every trade event is extremely slow
+        # (option-heavy intraday backtests can generate 100k+ events). Store rows in a Python list
+        # and materialize a DataFrame lazily when needed.
+        self._trade_event_log_enabled = True
+        self._trade_event_log_rows = []
+        self._trade_event_log_df_cache = pd.DataFrame()
         self._hold_trade_events = False
         self._held_trades = []
         self._config = config
@@ -120,13 +121,25 @@ class Broker(ABC):
         self._last_cleanup_time = None
 
         # Create an adapter with 'strategy_name' set to the instance's name
-        self.logger = CustomLoggerAdapter(logger, {'strategy_name': "unknown"})
+        self.logger = get_strategy_logger(__name__, "unknown")
 
         # --- Market calendar setting ---
         # StrategyExecutor relies on broker.market to decide whether trading is
         # 24/7 or should follow an exchange calendar.  Derive it from config or
         # env, else default to "NASDAQ" which is compatible with pandas-market-calendars.
         self.market = (config.get("MARKET") if config else None) or os.environ.get("MARKET") or "NASDAQ"
+        # Auto-adjust market for certain known non-equity data sources when still at generic default.
+        try:
+            if self.market in ("NASDAQ", "NYSE", "stock") and self.data_source is not None:
+                ds_name = self.data_source.__class__.__name__
+                if ds_name in ("ProjectXData", "TradovateData"):
+                    self.market = "us_futures"
+                    logger.debug(f"Auto-set broker.market to 'us_futures' for data source {ds_name}")
+                elif ds_name in ("CcxtData", "CcxtBacktestingData", "CCXTData"):
+                    self.market = "24/7"
+                    logger.debug(f"Auto-set broker.market to '24/7' for data source {ds_name}")
+        except Exception as _auto_mkt_exc:
+            logger.debug(f"Auto market inference skipped: {_auto_mkt_exc}")
 
         if self.data_source is None:
             raise ValueError("Broker must have a data source")
@@ -142,6 +155,27 @@ class Broker(ABC):
             self.stream = self._get_stream_object()
             if self.stream is not None:
                 self._launch_stream()
+
+        # Trading calendar placeholder; StrategyExecutor will initialize.
+        self._trading_days = None
+
+    # --- Trading calendar initialization ---
+    def initialize_market_calendars(self, trading_days_df):
+        """Initialize broker trading calendar from a DataFrame.
+
+        Sorts by market_close and sets index for fast lookups; stores
+        DataFrame on the broker as `_trading_days`.
+        """
+        if trading_days_df is None:
+            self._trading_days = None
+            return
+        try:
+            df = trading_days_df.sort_values('market_close').copy()
+            df.set_index('market_close', inplace=True)
+            self._trading_days = df
+        except Exception:
+            # If trading_days_df is already indexed/sorted, accept as-is
+            self._trading_days = trading_days_df
 
     def _update_attributes_from_config(self, config):
         value_dict = config
@@ -291,6 +325,44 @@ class Broker(ABC):
             self.logger.info("Manual cleanup completed successfully")
         except Exception as e:
             self.logger.error(f"Manual cleanup failed: {e}")
+
+    def cleanup_streams(self):
+        """Clean up stream threads properly to prevent segmentation faults"""
+        # Set stop event to signal all threads to stop
+        if hasattr(self, '_stop_event'):
+            self._stop_event.set()
+
+        # Stop the stream
+        if hasattr(self, 'stream') and self.stream:
+            try:
+                self.stream.stop()
+            except Exception as e:
+                if hasattr(self, 'logger'):
+                    self.logger.warning(f"Error stopping stream: {e}")
+
+        # Clean up the orders queue
+        if hasattr(self, '_orders_queue'):
+            try:
+                # Clear the queue to unblock any waiting threads
+                while not self._orders_queue.empty():
+                    self._orders_queue.get_nowait()
+                    self._orders_queue.task_done()
+            except:
+                pass
+
+        # Wait for threads to finish
+        if hasattr(self, '_orders_thread') and self._orders_thread:
+            try:
+                self._orders_thread.join(timeout=1)
+            except:
+                pass
+
+    def __del__(self):
+        """Cleanup when broker is destroyed"""
+        try:
+            self.cleanup_streams()
+        except:
+            pass  # Suppress any errors during cleanup
 
     # =================================================================================
     # ================================ Required Implementations========================
@@ -579,7 +651,56 @@ class Broker(ABC):
                            chains['Chains']['CALL'][exp_date] = [strike1, strike2, ...]
                          Expiration Date Format: 2023-07-31
         """
-        return self.data_source.get_chains(asset)
+        # PERF: Strategies can call `get_chains()` hundreds of times per trading day. Normalizing the
+        # chain (copying strike maps + sorting) is expensive and, in backtests, the chain for a given
+        # (asset, date, constraints) is immutable. Cache the normalized result within a backtest to
+        # avoid repeating that work.
+        cache_key = None
+        if getattr(self, "IS_BACKTESTING_BROKER", False):
+            try:
+                cache_date = self.data_source.get_datetime().date()
+            except Exception:
+                cache_date = None
+
+            constraints = getattr(self.data_source, "_chain_constraints", None) or {}
+            try:
+                constraints_key = json.dumps(constraints, sort_keys=True, default=str)
+            except Exception:
+                constraints_key = str(constraints)
+
+            cache_key = (
+                getattr(asset, "symbol", str(asset)),
+                str(getattr(asset, "asset_type", "")),
+                cache_date,
+                constraints_key,
+            )
+
+            if getattr(self, "_chains_cache_date", None) != cache_date:
+                self._chains_cache_date = cache_date
+                self._chains_cache = {}
+
+            cached = getattr(self, "_chains_cache", {}).get(cache_key)
+            if cached is not None:
+                return cached
+
+        raw_chains = self.data_source.get_chains(asset)
+        normalized_chains = normalize_option_chains(raw_chains)
+
+        if not normalized_chains:
+            logger.warning(
+                colored(
+                    f"Option chains unavailable for {getattr(asset, 'symbol', asset)}; continuing without options data.",
+                    "yellow",
+                )
+            )
+
+        if cache_key is not None:
+            try:
+                self._chains_cache[cache_key] = normalized_chains
+            except Exception:
+                pass
+
+        return normalized_chains
 
     def get_chain(self, chains, exchange="SMART") -> dict:
         """Returns option chain for a particular exchange.
@@ -713,8 +834,8 @@ class Broker(ABC):
 
         Returns
         -------
-        list of str
-            Sorted list of dates in the form of `2022-10-13`.
+        list of datetime.date
+            Sorted list of option expiry dates.
         """
         return sorted(set(chains["Chains"]["CALL"].keys()) | set(chains["Chains"]["PUT"].keys()))
 
@@ -739,33 +860,50 @@ class Broker(ABC):
         self._orders_thread.start()
 
     def _wait_for_orders(self):
-        while True:
-            # at first, block maybe a list of orders or just one order
-            block = self._orders_queue.get()
-            if isinstance(block, Order):
-                result = [self._submit_order(block)]
-            else:
-                result = self._submit_orders(block)
+        import queue as queue_module
+        while not self._stop_event.is_set():
+            try:
+                # Use timeout to periodically check stop event
+                block = self._orders_queue.get(timeout=0.1)
+            except queue_module.Empty:
+                continue
+            except Exception as e:
+                if self._stop_event.is_set():
+                    break
+                self.logger.error(f"Error in _wait_for_orders: {e}")
+                continue
 
-            for order in result:
-                if order is None:
-                    continue
+            try:
+                if isinstance(block, Order):
+                    result = [self._submit_order(block)]
+                else:
+                    result = self._submit_orders(block)
 
-                if order.was_transmitted():
-                    flat_orders = self._flatten_order(order)
-                    for flat_order in flat_orders:
-                        self.logger.info(
-                            colored(
-                                f"Order {flat_order} was sent to broker {self.name}",
-                                color="green",
-                            )
-                        )
-                        self._unprocessed_orders.append(flat_order)
+                for order in result:
+                    if order is None:
+                        continue
 
-            # Trigger periodic cleanup after processing orders
-            self._trigger_periodic_cleanup()
+                    if order.was_transmitted():
+                        flat_orders = self._flatten_order(order)
+                        for flat_order in flat_orders:
+                            if self.logger.isEnabledFor(logging.INFO):
+                                self.logger.info(
+                                    colored(
+                                        f"Order {flat_order} was sent to broker {self.name}",
+                                        color="green",
+                                    )
+                                )
+                            self._unprocessed_orders.append(flat_order)
 
-            self._orders_queue.task_done()
+                # Trigger periodic cleanup after processing orders
+                self._trigger_periodic_cleanup()
+
+                self._orders_queue.task_done()
+            except Exception as e:
+                if self._stop_event.is_set():
+                    break
+                self.logger.error(f"Error processing order: {e}")
+                self._orders_queue.task_done()
 
     # =========Internal functions==============
 
@@ -838,11 +976,15 @@ class Broker(ABC):
         if position is None:
             # Create new position for this given strategy and asset
             position = order.to_position(quantity)
+            if position is None:
+                # Order is invalid, skip processing
+                logger.error(f"Skipping filled order processing - could not create position from order {order.identifier}")
+                return
         else:
             # Add the order to the already existing position
             position.add_order(order)  # Don't update quantity here, it's handled by querying broker
 
-        if order.asset.asset_type == "crypto":
+        if order.asset and order.asset.asset_type == "crypto":
             self._process_crypto_quote(order, quantity, price)
 
         return position
@@ -875,8 +1017,27 @@ class Broker(ABC):
 
         position = self.get_tracked_position(order.strategy, order.asset)
         if position is not None:
-            # Add the order to the already existing position
-            position.add_order(order)  # Don't update quantity here, it's handled by querying broker
+            # Live brokers will update positions via polling, but in backtesting there is no broker-side
+            # reconciliation. Cash settlement must therefore adjust the position quantity immediately so
+            # expired contracts don't remain open forever (which can cause long backtests to "freeze"
+            # due to exploding open positions).
+            if getattr(self, "IS_BACKTESTING_BROKER", False):
+                try:
+                    position.add_order(order, Decimal(str(quantity)))
+                except Exception:
+                    # Fallback: still record the settlement order even if quantity normalization failed.
+                    position.add_order(order)
+
+                if position.quantity == 0:
+                    try:
+                        self._filled_positions.remove(position)
+                    except Exception:
+                        # SafeList/remove semantics vary by broker; leaving a 0-qty position is acceptable.
+                        pass
+            else:
+                # Add the order to the already existing position; don't update quantity here because it's
+                # handled by querying broker positions in live trading.
+                position.add_order(order)
 
     def _process_crypto_quote(self, order, quantity, price):
         """Used to process the quote side of a crypto trade."""
@@ -885,9 +1046,9 @@ class Broker(ABC):
             # Try to use the limit price if available, otherwise skip processing
             if hasattr(order, 'limit_price') and order.limit_price is not None:
                 price = order.limit_price
-                logging.debug(f"Using limit_price {price} for crypto quote processing since avg_fill_price was None for order {order.identifier}")
+                logger.debug(f"Using limit_price {price} for crypto quote processing since avg_fill_price was None for order {order.identifier}")
             else:
-                logging.debug(f"Skipping crypto quote processing for order {order.identifier} - both avg_fill_price and limit_price are None")
+                logger.debug(f"Skipping crypto quote processing for order {order.identifier} - both avg_fill_price and limit_price are None")
                 return
 
         quote_quantity = Decimal(quantity) * Decimal(price)
@@ -960,6 +1121,72 @@ class Broker(ABC):
     def market_open_time(self):
         return self.utc_to_local(self.market_hours(close=False))
 
+    def _is_continuous_market(self, market_name):
+        """
+        Determine if a market trades continuously (24/7 or near-24/7) by checking its trading schedule.
+        
+        This method uses pandas_market_calendars to check actual trading hours and caches results
+        to avoid expensive repeated lookups.
+        
+        Args:
+            market_name (str): Name of the market (e.g., 'NYSE', 'us_futures', '24/7')
+            
+        Returns:
+            bool: True if market trades continuously (>=20 hours per day), False otherwise
+        """
+
+        if not hasattr(self, '_market_type_cache'):
+            self._market_type_cache = {}
+            
+        if market_name in self._market_type_cache:
+            result = self._market_type_cache[market_name]
+            
+            return result
+            
+        try:
+            # Special cases that are definitely continuous
+            if market_name == '24/7':
+                self._market_type_cache[market_name] = True
+                
+                return True
+                
+            # Get market calendar
+            import pandas as pd
+            import pandas_market_calendars as mcal
+            cal = mcal.get_calendar(market_name)
+            
+            # Test with a recent Monday (typical trading day)
+            test_date = pd.Timestamp('2025-01-13', tz='UTC')  # Monday
+            schedule = cal.schedule(start_date=test_date, end_date=test_date)
+            
+            if schedule.empty:
+                # No trading on this date, assume it's not continuous
+                self._market_type_cache[market_name] = False
+                
+                return False
+                
+            # Calculate trading hours duration
+            market_open = schedule.iloc[0, 0]
+            market_close = schedule.iloc[0, 1]
+            duration_hours = (market_close - market_open).total_seconds() / 3600
+            
+            # Consider markets with 20+ hours per day as continuous
+            # This catches futures markets that trade ~22-24 hours
+            is_continuous = duration_hours >= 20.0
+            
+            self._market_type_cache[market_name] = is_continuous
+            
+            return is_continuous
+            
+        except Exception as e:
+            # If we can't determine market type, default to non-continuous for safety
+            # Log the error for debugging
+            
+            if hasattr(self, 'logger'):
+                self.logger.warning(f'Could not determine market type for {market_name}: {e}')
+            self._market_type_cache[market_name] = False
+            return False
+
     def is_market_open(self):
         """Determines if the market is open.
 
@@ -977,13 +1204,44 @@ class Broker(ABC):
         >>> self.is_market_open()
         True
         """
-        open_time = self.utc_to_local(self.market_hours(close=False))
-        close_time = self.utc_to_local(self.market_hours(close=True))
 
-        current_time = datetime.now().astimezone(tz=tz.tzlocal())
-        if self.market == "24/7":
+        # Handle 24/7 markets immediately
+        if self.market == '24/7':
+            
             return True
-        return (current_time >= open_time) and (close_time >= current_time)
+            
+        # Check if this is a continuous market (futures, forex, crypto)
+        if self._is_continuous_market(self.market):
+            
+            return True
+            
+        current_time = datetime.now().astimezone(tz=tz.tzlocal())
+
+        # For ANY market, check both today's and tomorrow's sessions since trading sessions 
+        # can span multiple calendar days (futures: 6pm Thu -> 6pm Fri, forex: Sun 5pm -> Fri 5pm, 
+        # crypto sessions, international markets, etc.)
+        
+        # Check today's session
+        try:
+            open_time_today = self.utc_to_local(self.market_hours(close=False, next=False))
+            close_time_today = self.utc_to_local(self.market_hours(close=True, next=False))
+            
+            if (current_time >= open_time_today) and (close_time_today >= current_time):
+                return True
+        except:
+            pass  # Today might not have a session
+        
+        # Check tomorrow's session (which might have started today)
+        try:
+            open_time_tomorrow = self.utc_to_local(self.market_hours(close=False, next=True))
+            close_time_tomorrow = self.utc_to_local(self.market_hours(close=True, next=True))
+            
+            if (current_time >= open_time_tomorrow) and (close_time_tomorrow >= current_time):
+                return True
+        except:
+            pass  # Tomorrow might not have a session
+        
+        return False
 
     def get_time_to_open(self):
         """Return the remaining time for the market to open in seconds"""
@@ -1076,6 +1334,37 @@ class Broker(ABC):
                 result.append(order)
         return result
 
+    def get_active_tracked_orders(self, strategy=None, asset=None) -> list[Order]:
+        """Return only active (open) tracked orders for a strategy/asset.
+
+        This is intentionally faster than `get_tracked_orders()` because it only scans
+        the internal lists that can contain active orders (unprocessed/new/partially-filled
+        plus placeholders), avoiding the much larger filled/canceled/error histories.
+        """
+        # Allow filtering by Strategy instance or by name
+        if strategy is not None and not isinstance(strategy, str):
+            strategy_name = getattr(strategy, "name", getattr(strategy, "_name", None))
+        else:
+            strategy_name = strategy
+
+        active_candidates = (
+            self._unprocessed_orders.get_list()
+            + self._new_orders.get_list()
+            + self._partially_filled_orders.get_list()
+            + self._placeholder_orders.get_list()
+        )
+
+        result: list[Order] = []
+        for order in active_candidates:
+            if not order.is_active():
+                continue
+            if strategy_name is not None and order.strategy != strategy_name:
+                continue
+            if asset is not None and order.asset != asset:
+                continue
+            result.append(order)
+        return result
+
     def get_all_orders(self) -> list[Order]:
         """get all tracked and completed orders"""
         orders = self._tracked_orders
@@ -1132,6 +1421,8 @@ class Broker(ABC):
                 if order is None:
                     continue
 
+                # this seems very broker specific by assuming "leg" is how they package multileg orders
+                # it should be removed if the broker specific _parse_broker_order() function handles multileg orders
                 # Check if it is a multileg order and Parse the legs
                 if isinstance(broker_order, dict) and "leg" in broker_order and isinstance(broker_order["leg"], list):
                     parsed_legs = []
@@ -1185,6 +1476,10 @@ class Broker(ABC):
         if hasattr(self, '_submit_orders'):
             return self._submit_orders(orders, **kwargs)
         else:
+            #if kwargs indicates multileg orders with a limit price, and broker does not support it, we should error out instead of submitting legs individually
+            if kwargs.get('is_multileg') and kwargs.get('order_type') == Order.OrderType.LIMIT:
+                raise NotImplementedError("Multileg limit orders are not supported by this broker")
+
             with ThreadPoolExecutor(
                 max_workers=self.max_workers,
                 thread_name_prefix=f"{self.name}_submitting_orders",
@@ -1223,9 +1518,38 @@ class Broker(ABC):
             for order in orders:
                 tasks.append(executor.submit(self.cancel_order, order))
 
-    def cancel_open_orders(self, strategy):
-        """cancel all open orders for a given strategy"""
-        orders = [o for o in self.get_tracked_orders(strategy) if o.is_active()]
+    def cancel_open_orders(self, strategy, orders: list[Order] | None = None):
+        """Cancel all open orders for a given strategy.
+
+        Parameters
+        ----------
+        strategy : str
+            Strategy name whose orders should be canceled.
+        orders : list[Order] | None
+            Optional pre-filtered orders list. When provided, the broker
+            skips re-fetching tracked orders and cancels the supplied
+            active orders immediately. If None, the broker will gather
+            the active orders itself.
+        """
+        if orders is None:
+            orders = [o for o in self.get_tracked_orders(strategy) if o.is_active()]
+        else:
+            orders = [o for o in orders if o.is_active()]
+        if not orders:
+            self.logger.debug("cancel_open_orders(strategy=%s) -> no active orders", strategy)
+            return []
+        order_ids = [
+            getattr(order, "identifier", None)
+            or getattr(order, "id", None)
+            or getattr(order, "order_id", None)
+            for order in orders
+        ]
+        self.logger.debug(
+            "cancel_open_orders(strategy=%s) -> active=%d ids=%s",
+            strategy,
+            len(orders),
+            order_ids,
+        )
         self.cancel_orders(orders)
 
     def wait_orders_clear(self, strategy, max_loop=5):
@@ -1298,10 +1622,31 @@ class Broker(ABC):
         """
         pos = self.get_tracked_position(strategy_name, asset)
         if pos and pos.quantity != 0:
+            self.logger.info(
+                "close_position(strategy=%s, asset=%s, fraction=%s) -> qty=%s",
+                strategy_name,
+                getattr(asset, "symbol", asset),
+                fraction,
+                pos.quantity,
+            )
             order = pos.get_selling_order(quote_asset=self.quote_assets and next(iter(self.quote_assets)))
             if fraction != 1.00:
                 order.quantity = order.quantity * fraction
+            order_id = getattr(order, "identifier", None) or getattr(order, "id", None) or getattr(order, "order_id", None)
+            self.logger.info(
+                "close_position(strategy=%s) submitting order %s qty=%s side=%s type=%s",
+                strategy_name,
+                order_id,
+                getattr(order, "quantity", None),
+                getattr(order, "side", None),
+                getattr(order, "order_type", None),
+            )
             return self.submit_order(order)
+        self.logger.info(
+            "close_position(strategy=%s, asset=%s) -> no tracked position or zero quantity",
+            strategy_name,
+            getattr(asset, "symbol", asset),
+        )
         return None
 
     # =========Subscribers/Strategies functions==============
@@ -1322,7 +1667,8 @@ class Broker(ABC):
         """notify relevant subscriber/strategy about
         new order event"""
 
-        self.logger.info(colored(f"New order was created: {order}", color="green"))
+        if self.logger.isEnabledFor(logging.INFO):
+            self.logger.info(colored(f"New order was created: {order}", color="green"))
 
         payload = dict(order=order)
         subscriber = self._get_subscriber(order.strategy)
@@ -1333,7 +1679,8 @@ class Broker(ABC):
         """notify relevant subscriber/strategy about
         canceled order event"""
 
-        self.logger.info(colored(f"Order was canceled: {order}", color="green"))
+        if self.logger.isEnabledFor(logging.INFO):
+            self.logger.info(colored(f"Order was canceled: {order}", color="green"))
 
         payload = dict(order=order)
         subscriber = self._get_subscriber(order.strategy)
@@ -1344,7 +1691,8 @@ class Broker(ABC):
         """notify relevant subscriber/strategy about
         partially filled order event"""
 
-        self.logger.info(colored(f"Order was partially filled: {order}", color="green"))
+        if self.logger.isEnabledFor(logging.INFO):
+            self.logger.info(colored(f"Order was partially filled: {order}", color="green"))
 
         payload = dict(
             position=position,
@@ -1363,7 +1711,8 @@ class Broker(ABC):
         """notify relevant subscriber/strategy about
         filled order event"""
 
-        self.logger.info(colored(f"Order was filled: {order}", color="green"))
+        if self.logger.isEnabledFor(logging.INFO):
+            self.logger.info(colored(f"Order was filled: {order}", color="green"))
 
         payload = dict(
             position=position,
@@ -1383,6 +1732,29 @@ class Broker(ABC):
     def _stream_established(self):
         self._is_stream_subscribed = True
 
+    @property
+    def _trade_event_log_df(self) -> pd.DataFrame:
+        """Trade event log as a DataFrame (materialized lazily for performance)."""
+        if not getattr(self, "_trade_event_log_enabled", True):
+            return getattr(self, "_trade_event_log_df_cache", pd.DataFrame())
+        cache = getattr(self, "_trade_event_log_df_cache", None)
+        if cache is None:
+            rows = getattr(self, "_trade_event_log_rows", [])
+            cache = pd.DataFrame(rows) if rows else pd.DataFrame()
+            self._trade_event_log_df_cache = cache
+        return cache
+
+    @_trade_event_log_df.setter
+    def _trade_event_log_df(self, value) -> None:
+        # Preserve legacy test behavior where callers set this to None to disable logging.
+        if value is None:
+            self._trade_event_log_enabled = False
+            self._trade_event_log_rows = []
+            self._trade_event_log_df_cache = pd.DataFrame()
+            return
+        self._trade_event_log_enabled = True
+        self._trade_event_log_df_cache = value
+
     def process_held_trades(self):
         """Processes any held trade notifications."""
         while len(self._held_trades) > 0:
@@ -1395,12 +1767,12 @@ class Broker(ABC):
             filled_quantity = th[3]
             multiplier = th[4]
 
-            # Log that the trade event was received
-            self.logger.info(
-                f"Processing held trade event. Trade event received for stored_order: {stored_order}, "
-                f"type_event: {type_event}, ID: {stored_order.identifier}, price: {price}, "
-                f"filled_quantity: {filled_quantity}, multiplier: {multiplier}"
-            )
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"Processing held trade event. Trade event received for stored_order: {stored_order}, "
+                    f"type_event: {type_event}, ID: {stored_order.identifier}, price: {price}, "
+                    f"filled_quantity: {filled_quantity}, multiplier: {multiplier}"
+                )
 
             # Process the trade event
             self._process_trade_event(
@@ -1414,19 +1786,19 @@ class Broker(ABC):
     def _process_trade_event(self, stored_order, type_event, price=None, filled_quantity=None, multiplier=1, error=None): # Add error parameter
         """process an occurred trading event and update the
         corresponding order"""
-        # Log that the trade event was received
-        self.logger.info(
-            f"Processing trade event. Trade event received for {stored_order.strategy} strategy: {type_event} "
-            f"{stored_order.symbol} ID={stored_order.identifier}, processed by broker {self.name}"
-        )
+        if self.logger.isEnabledFor(logging.INFO):
+            self.logger.info(
+                f"Processing trade event. Trade event received for {stored_order.strategy} strategy: {type_event} "
+                f"{stored_order.symbol} ID={stored_order.identifier}, processed by broker {self.name}"
+            )
 
         if self._hold_trade_events and not self.IS_BACKTESTING_BROKER:
-            # Log that the trade event was held
-            self.logger.info(
-                f"Trade event held for {stored_order.strategy} strategy: {type_event} {stored_order.symbol} "
-                f"ID={stored_order.identifier}, processed by broker {self.name}. "
-                f"self._hold_trade_events is {self._hold_trade_events}"
-            )
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(
+                    f"Trade event held for {stored_order.strategy} strategy: {type_event} {stored_order.symbol} "
+                    f"ID={stored_order.identifier}, processed by broker {self.name}. "
+                    f"self._hold_trade_events is {self._hold_trade_events}"
+                )
 
             # Hold the trade event
             self._held_trades.append(
@@ -1486,7 +1858,8 @@ class Broker(ABC):
                     subscriber.add_event(subscriber.ERROR_ORDER, payload)
         elif Order.is_equivalent_status(type_event, self.MODIFIED_ORDER):
             # TODO: Implement modification logic and notification if needed
-            self.logger.info(colored(f"Order was modified: {stored_order}", color="yellow"))
+            if self.logger.isEnabledFor(logging.INFO):
+                self.logger.info(colored(f"Order was modified: {stored_order}", color="yellow"))
             # Update raw data if modification response is available (might need adjustment)
             # stored_order.update_raw(modification_response_data)
             # self._on_modified_order(stored_order) # Need to implement _on_modified_order
@@ -1519,6 +1892,7 @@ class Broker(ABC):
             "filled_quantity": filled_quantity,
             "multiplier": multiplier,
             "trade_cost": stored_order.trade_cost,
+            "trade_slippage": getattr(stored_order, "trade_slippage", None),
             "time_in_force": stored_order.time_in_force,
             "asset.right": stored_order.asset.right if stored_order.asset is not None else None,
             "asset.strike": stored_order.asset.strike if stored_order.asset is not None else None,
@@ -1526,14 +1900,35 @@ class Broker(ABC):
             "asset.expiration": stored_order.asset.expiration if stored_order.asset is not None else None,
             "asset.asset_type": stored_order.asset.asset_type if stored_order.asset is not None else None,
         }
-        # Create a DataFrame with the new row
-        new_row_df = pd.DataFrame(new_row, index=[0])
 
-        # Filter out empty or all-NA columns from new_row_df
-        new_row_df = new_row_df.dropna(axis=1, how="all")
+        # Backtest-only trade audit telemetry.
+        #
+        # WHY: NVDA/SPX investigations require a bulletproof, per-fill record of the *inputs used
+        # to decide* a fill (bar OHLC, quote bid/ask, underlying quote, slippage model, etc.).
+        # We keep this behind an env flag because it increases CSV width and can add overhead.
+        if self._truthy_env(os.environ.get("LUMIBOT_BACKTEST_AUDIT")):
+            audit = getattr(stored_order, "_audit", None)
+            if isinstance(audit, dict) and audit:
+                for key, value in audit.items():
+                    # Namespace audit fields to avoid collisions with existing columns.
+                    new_row[f"audit.{key}"] = value
+            try:
+                delattr(stored_order, "_audit")
+            except Exception:
+                pass
 
-        # Concatenate the filtered new_row_df with the existing _trade_event_log_df
-        self._trade_event_log_df = pd.concat([self._trade_event_log_df, new_row_df], axis=0)
+        price_source = getattr(stored_order, "_price_source", None)
+        if price_source:
+            new_row["price_source"] = price_source
+            try:
+                delattr(stored_order, "_price_source")
+            except AttributeError:
+                pass
+        if getattr(self, "_trade_event_log_enabled", True):
+            # PERF: Avoid pandas concat per event; append to list and materialize once.
+            self._trade_event_log_rows.append(new_row)
+            # Invalidate cached DataFrame representation.
+            self._trade_event_log_df_cache = None
 
         return
 
@@ -1545,12 +1940,18 @@ class Broker(ABC):
         t.start()
         if not self.IS_BACKTESTING_BROKER:
             self.logger.info(
-                """Waiting for the socket stream connection to be established, 
+                """Waiting for the socket stream connection to be established,
                 method _stream_established must be called"""
             )
-            while True:
+            timeout = 30  # 30 second timeout
+            start_time = time.time()
+            while not self._stop_event.is_set():
                 if self._is_stream_subscribed is True:
                     break
+                if time.time() - start_time > timeout:
+                    self.logger.warning("Timeout waiting for stream to be established")
+                    break
+                time.sleep(0.1)
         return
 
     def get_quote(self, asset: Asset, quote: Asset = None, exchange: str = None) -> Quote:

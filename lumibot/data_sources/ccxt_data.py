@@ -1,5 +1,4 @@
 import datetime
-import logging
 import time
 from decimal import Decimal
 from typing import Union
@@ -8,8 +7,11 @@ import ccxt
 import pandas as pd
 
 from lumibot.entities import Asset, Bars
+from lumibot.tools.lumibot_logger import get_logger
 
 from .data_source import DataSource
+
+logger = get_logger(__name__)
 
 
 class CcxtData(DataSource):
@@ -58,7 +60,7 @@ class CcxtData(DataSource):
         self, asset, length, timestep=MIN_TIMESTEP, timeshift=None, quote=None, exchange=None, include_after_hours=True
     ):
         if exchange is not None:
-            logging.warning(
+            logger.warning(
                 f"the exchange parameter is not implemented for CcxtData, but {exchange} was passed as the exchange"
             )
 
@@ -96,7 +98,7 @@ class CcxtData(DataSource):
         )
 
     def get_historical_prices(
-        self, asset, length, timestep="", timeshift=None, quote=None, exchange=None, include_after_hours=True
+        self, asset, length, timestep="", timeshift=None, quote=None, exchange=None, include_after_hours=True, return_polars: bool = False
     ):
         """Get bars for a given asset"""
         if isinstance(asset, str):
@@ -131,11 +133,11 @@ class CcxtData(DataSource):
         a UTC timezone aware index.
         """
         if not api.has["fetchOHLCV"]:
-            logging.error("Exchange does not support fetching OHLCV data")
+            logger.error("Exchange does not support fetching OHLCV data")
 
         market = self.api.markets.get(symbol, None)
         if market is None:
-            logging.error(
+            logger.error(
                 f"A request for market data for {symbol} was submitted. " f"The market for that pair does not exist"
             )
             return None

@@ -1,21 +1,22 @@
-import logging
+import datetime
 import uuid
 from collections import namedtuple
 from decimal import Decimal
 from enum import Enum
 from threading import Event
-import datetime
-from typing import Union, TYPE_CHECKING
+from typing import TYPE_CHECKING, Union
 
 if TYPE_CHECKING:
     from lumibot.entities.asset import Asset
 
 import lumibot.entities as entities
-from lumibot.tools.types import check_positive, check_price
-
+from lumibot.entities.smart_limit import SmartLimitConfig
 
 # Set up module-specific logger
-logger = logging.getLogger(__name__)
+from lumibot.tools.lumibot_logger import get_logger
+from lumibot.tools.types import check_positive, check_price
+
+logger = get_logger(__name__)
 
 
 # Custom string enum implementation for Python 3.9 compatibility
@@ -30,12 +31,12 @@ class StrEnum(str, Enum):
     """
     def __str__(self):
         return self.value
-        
+
     def __eq__(self, other):
         if isinstance(other, str):
             return self.value == other
         return super().__eq__(other)
-    
+
     def __hash__(self):
         # Use the hash of the enum member, not the string value
         # This ensures proper hashability while maintaining enum identity
@@ -94,6 +95,7 @@ class Order:
         STOP = "stop"
         STOP_LIMIT = "stop_limit"
         TRAIL = "trailing_stop"
+        SMART_LIMIT = "smart_limit"
 
     class OrderSide(StrEnum):
         BUY = "buy"
@@ -148,6 +150,7 @@ class Order:
         order_type: Union[OrderType, None] = None,
         order_class: Union[OrderClass, None] = OrderClass.SIMPLE,
         trade_cost: float = None,
+        trade_slippage: float = None,
         custom_params: dict = None,
         identifier: str = None,
         avg_fill_price: float = None,
@@ -155,6 +158,7 @@ class Order:
         child_orders: Union[list, None] = None,
         tag: str = "",
         status: OrderStatus = "unprocessed",
+        smart_limit: SmartLimitConfig = None,
     ):
         """Order class for managing individual orders.
 
@@ -270,9 +274,12 @@ class Order:
             The type of order. Possible values are: `market`, `limit`, `stop`, `stop_limit`, `trail`, `trail_limit`.
             (Deprecated, use 'order_type' instead)
         order_type : str or Order.OrderType
-            The type of order. Possible values are: `market`, `limit`, `stop`, `stop_limit`, `trail`, `trail_limit`.
+            The type of order. Possible values are: `market`, `limit`, `stop`, `stop_limit`, `trail`, `trail_limit`,
+            `smart_limit`.
         order_class : str
             The order class. Possible values are: `simple`, `bracket`, `oco`, `oto`, `multileg`.
+        smart_limit : SmartLimitConfig
+            Configuration for SMART_LIMIT orders. When set, the order type defaults to `smart_limit`.
         trade_cost : float
             The cost of this order in the quote currency.
         custom_params : dict
@@ -387,7 +394,9 @@ class Order:
         self.dependent_order = None
         self.dependent_order_filled = False
         self.order_type = order_type
+        self.smart_limit = smart_limit
         self.trade_cost = trade_cost
+        self.trade_slippage = 0.0 if trade_slippage is None else trade_slippage
         self.custom_params = custom_params
         self._trail_stop_price = None  # Used by backtesting broker to track desired trailing stop price so far
         self.tag = tag
@@ -402,7 +411,7 @@ class Order:
         # Cryptocurrency market.
         if self.asset and self.asset.asset_type == "crypto":
             self.pair = f"{self.asset.symbol}/{self.quote.symbol}"
-        else: 
+        else:
             self.pair = pair
 
         # setting events
@@ -448,10 +457,10 @@ class Order:
                 filename = frame.f_code.co_filename.split('/')[-1]  # Just the filename
                 lineno = frame.f_lineno
                 function_name = frame.f_code.co_name
-                
+
                 logger.warning(f"DEPRECATED in {filename}:{function_name}:{lineno} - "
                              f"Order parameter '{param}' is deprecated. Use '{new_param}' instead.")
-                
+
                 if locals()[new_param]:
                     raise ValueError(f"You cannot set both {param} and {new_param}. "
                                    f"This may cause unexpected behavior.")
@@ -494,6 +503,9 @@ class Order:
 
         # Check - Order Class values passed in the 'type' parameter is depricated. OTO/Bracket/etc should
         # This is done here so that the older depricated parameters are still accepted for backwards compatibility
+        if order_type in (self.OrderType.SMART_LIMIT, "smart_limit") and self.smart_limit is None:
+            self.smart_limit = SmartLimitConfig()
+
         try:
             self.order_type = order_type \
                 if isinstance(order_type, (self.OrderType, NONE_TYPE)) else self.OrderType(order_type)
@@ -688,6 +700,9 @@ class Order:
         position_filled,
     ):
         if self.order_type is None:
+            if self.smart_limit is not None:
+                self.order_type = self.OrderType.SMART_LIMIT
+                return
             # Check if this is a trailing stop order
             if trail_price is not None or trail_percent is not None:
                 self.order_type = self.OrderType.TRAIL
@@ -735,6 +750,7 @@ class Order:
                     side=self.side,
                     limit_price=self.limit_price,
                     order_type=Order.OrderType.LIMIT,
+                    quote=self.quote,
                 )
                 stop_order = Order(
                     # Stop Type will be filled in automatically for child based on the Stop Modifiers
@@ -746,6 +762,7 @@ class Order:
                     stop_limit_price=self.stop_limit_price,
                     trail_price=self.trail_price,
                     trail_percent=self.trail_percent,
+                    quote=self.quote,
                 )
                 # Set dependencies so that the two orders will cancel the other in BackTesting
                 limit_order.dependent_order = stop_order
@@ -780,6 +797,7 @@ class Order:
                             side=child_side,
                             limit_price=secondary_limit_price,
                             order_type=Order.OrderType.LIMIT,
+                            quote=self.quote,
                         )
                     )
                 if secondary_stop_price is not None:
@@ -794,6 +812,7 @@ class Order:
                             stop_limit_price=secondary_stop_limit_price,
                             trail_price=secondary_trail_price,
                             trail_percent=secondary_trail_percent,
+                            quote=self.quote,
                         )
                     )
 
@@ -830,6 +849,7 @@ class Order:
                             side=child_side,
                             limit_price=secondary_limit_price,
                             order_type=Order.OrderType.LIMIT,
+                            quote=self.quote,
                         )
                     )
                 elif secondary_stop_price is not None:
@@ -844,6 +864,7 @@ class Order:
                             stop_limit_price=secondary_stop_limit_price,
                             trail_price=secondary_trail_price,
                             trail_percent=secondary_trail_percent,
+                            quote=self.quote,
                         )
                     )
 
@@ -901,9 +922,11 @@ class Order:
         quantity = Decimal(value)
         self._quantity = quantity
 
-        # Update the quantity for all child orders
-        for child_order in self.child_orders:
-            child_order.quantity = quantity
+        # Update the quantity for all OCO child orders. Multileg orders will have child orders that
+        # can have different quantities, so do not update them here.
+        if self.order_class != self.OrderClass.MULTILEG and self.child_orders:
+            for child_order in self.child_orders:
+                child_order.quantity = quantity
 
     def __hash__(self):
         return hash(self.identifier)
@@ -914,13 +937,9 @@ class Order:
         if not isinstance(other, Order):
             return False
 
-        # If the other object is an Order object, then compare the identifier.
-        return (
-            self.identifier == other.identifier
-            and self.asset == other.asset
-            and self.quantity == other.quantity
-            and self.side == other.side
-        )
+        # Orders are uniquely identified by their identifier; comparing deeper fields is expensive
+        # and can be inconsistent with `__hash__` which also hashes the identifier.
+        return self.identifier == other.identifier
 
     def __repr__(self):
         if self.asset is None:
@@ -1019,8 +1038,13 @@ class Order:
         bool
             True if the order is active, False otherwise.
         """
-        active_children = any([child for child in self.child_orders if child.is_active()])
-        return not self.is_filled() and not self.is_canceled() or active_children
+        # Fast-path: most orders are simple and active; avoid recursively scanning children
+        # unless the parent itself is no longer active.
+        if not self.is_filled() and not self.is_canceled():
+            return True
+        if not self.child_orders:
+            return False
+        return any(child.is_active() for child in self.child_orders)
 
     def is_canceled(self):
         """
@@ -1096,9 +1120,14 @@ class Order:
             self._raw = raw
 
     def to_position(self, quantity):
-        position_qty = quantity
-        if self.side == SELL:
-            position_qty = -quantity
+        # Safety check for invalid orders
+        if self.asset is None:
+            logger.error(f"Cannot create position from order {self.identifier} - asset is None")
+            return None
+
+        position_qty = Decimal(quantity)
+        if self.is_sell_order():
+            position_qty = -position_qty
 
         position = entities.Position(
             self.strategy,
@@ -1142,30 +1171,86 @@ class Order:
     # =========Waiting methods==================
 
     def wait_to_be_registered(self):
-        logging.info("Waiting for order %r to be registered" % self)
+        logger.info("Waiting for order %r to be registered" % self)
         self._new_event.wait()
-        logging.info("Order %r registered" % self)
+        logger.info("Order %r registered" % self)
 
     def wait_to_be_closed(self):
-        logging.info("Waiting for broker to execute order %r" % self)
+        logger.info("Waiting for broker to execute order %r" % self)
         self._closed_event.wait()
-        logging.info("Order %r executed by broker" % self)
+        logger.info("Order %r executed by broker" % self)
 
     # ========= Serialization methods ===========
+
+    def to_minimal_dict(self) -> dict:
+        """
+        Return a minimal dictionary representation of the order for progress logging.
+
+        This creates a lightweight representation suitable for real-time progress updates,
+        containing only the essential fields needed to display the order.
+
+        Returns
+        -------
+        dict
+            A minimal dictionary with keys:
+            - asset: Minimal asset dict (from asset.to_minimal_dict())
+            - side: Order side (buy, sell, etc.)
+            - qty: Order quantity
+            - type: Order type (market, limit, stop, etc.)
+            - status: Order status (new, filled, canceled, etc.)
+            - limit: Limit price (only if set)
+            - stop: Stop price (only if set)
+
+        Example
+        -------
+        >>> order = Order(strategy="MyStrategy", asset=Asset("AAPL"), quantity=100,
+        ...               side="buy", order_type="limit", limit_price=150.00)
+        >>> order.to_minimal_dict()
+        {'asset': {'symbol': 'AAPL', 'type': 'stock'}, 'side': 'buy', 'qty': 100,
+         'type': 'limit', 'status': 'new', 'limit': 150.0}
+        """
+        result = {
+            "asset": self.asset.to_minimal_dict() if self.asset and hasattr(self.asset, 'to_minimal_dict') else None,
+            "side": str(self.side) if self.side else None,
+            "qty": float(self.quantity) if self.quantity else 0,
+            "type": str(self.order_type) if self.order_type else "market",
+            "status": str(self.status) if self.status else "unprocessed",
+        }
+
+        # Only include prices if they're set
+        if self.limit_price is not None:
+            result["limit"] = float(self.limit_price)
+        if self.stop_price is not None:
+            result["stop"] = float(self.stop_price)
+        if self.smart_limit is not None:
+            result["smart_limit"] = self.smart_limit.to_dict()
+
+        return result
 
     def to_dict(self):
         # Initialize an empty dictionary for serializable attributes
         order_dict = {}
 
-        # List of non-serializable keys (thread locks, events, etc.)
+        # List of non-serializable keys (thread locks, events, internal data, etc.)
+        # EXPANDED to exclude problematic fields that cause DynamoDB 400KB errors
         non_serializable_keys = [
-            "_new_event", "_canceled_event", "_partial_filled_event", "_filled_event", "_closed_event"
+            "_new_event", "_canceled_event", "_partial_filled_event", "_filled_event", "_closed_event",
+            "_bars",        # Historical bar data (can be 1.8MB+)
+            "_raw",         # Raw broker response (can be 22KB+)
+            "_transmitted", # Internal state
+            "_error",       # Internal error tracking
+            "_broker",      # Broker reference
+            "transactions", # Can be large transaction history
         ]
 
         # Iterate through all attributes in the object's __dict__
         for key, value in self.__dict__.items():
             # Skip known non-serializable attributes by name
             if key in non_serializable_keys:
+                continue
+
+            # Skip ALL fields starting with underscore (Python internals)
+            if key.startswith('_'):
                 continue
 
             # Convert datetime objects to ISO format for JSON serialization
@@ -1188,8 +1273,12 @@ class Order:
             else:
                 order_dict[key] = value
 
+        # Add essential properties that might be stored with underscores
+        order_dict['quantity'] = float(self.quantity) if isinstance(self.quantity, Decimal) else self.quantity
+        order_dict['status'] = self.status
+
         return order_dict
-    
+
     @classmethod
     def from_dict(cls, order_dict):
         # Extract the core essential arguments to pass to __init__
@@ -1198,12 +1287,12 @@ class Order:
         if asset_data and isinstance(asset_data, dict):
             # Assuming Asset has its own from_dict method
             asset_obj = entities.Asset.from_dict(asset_data)
-        
+
         # Extract essential arguments, using None if the values are missing
         strategy = order_dict.get('strategy', None)
         side = order_dict.get('side', None)  # Default to None if side is missing
         quantity = order_dict.get('quantity', None)
-        
+
         # Create the initial object using the essential arguments
         obj = cls(
             strategy=strategy,
@@ -1220,24 +1309,27 @@ class Order:
         # Handle additional fields directly after the instance is created
         for key, value in order_dict.items():
             if key not in ['strategy', 'side', 'asset', 'quantity'] and key not in non_serializable_keys:
-                
+
                 # Convert datetime strings back to datetime objects
                 if isinstance(value, str) and "T" in value:
                     try:
                         setattr(obj, key, datetime.datetime.fromisoformat(value))
                     except ValueError:
                         setattr(obj, key, value)
-                
+
+                elif key == "smart_limit":
+                    setattr(obj, key, SmartLimitConfig.from_dict(value))
+
                 # Recursively convert nested objects using from_dict (for objects like quote)
                 elif isinstance(value, dict) and hasattr(cls, key) and hasattr(getattr(cls, key), 'from_dict'):
                     nested_class = getattr(cls, key)
                     setattr(obj, key, nested_class.from_dict(value))
-                
+
                 # Handle list of orders (child_orders)
                 elif isinstance(value, list) and key == 'child_orders':
                     child_orders = [cls.from_dict(item) for item in value]  # Recursively create Order objects
                     setattr(obj, key, child_orders)
-                
+
                 # Set simple values directly
                 else:
                     setattr(obj, key, value)

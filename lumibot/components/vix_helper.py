@@ -1,11 +1,23 @@
+import datetime
+import traceback
 from datetime import timedelta
-from lumibot.entities import Asset
+
 import pandas as pd
 import yfinance as yf
 from scipy import stats
-import pandas_ta as ta
 import traceback
 import datetime
+
+# Fix for NumPy 2.0+ compatibility with pandas_ta
+import numpy as np
+
+# pandas_ta 0.3.14b uses numpy.NaN which was removed in NumPy 2.0
+# Create alias for backward compatibility if needed
+if not hasattr(np, 'NaN'):
+    np.NaN = np.nan
+
+# Import pandas-ta-classic
+import pandas_ta_classic as ta
 
 """ 
     Description
@@ -32,7 +44,7 @@ class VixHelper:
         self.strategy = strategy
 
         # Set the initial values for the variables
-        self.last_historical_vix_update = None 
+        self.last_historical_vix_update = None
         self.last_historical_vix_1d_update = None
         self.last_historical_gvz_update = None
 
@@ -74,7 +86,7 @@ class VixHelper:
             )
 
             return True
-        
+
         # Log message that the VIX 1D is within the limits
         self.strategy.log_message(
             f"VIX 1D is within the limits: {vix_1d} which is less than the max of {max_vix_1d}",
@@ -82,7 +94,7 @@ class VixHelper:
         )
 
         return False
-    
+
     def check_min_vix_1d(self, dt, min_vix_1d, use_open=False):
         """
         Check if the VIX 1D is too low. If it is, log a message, add a marker to the chart, and return True.
@@ -116,9 +128,9 @@ class VixHelper:
             )
 
             return True
-        
+
         return False
-    
+
     def check_max_vix_percentile(self, dt, max_vix_percentile, vix_percentile_window, use_open=False):
         """
         Check if the VIX is too high based on the percentile. If it is, log a message, add a marker to the chart, and return True.
@@ -142,7 +154,7 @@ class VixHelper:
         # Check if the max VIX percentile is not None
         if max_vix_percentile is None:
             return False
-        
+
         # Check if the VIX percentile window is not None
         if vix_percentile_window is None:
             return False
@@ -168,15 +180,15 @@ class VixHelper:
             )
 
             return True
-        
+
         # Log message that the VIX is within the limits based on the percentile
         self.strategy.log_message(
             f"VIX is within the limits based on the percentile: {vix_percentile} which is less than the max of {max_vix_percentile}",
             color="green", broadcast=True
         )
-        
+
         return False
-    
+
     def get_vix_percentile(self, dt, window, use_open=False):
         """
         Get the VIX percentile value for the given window.
@@ -198,7 +210,7 @@ class VixHelper:
         # Check if dt is not None
         if dt is None:
             return None
-        
+
         # Check if window is not None
         if window is None:
             return None
@@ -267,15 +279,15 @@ class VixHelper:
             )
 
             return True
-        
+
         # Log message that the VIX is within the limits
         self.strategy.log_message(
             f"VIX is within the limits: {vix} which is less than the max of {max_vix}",
             color="green", broadcast=True
         )
-        
+
         return False
-    
+
     def check_min_vix(self, dt, min_vix, use_open=False):
         """
         Check if the VIX is too low. If it is, log a message, add a marker to the chart, and return True.
@@ -313,9 +325,9 @@ class VixHelper:
             )
 
             return True
-        
+
         return False
-    
+
     def check_max_vix_rsi(self, dt, max_vix_rsi, rsi_window=14, use_open=False):
         """
         Check if the VIX RSI is too high. If it is, log a message, add a marker to the chart, and return True.
@@ -363,15 +375,15 @@ class VixHelper:
             )
 
             return True
-        
+
         # Log message that the VIX RSI is within the limits
         self.strategy.log_message(
             f"VIX RSI is within the limits: {vix_rsi} which is less than the max of {max_vix_rsi}",
             color="green", broadcast=True
         )
-        
+
         return False
-    
+
     def get_vix_rsi_value(self, dt, window=14, use_open=False):
         """
         Get the VIX RSI value for the given datetime.
@@ -393,7 +405,7 @@ class VixHelper:
         # Check if dt is not None
         if dt is None:
             return None
-        
+
         # Data window. Get a 60% larger window for the VIX RSI calculation because of weekends and holidays
         download_window = int(window * 1.6)
 
@@ -403,7 +415,7 @@ class VixHelper:
         # Check if vix_values is not None
         if vix_values is None or len(vix_values) == 0:
             return None
-        
+
         # Convert the list to a pandas DataFrame
         vix_df = pd.DataFrame(vix_values, columns=['VIX'])
 
@@ -414,7 +426,7 @@ class VixHelper:
         vix_rsi = vix_df['RSI'].iloc[-1]
 
         return vix_rsi
-    
+
     def get_vix_values(self, dt, window, use_open=False):
         """
         Get the VIX values for the given window.
@@ -440,7 +452,7 @@ class VixHelper:
         # Check if the current date is None
         if dt is None:
             return None
-        
+
         # If the current date is None, then return a super high value so it doesn't trigger trades
         if dt is None:
             return None
@@ -482,7 +494,7 @@ class VixHelper:
                     nearest_date = self.historical_vix.index.asof(previous_date)
                     vix_values = self.historical_vix.loc[nearest_date - timedelta(days=window):nearest_date]['Close'].tolist()
                     return vix_values
-            
+
             vix = yf.Ticker("^VIX")
             self.historical_vix = vix.history(period="max")
 
@@ -507,7 +519,7 @@ class VixHelper:
         except Exception as e:
             self.strategy.log_message(f"ERROR: Failed to fetch live VIX values: {e}", color="red", broadcast=True)
             return None
-    
+
     def get_vix_value(self, current_dt=None, use_open=False):
         """
         Get the VIX value for the current date.
@@ -555,7 +567,7 @@ class VixHelper:
                     nearest_date = self.historical_vix.index.asof(previous_date)
                     vix_val = self.historical_vix.loc[nearest_date]['Close']
                     return vix_val
-            
+
             vix = yf.Ticker("^VIX")
             self.historical_vix = vix.history(period="max")
 
@@ -584,11 +596,11 @@ class VixHelper:
             )
 
             return vix_val
-        
+
         except Exception as e:
             self.strategy.log_message(f"ERROR: Failed to fetch live VIX value: {e}", color="red", broadcast=True)
             return None  # Return None if unable to fetch
-    
+
     def get_vix_1d_value(self, current_dt=None, use_open=False):
         """
         Get the VIX 1D value for the current date.
@@ -647,7 +659,7 @@ class VixHelper:
                     nearest_date = self.historical_vix_1d.index.asof(previous_date)
                     vix_val = self.historical_vix_1d.loc[nearest_date]['Close']
                     return vix_val
-            
+
             vix_1d = yf.Ticker("^VIX1D")
             self.historical_vix_1d = vix_1d.history(period="max")
 
@@ -740,7 +752,7 @@ class VixHelper:
                     nearest_date = self.historical_gvz.index.asof(previous_date)
                     gvz_val = self.historical_gvz.loc[nearest_date]['Close']
                     return gvz_val
-            
+
             gvz = yf.Ticker("^GVZ")
             self.historical_gvz = gvz.history(period="max")
 
@@ -818,13 +830,13 @@ class VixHelper:
             )
 
             return True
-        
+
         # Log message that the GVZ is within the limits
         self.strategy.log_message(
             f"GVZ is within the limits: {gvz} which is less than the max of {max_gvz}",
             color="green", broadcast=True
         )
-        
+
         return False
 
     def check_min_gvz(self, dt, min_gvz, use_open=False):
@@ -863,7 +875,7 @@ class VixHelper:
             )
 
             return True
-        
+
         return False
 
     def check_max_gvz_percentile(self, dt, max_gvz_percentile, gvz_percentile_window, use_open=False):
@@ -889,7 +901,7 @@ class VixHelper:
         # Check if the max GVZ percentile is not None
         if max_gvz_percentile is None:
             return False
-        
+
         # Check if the GVZ percentile window is not None
         if gvz_percentile_window is None:
             return False
@@ -915,7 +927,7 @@ class VixHelper:
             )
 
             return True
-        
+
         return False
 
     def get_gvz_percentile(self, dt, window, use_open=False):
@@ -939,7 +951,7 @@ class VixHelper:
         # Check if dt is not None
         if dt is None:
             return None
-        
+
         # Check if window is not None
         if window is None:
             return None
@@ -989,7 +1001,7 @@ class VixHelper:
         # Check if the current date is None
         if dt is None:
             return None
-        
+
         if dt is None:
             return None
 
@@ -1030,7 +1042,7 @@ class VixHelper:
                     nearest_date = self.historical_gvz.index.asof(previous_date)
                     gvz_values = self.historical_gvz.loc[nearest_date - timedelta(days=window):nearest_date]['Close'].tolist()
                     return gvz_values
-            
+
             gvz = yf.Ticker("^GVZ")
             self.historical_gvz = gvz.history(period="max")
 
@@ -1077,7 +1089,7 @@ class VixHelper:
         # Check if dt is not None
         if dt is None:
             return None
-        
+
         # Data window. Get a 60% larger window for the GVZ RSI calculation because of weekends and holidays
         download_window = int(window * 1.6)
 
@@ -1086,7 +1098,7 @@ class VixHelper:
 
         if gvz_values is None or len(gvz_values) == 0:
             return None
-        
+
         # Convert the list to a pandas DataFrame
         gvz_df = pd.DataFrame(gvz_values, columns=['GVZ'])
 
@@ -1097,7 +1109,7 @@ class VixHelper:
         gvz_rsi = gvz_df['RSI'].iloc[-1]
 
         return gvz_rsi
-    
+
     def check_max_vix_1d(self, dt, max_vix_1d, use_open=False):
         """
         Check if the VIX 1D is too high. If it is, log a message, add a marker to the chart, and return True.
@@ -1136,7 +1148,7 @@ class VixHelper:
             )
 
             return True
-        
+
         # Log message that the VIX 1D is within the limits
         self.strategy.log_message(
             f"VIX 1D is within the limits: {vix_1d} which is less than the max of {max_vix_1d}",
@@ -1144,7 +1156,7 @@ class VixHelper:
         )
 
         return False
-    
+
     def check_min_vix_1d(self, dt, min_vix_1d, use_open=False):
         """
         Check if the VIX 1D is too low. If it is, log a message, add a marker to the chart, and return True.
@@ -1178,9 +1190,9 @@ class VixHelper:
             )
 
             return True
-        
+
         return False
-    
+
     def check_max_vix_percentile(self, dt, max_vix_percentile, vix_percentile_window, use_open=False):
         """
         Check if the VIX is too high based on the percentile. If it is, log a message, add a marker to the chart, and return True.
@@ -1204,7 +1216,7 @@ class VixHelper:
         # Check if the max VIX percentile is not None
         if max_vix_percentile is None:
             return False
-        
+
         # Check if the VIX percentile window is not None
         if vix_percentile_window is None:
             return False
@@ -1230,15 +1242,15 @@ class VixHelper:
             )
 
             return True
-        
+
         # Log message that the VIX is within the limits based on the percentile
         self.strategy.log_message(
             f"VIX is within the limits based on the percentile: {vix_percentile} which is less than the max of {max_vix_percentile}",
             color="green", broadcast=True
         )
-        
+
         return False
-    
+
     def get_vix_percentile(self, dt, window, use_open=False):
         """
         Get the VIX percentile value for the given window.
@@ -1260,7 +1272,7 @@ class VixHelper:
         # Check if dt is not None
         if dt is None:
             return None
-        
+
         # Check if window is not None
         if window is None:
             return None
@@ -1329,15 +1341,15 @@ class VixHelper:
             )
 
             return True
-        
+
         # Log message that the VIX is within the limits
         self.strategy.log_message(
             f"VIX is within the limits: {vix} which is less than the max of {max_vix}",
             color="green", broadcast=True
         )
-        
+
         return False
-    
+
     def check_min_vix(self, dt, min_vix, use_open=False):
         """
         Check if the VIX is too low. If it is, log a message, add a marker to the chart, and return True.
@@ -1375,9 +1387,9 @@ class VixHelper:
             )
 
             return True
-        
+
         return False
-    
+
     def check_max_vix_rsi(self, dt, max_vix_rsi, rsi_window=14, use_open=False):
         """
         Check if the VIX RSI is too high. If it is, log a message, add a marker to the chart, and return True.
@@ -1425,15 +1437,15 @@ class VixHelper:
             )
 
             return True
-        
+
         # Log message that the VIX RSI is within the limits
         self.strategy.log_message(
             f"VIX RSI is within the limits: {vix_rsi} which is less than the max of {max_vix_rsi}",
             color="green", broadcast=True
         )
-        
+
         return False
-    
+
     def get_vix_rsi_value(self, dt, window=14, use_open=False):
         """
         Get the VIX RSI value for the given datetime.
@@ -1455,7 +1467,7 @@ class VixHelper:
         # Check if dt is not None
         if dt is None:
             return None
-        
+
         # Data window. Get a 60% larger window for the VIX RSI calculation because of weekends and holidays
         download_window = int(window * 1.6)
 
@@ -1465,7 +1477,7 @@ class VixHelper:
         # Check if vix_values is not None
         if vix_values is None or len(vix_values) == 0:
             return None
-        
+
         # Convert the list to a pandas DataFrame
         vix_df = pd.DataFrame(vix_values, columns=['VIX'])
 
@@ -1476,7 +1488,7 @@ class VixHelper:
         vix_rsi = vix_df['RSI'].iloc[-1]
 
         return vix_rsi
-    
+
     def get_gvz_value(self, current_dt=None, use_open=False):
         """
         Get the GVZ value for the current date.
@@ -1535,7 +1547,7 @@ class VixHelper:
                     nearest_date = self.historical_gvz.index.asof(previous_date)
                     gvz_val = self.historical_gvz.loc[nearest_date]['Close']
                     return gvz_val
-            
+
             gvz = yf.Ticker("^GVZ")
             self.historical_gvz = gvz.history(period="max")
 
@@ -1592,7 +1604,7 @@ class VixHelper:
         # Check if dt is not None
         if dt is None:
             return None
-        
+
         # Check if window is not None
         if window is None:
             return None
@@ -1659,13 +1671,13 @@ class VixHelper:
             )
 
             return True
-        
+
         # Log message that the GVZ is within the limits
         self.strategy.log_message(
             f"GVZ is within the limits: {gvz} which is less than the max of {max_gvz}",
             color="green", broadcast=True
         )
-        
+
         return False
 
     def check_min_gvz(self, dt, min_gvz, use_open=False):
@@ -1704,5 +1716,5 @@ class VixHelper:
             )
 
             return True
-        
+
         return False

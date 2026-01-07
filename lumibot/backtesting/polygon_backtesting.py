@@ -1,25 +1,27 @@
-import logging
 import traceback
-from collections import OrderedDict, defaultdict
-from datetime import date, timedelta
+from collections import OrderedDict
+from datetime import timedelta
 from decimal import Decimal
 from typing import Union
 
 from polygon.exceptions import BadResponse
 from termcolor import colored
 
+from lumibot.tools.lumibot_logger import get_logger
 from lumibot.data_sources import PandasData
 from lumibot.entities import Asset, Data
 from lumibot.tools import polygon_helper
 from lumibot.tools.polygon_helper import PolygonClient
 
+logger = get_logger(__name__)
 START_BUFFER = timedelta(days=5)
-
 
 class PolygonDataBacktesting(PandasData):
     """
     Backtesting implementation of Polygon
     """
+
+    option_quote_fallback_allowed = True
 
     def __init__(
         self,
@@ -28,30 +30,29 @@ class PolygonDataBacktesting(PandasData):
         pandas_data=None,
         api_key=None,
         max_memory=None,
-        errors_csv_path=None,
         **kwargs,
     ):
         super().__init__(
-            datetime_start=datetime_start, datetime_end=datetime_end, pandas_data=pandas_data, api_key=api_key, **kwargs
+            datetime_start=datetime_start, datetime_end=datetime_end, pandas_data=pandas_data, api_key=api_key,
+            allow_option_quote_fallback=True, **kwargs
         )
 
         # Memory limit, off by default
         self.MAX_STORAGE_BYTES = max_memory
         
         # Store errors CSV path for use in data retrieval
-        self.errors_csv_path = errors_csv_path
 
         # RESTClient API for Polygon.io polygon-api-client
-        self.polygon_client = PolygonClient.create(api_key=api_key, errors_csv_path=errors_csv_path)
+        self.polygon_client = PolygonClient.create(api_key=api_key)
 
     def _enforce_storage_limit(pandas_data: OrderedDict):
         storage_used = sum(data.df.memory_usage().sum() for data in pandas_data.values())
-        logging.info(f"{storage_used = :,} bytes for {len(pandas_data)} items")
+        logger.info(f"{storage_used = :,} bytes for {len(pandas_data)} items")
         while storage_used > PolygonDataBacktesting.MAX_STORAGE_BYTES:
             k, d = pandas_data.popitem(last=False)
             mu = d.df.memory_usage().sum()
             storage_used -= mu
-            logging.info(f"Storage limit exceeded. Evicted LRU data: {k} used {mu:,} bytes")
+            logger.info(f"Storage limit exceeded. Evicted LRU data: {k} used {mu:,} bytes")
 
     def _update_pandas_data(self, asset, quote, length, timestep, start_dt=None):
         """
@@ -135,42 +136,46 @@ class PolygonDataBacktesting(PandasData):
                 start_datetime,
                 self.datetime_end,
                 timespan=ts_unit,
-                quote_asset=quote_asset,
-                errors_csv_path=self.errors_csv_path,
+                quote_asset=quote_asset
             )
         except BadResponse as e:
             # Assuming e.message or similar attribute contains the error message
             formatted_start_datetime = start_datetime.strftime("%Y-%m-%d")
             formatted_end_datetime = self.datetime_end.strftime("%Y-%m-%d")
-            if "Your plan doesn't include this data timeframe" in str(e):
-                error_message = colored(
+            text = str(e)
+            plan_msgs = (
+                "Your plan doesn't include this data timeframe",
+                "Your plan doesn\u2019t include this data timeframe",
+                "not entitled to this data",
+                "NOT_AUTHORIZED",
+            )
+            invalid_key_msgs = ("Unknown API Key", "Invalid API Key")
+            if any(m in text for m in plan_msgs) and not any(m in text for m in invalid_key_msgs):
+                msg = (
                     "Polygon Access Denied: Your subscription does not allow you to backtest that far back in time. "
-                    f"You requested data for {asset_separated} {ts_unit} bars "
-                    f"from {formatted_start_datetime} to {formatted_end_datetime}. "
-                    "Please consider either changing your backtesting timeframe to start later since your "
-                    "subscription does not allow you to backtest that far back or upgrade your Polygon "
-                    "subscription."
-                    "You can upgrade your Polygon subscription at at https://polygon.io/?utm_source=affiliate&utm_campaign=lumi10 "
-                    "Please use the full link to give us credit for the sale, it helps support this project. "
-                    "You can use the coupon code 'LUMI10' for 10% off. ",
-                    color="red")
-                raise Exception(error_message) from e
+                    f"Requested {asset_separated} {ts_unit} bars from {formatted_start_datetime} to {formatted_end_datetime}. "
+                    "We strongly recommend switching to ThetaData (https://www.thetadata.net/ with promo code 'BotSpot10') for better coverage, speed, and LumiBot-native support. "
+                    "If you must stay on Polygon, consider starting later or upgrading your Polygon plan (https://polygon.io/?utm_source=affiliate&utm_campaign=lumi10, code 'LUMI10')."
+                )
+                logger.error(colored(msg, color="red"))
+                return
             elif "Unknown API Key" in str(e):
                 error_message = colored(
                     "Polygon Access Denied: Your API key is invalid. "
                     "Please check your API key and try again. "
                     "You can get an API key at https://polygon.io/?utm_source=affiliate&utm_campaign=lumi10 "
                     "Please use the full link to give us credit for the sale, it helps support this project. "
-                    "You can use the coupon code 'LUMI10' for 10% off. ",
+                    "You can use the coupon code 'LUMI10' for 10% off. "
+                    "We recommend switching to ThetaData (https://www.thetadata.net/ with promo code 'BotSpot10') for higher-quality, faster data and first-class support in LumiBot. ",
                     color="red")
                 raise Exception(error_message) from e
             else:
                 # Handle other BadResponse exceptions not related to plan limitations
-                logging.error(traceback.format_exc())
+                logger.error(traceback.format_exc())
                 raise
         except Exception as e:
             # Handle all other exceptions
-            logging.error(traceback.format_exc())
+            logger.error(traceback.format_exc())
             raise Exception("Error getting data from Polygon") from e
 
         if (df is None) or df.empty:
@@ -284,7 +289,7 @@ class PolygonDataBacktesting(PandasData):
         This function simply calls :func:`get_chains_cached` from polygon_helper,
         which may reuse recent chain data to speed up backtests.
         """
-        logging.debug(f"polygon_backtesting.get_chains called for {asset.symbol}")
+        logger.debug(f"polygon_backtesting.get_chains called for {asset.symbol}")
 
         # Call the caching helper
         option_contracts = polygon_helper.get_chains_cached(
@@ -294,7 +299,6 @@ class PolygonDataBacktesting(PandasData):
             exchange=exchange,
             current_date=self.get_datetime().date(),
             polygon_client=self.polygon_client,
-            errors_csv_path=self.errors_csv_path,
         )
 
         return option_contracts

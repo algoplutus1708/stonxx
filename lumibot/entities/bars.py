@@ -1,11 +1,79 @@
-import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+import re
 from decimal import Decimal
-from typing import Union
+from typing import Union, Set
+import warnings
+import atexit
 
+import numpy as np
 import pandas as pd
+import polars as pl
+import pytz
+
+from lumibot.constants import LUMIBOT_DEFAULT_PYTZ
+from lumibot.tools.lumibot_logger import get_logger
 
 from .bar import Bar
+
+logger = get_logger(__name__)
+
+
+class PolarsConversionTracker:
+    """Track Polars to Pandas conversions and report them efficiently."""
+    _instance = None
+    _warned_assets: Set[str] = set()
+    _total_conversions: int = 0
+    _first_warning_shown: bool = False
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            # Register cleanup function to show summary
+            atexit.register(cls._instance.show_summary)
+        return cls._instance
+    
+    def track_conversion(self, asset_symbol: str):
+        """Track a conversion and show warning if needed."""
+        self._total_conversions += 1
+        
+        # Show warning on first encounter
+        if not self._first_warning_shown:
+            logger.warning(
+                "\n" + "="*70 + "\n"
+                "PERFORMANCE TIP: DataFrame Conversion Detected\n" + 
+                "="*70 + "\n"
+                "Polars DataFrames are being converted to Pandas, which adds overhead.\n"
+                "\n"
+                "For ~2-5x faster backtesting, modify your strategy:\n"
+                "\n"
+                "  Change: bars = self.get_historical_prices(asset, length, timestep)\n"
+                "      To: bars = self.get_historical_prices(asset, length, timestep, return_polars=True)\n"
+                "\n"
+                "Note: When using return_polars=True, use Polars DataFrame methods instead of Pandas.\n" +
+                "="*70
+            )
+            self._first_warning_shown = True
+        
+        # Track which assets have been converted
+        if asset_symbol not in self._warned_assets:
+            self._warned_assets.add(asset_symbol)
+    
+    def show_summary(self):
+        """Show summary at the end if there were conversions."""
+        if self._total_conversions > 0:
+            unique_assets = len(self._warned_assets)
+            assets_list = list(self._warned_assets)[:5]  # Show first 5 assets
+            assets_str = ", ".join(assets_list)
+            if unique_assets > 5:
+                assets_str += f", ... ({unique_assets - 5} more)"
+    
+    @classmethod
+    def reset(cls):
+        """Reset the tracker (useful for testing)."""
+        if cls._instance:
+            cls._instance._warned_assets.clear()
+            cls._instance._total_conversions = 0
+            cls._instance._first_warning_shown = False
 
 
 class Bars:
@@ -96,14 +164,12 @@ class Bars:
     >>> self.log_message(df["close"][-1])
     """
 
-    def __init__(self, df, source, asset, quote=None, raw=None):
+    def __init__(self, df, source, asset, quote=None, raw=None, return_polars=False, tzinfo=None):
         """
         df columns: open, high, low, close, volume, dividend, stock_splits
-        df index: pd.Timestamp localized at the timezone America/New_York
+        datetime column for polars DataFrames
+        return_polars: if True, keep as polars DataFrame, otherwise convert to pandas
         """
-        if df.shape[0] == 0:
-            logging.warning(f"Unable to get bar data for {asset} {source}")
-
         self.source = source.upper()
         self.asset = asset
         if isinstance(asset, tuple):
@@ -112,26 +178,200 @@ class Bars:
             self.symbol = asset.symbol.upper()
         self.quote = quote
         self._raw = raw
+        self._return_polars = return_polars
+        # Caches for on-demand conversions to avoid repeated expensive copies
+        self._polars_cache = None
+        self._pandas_cache = None
+        self._tzinfo = self._normalize_tzinfo(tzinfo)
+        
+        # Check if empty
+        if (isinstance(df, pl.DataFrame) and df.shape[0] == 0) or \
+           (isinstance(df, pd.DataFrame) and df.shape[0] == 0):
+            logger.warning(f"Unable to get bar data for {asset} {source}")
+        
+        if isinstance(df, pl.DataFrame):
+            # Already polars, process it
+            columns = df.columns
+            
+            # Calculate derived columns using polars
+            if "dividend" in columns:
+                df = df.with_columns([
+                    pl.col("close").pct_change().alias("price_change"),
+                    (pl.col("dividend") / pl.col("close")).alias("dividend_yield"),
+                    ((pl.col("dividend") / pl.col("close")) + pl.col("close").pct_change()).alias("return")
+                ])
+            else:
+                df = df.with_columns([
+                    pl.col("close").pct_change().alias("return")
+                ])
+            
+            if "datetime" in df.columns and self._tzinfo is not None:
+                target_tz = getattr(self._tzinfo, "zone", None) or getattr(self._tzinfo, "key", None)
+                if target_tz:
+                    current_dtype = df.schema.get("datetime")
+                    current_tz = getattr(current_dtype, "time_zone", None)
+                    if current_tz != target_tz:
+                        df = df.with_columns(
+                            pl.col("datetime").dt.convert_time_zone(target_tz)
+                        )
 
-        if "dividend" in df.columns:
-            df.loc[:, "price_change"] = df["close"].pct_change(fill_method=None)
-            df.loc[:, "dividend_yield"] = df["dividend"] / df["close"]
-            df.loc[:, "return"] = df["dividend_yield"] + df["price_change"]
+            if return_polars:
+                # Keep as polars
+                self._df = df
+                self._pandas_cache = None
+            else:
+                # Convert to pandas and track the conversion
+                tracker = PolarsConversionTracker()
+                tracker.track_conversion(asset.symbol if hasattr(asset, 'symbol') else str(asset))
+                
+                self._df = df.to_pandas()
+                # Set datetime index if exists
+                for col_name in ['datetime', 'timestamp', 'date', 'time']:
+                    if col_name in self._df.columns:
+                        self._df = self._df.set_index(col_name)
+                        break
+                self._apply_timezone()
+                self._pandas_cache = None
         else:
-            df = df.assign(return_=df["close"].pct_change(fill_method=None))
-            df.rename(columns={"return_": "return"}, inplace=True)
+            # Already pandas, keep it as is
+            self._df = df
+            # Calculate derived columns if needed
+            if "dividend" in df.columns:
+                self._df["price_change"] = df["close"].pct_change()
+                self._df["dividend_yield"] = df["dividend"] / df["close"]
+                self._df["return"] = self._df["dividend_yield"] + self._df["price_change"]
+            else:
+                self._df["return"] = df["close"].pct_change()
 
-        self.df = df
+            self._apply_timezone()
+            if self._return_polars:
+                self._pandas_cache = self._df
+                self._df = self._convert_pandas_to_polars(self._df)
+                self._polars_cache = None
+
+    @property
+    def df(self):
+        """Return the active DataFrame representation based on return_polars flag."""
+        return self.polars_df if self._return_polars else self.pandas_df
+
+    @df.setter
+    def df(self, value):
+        """Allow setting the DataFrame while keeping caches in sync."""
+        self._df = value
+        self._polars_cache = None
+        self._pandas_cache = None
+
+        if isinstance(value, pd.DataFrame):
+            self._apply_timezone()
+            if self._return_polars:
+                self._pandas_cache = value
+                self._df = self._convert_pandas_to_polars(value)
+        elif isinstance(value, pl.DataFrame) and not self._return_polars:
+            tracker = PolarsConversionTracker()
+            tracker.track_conversion(self.asset.symbol if hasattr(self.asset, 'symbol') else str(self.asset))
+            pandas_df = value.to_pandas()
+            for col_name in ['datetime', 'timestamp', 'date', 'time']:
+                if col_name in pandas_df.columns:
+                    pandas_df = pandas_df.set_index(col_name)
+                    break
+            self._df = pandas_df
+            self._apply_timezone()
+
+    @property
+    def polars_df(self):
+        """Return as Polars DataFrame if needed"""
+        if isinstance(self._df, pl.DataFrame):
+            return self._df
+        else:
+            # Convert pandas to polars once and cache
+            if self._polars_cache is not None:
+                return self._polars_cache
+            self._polars_cache = self._convert_pandas_to_polars(self._df)
+            return self._polars_cache
+
+    @property
+    def pandas_df(self):
+        """Return as Pandas DataFrame, converting on demand if required."""
+        if isinstance(self._df, pd.DataFrame):
+            return self._df
+        if self._pandas_cache is not None:
+            return self._pandas_cache
+
+        tracker = PolarsConversionTracker()
+        tracker.track_conversion(self.asset.symbol if hasattr(self.asset, 'symbol') else str(self.asset))
+
+        pandas_df = self._df.to_pandas()
+        for col_name in ['datetime', 'timestamp', 'date', 'time']:
+            if col_name in pandas_df.columns:
+                pandas_df = pandas_df.set_index(col_name)
+                break
+
+        self._pandas_cache = self._apply_timezone(pandas_df)
+        return self._pandas_cache
 
     def __repr__(self):
         return repr(self.df)
 
     def _repr_html_(self):
         return self.df._repr_html_()
-    
+
     def __len__(self):
         """Return the number of bars (rows) in the DataFrame"""
-        return len(self.df)
+        if isinstance(self._df, pl.DataFrame):
+            return self._df.height
+        if isinstance(self._df, pd.DataFrame):
+            return len(self._df)
+        df = self.df
+        return df.height if isinstance(df, pl.DataFrame) else len(df)
+
+    @property
+    def empty(self):
+        """Check if the DataFrame is empty (compatible with both pandas and polars)"""
+        if isinstance(self._df, pl.DataFrame):
+            return self._df.is_empty()
+        else:
+            return self._df.empty
+
+    def _normalize_tzinfo(self, tzinfo):
+        if tzinfo is None:
+            return LUMIBOT_DEFAULT_PYTZ
+        if isinstance(tzinfo, str):
+            return pytz.timezone(tzinfo)
+        return tzinfo
+
+    def _apply_timezone(self, df=None):
+        target_df = self._df if df is None else df
+        if not isinstance(target_df, pd.DataFrame):
+            return target_df
+        if not isinstance(target_df.index, pd.DatetimeIndex):
+            return target_df
+
+        tz = self._tzinfo or LUMIBOT_DEFAULT_PYTZ
+        if isinstance(tz, str):
+            tz = pytz.timezone(tz)
+
+        try:
+            if target_df.index.tz is None:
+                target_df.index = target_df.index.tz_localize(tz)
+            else:
+                target_df.index = target_df.index.tz_convert(tz)
+            self._tzinfo = tz
+        except Exception:
+            return target_df
+
+        if df is None:
+            self._df = target_df
+        return target_df
+
+    def _convert_pandas_to_polars(self, pandas_df: pd.DataFrame) -> pl.DataFrame:
+        """Convert a pandas DataFrame (possibly with datetime index) to Polars."""
+        df_to_convert = pandas_df.copy()
+        if isinstance(df_to_convert.index, pd.DatetimeIndex):
+            df_to_convert = df_to_convert.reset_index()
+            first_col = df_to_convert.columns[0]
+            if first_col != "datetime":
+                df_to_convert = df_to_convert.rename(columns={first_col: "datetime"})
+        return pl.from_pandas(df_to_convert)
 
     @classmethod
     def parse_bar_list(cls, bar_list, source, asset):
@@ -139,11 +379,20 @@ class Bars:
         for bar in bar_list:
             raw.append(bar)
 
-        df = pd.DataFrame(raw)
-        df = df.set_index("timestamp")
-        df["price_change"] = df["close"].pct_change()
-        df["dividend_yield"] = df["dividend"] / df["close"]
-        df["return"] = df["dividend_yield"] + df["price_change"]
+        # Create polars DataFrame directly
+        df = pl.DataFrame(raw)
+
+        # Calculate derived columns using polars
+        df = df.with_columns([
+            pl.col("close").pct_change().alias("price_change"),
+            (pl.col("dividend") / pl.col("close")).alias("dividend_yield"),
+        ])
+
+        # Calculate return
+        df = df.with_columns([
+            (pl.col("dividend_yield") + pl.col("price_change")).alias("return")
+        ])
+
         bars = cls(df, source, asset, raw=bar_list)
         return bars
 
@@ -159,9 +408,31 @@ class Bars:
         list of Bars objects
         """
         result = []
-        for index, row in self.df.iterrows():
+        # Use appropriate DataFrame for iteration
+        if isinstance(self._df, pl.DataFrame):
+            underlying_df = self._df
+        else:
+            underlying_df = pl.from_pandas(self._df.reset_index() if hasattr(self._df, 'index') else self._df)
+        # Polars implementation
+        for row in underlying_df.iter_rows(named=True):
+            # Find datetime column
+            dt_val = None
+            for col in underlying_df.columns:
+                if underlying_df[col].dtype in [pl.Datetime, pl.Date]:
+                    dt_val = row[col]
+                    break
+
+            if dt_val is None:
+                # Try to find a column with date/time in the name
+                for col in ['datetime', 'date', 'timestamp']:
+                    if col in row:
+                        dt_val = row[col]
+                        break
+
+            timestamp = int(dt_val.timestamp()) if hasattr(dt_val, 'timestamp') else int(dt_val.timestamp())
+
             item = {
-                "timestamp": int(index.timestamp()),
+                "timestamp": timestamp,
                 "open": row.get("open"),
                 "high": row.get("high"),
                 "low": row.get("low"),
@@ -187,7 +458,7 @@ class Bars:
         float, Decimal or None
 
         """
-        return self.df["close"].iloc[-1]
+        return self.df["close"][-1]
 
     def get_last_dividend(self):
         """Return the last dividend of the last bar
@@ -201,9 +472,9 @@ class Bars:
         float
         """
         if "dividend" in self.df.columns:
-            return self.df["dividend"].iloc[-1]
+            return self.df["dividend"][-1]
         else:
-            logging.debug("Unable to find 'dividend' column in bars")
+            logger.debug("Unable to find 'dividend' column in bars")
             return 0
 
     def filter(self, start=None, end=None):
@@ -221,11 +492,27 @@ class Bars:
         -------
         Bars object
         """
-        df_copy = self.df
-        if isinstance(start, datetime):
-            df_copy = df_copy[df_copy.index >= start]
-        if isinstance(end, datetime):
-            df_copy = df_copy[df_copy.index <= end]
+        # Get polars DataFrame for operations
+        df_copy = self.polars_df
+        # Find datetime column
+        dt_col = None
+        for col in df_copy.columns:
+            if df_copy[col].dtype in [pl.Datetime, pl.Date]:
+                dt_col = col
+                break
+
+        if dt_col is None:
+            # Try common datetime column names
+            for col in ['datetime', 'date', 'timestamp']:
+                if col in df_copy.columns:
+                    dt_col = col
+                    break
+
+        if dt_col:
+            if isinstance(start, datetime):
+                df_copy = df_copy.filter(pl.col(dt_col) >= start)
+            if isinstance(end, datetime):
+                df_copy = df_copy.filter(pl.col(dt_col) <= end)
 
         return df_copy
 
@@ -234,12 +521,19 @@ class Bars:
         Calculate the momentum of the asset over the last num_periods rows. If dividends are provided by the data source,
         and included in the return calculation, the momentum will be adjusted for dividends.
         """
-        df_copy = self.df.copy()
-        if "return" in df_copy.columns:
-            period_adj_returns = df_copy['return'].iloc[-num_periods:]
-            momentum = (1 + period_adj_returns).cumprod().iloc[-1] - 1
+        if "return" in self.df.columns:
+            # Use existing return column
+            underlying_df = self.polars_df
+            period_adj_returns = underlying_df['return'].tail(num_periods)
+            momentum = float((1 + period_adj_returns).product() - 1)
         else:
-            momentum = df_copy['close'].pct_change(num_periods).iloc[-1]
+            # Calculate momentum directly
+            underlying_df = self.polars_df
+            close_values = underlying_df['close'].to_numpy()
+            if len(close_values) > num_periods:
+                momentum = (close_values[-1] / close_values[-num_periods-1]) - 1
+            else:
+                momentum = np.nan
         return momentum
 
     def get_total_volume(self, start=None, end=None):
@@ -266,78 +560,109 @@ class Bars:
         return volume
 
     def aggregate_bars(self, frequency, **grouper_kwargs):
+        """Aggregate to a new timeframe.
+
+        Accepts flexible minute/hour/day aliases (e.g. '5min', '5MINUTE', '5 m', '5   Minutes').
+        Ensures the datetime column is a proper polars Datetime, coercing from integer epoch seconds
+        (or milliseconds) and common string formats.
         """
-        Will convert a set of bars to a different timeframe (eg. 1 min to 15 min)
-        frequency (string): The new timeframe that the bars should be in, eg. "15Min", "1H", or "1D"
-        Returns a new bars object.
+        underlying_df = self.polars_df
 
-        Parameters
-        ----------
-        frequency : str
-            The new timeframe that the bars should be in, eg. "15Min", "1H", or "1D"
+        # Identify datetime column
+        dt_col = None
+        for c in underlying_df.columns:
+            if underlying_df[c].dtype in (pl.Datetime, pl.Date):
+                dt_col = c
+                break
+        if dt_col is None:
+            for c in ["datetime", "date", "timestamp"]:
+                if c in underlying_df.columns:
+                    dt_col = c
+                    break
+        if dt_col is None:
+            raise ValueError("No datetime column found in DataFrame")
 
-        Returns
-        -------
-        Bars object
+        # Early coercion: integer epoch seconds/milliseconds or string -> Datetime
+        INTEGER_DTYPES = {pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64}
+        early_dtype = underlying_df[dt_col].dtype
+        if early_dtype in INTEGER_DTYPES:
+            sample = underlying_df[dt_col].head(1).to_list()
+            expr = pl.col(dt_col)
+            if sample and sample[0] > 10**12:  # treat as ms
+                expr = (pl.col(dt_col) // 1000).cast(pl.Int64)
+            tmp_name = f"__tmp_epoch_{dt_col}"
+            underlying_df = (
+                underlying_df
+                .with_columns(pl.from_epoch(expr, time_unit="s").alias(tmp_name))
+                .drop(dt_col)
+                .rename({tmp_name: dt_col})
+            )
+            if isinstance(self._df, pl.DataFrame):
+                self._df = underlying_df
+        elif early_dtype == pl.Utf8:
+            underlying_df = underlying_df.with_columns(
+                pl.col(dt_col).str.strptime(pl.Datetime, strict=False, format=None).alias(dt_col)
+            )
+            if isinstance(self._df, pl.DataFrame):
+                self._df = underlying_df
 
-        Examples
-        --------
-        >>> # Get the 15 minute bars for the last hour
-        >>> bars = self.get_historical_prices("AAPL", 60, "minute")
-        >>> bars_agg = bars.aggregate_bars("15Min")
-        """
-        new_df = self.df.groupby(pd.Grouper(freq=frequency, **grouper_kwargs)).agg(
-            {
-                "open": "first",
-                "close": "last",
-                "low": "min",
-                "high": "max",
-                "volume": "sum",
-            }
+        # Frequency normalization
+        original_frequency = frequency
+        if not isinstance(frequency, str):
+            raise ValueError(f"frequency must be a string, got {type(frequency)}")
+        f_lower = frequency.strip().lower()
+
+        # Flexible frequency parsing: allow any integer + unit alias.
+        # Examples accepted: 2m, 2min, 2 minutes, 3h, 90 s, 1D, 5 t
+        unit_aliases = {
+            's': 's', 'sec': 's', 'secs': 's', 'second': 's', 'seconds': 's',
+            't': 'm', 'm': 'm', 'min': 'm', 'mins': 'm', 'minute': 'm', 'minutes': 'm',
+            'h': 'h', 'hr': 'h', 'hrs': 'h', 'hour': 'h', 'hours': 'h',
+            'd': 'd', 'day': 'd', 'days': 'd'
+        }
+
+        polars_freq = None
+        # Direct simple form like 5m / 2h / 1d
+        if re.match(r"^\d+[smhd]$", f_lower):
+            polars_freq = f_lower
+        else:
+            m = re.match(r"^(\d+)\s*([a-zA-Z]+)$", f_lower)
+            if m:
+                num, unit = m.groups()
+                unit = unit_aliases.get(unit, None)
+                if unit:
+                    polars_freq = f"{int(num)}{unit}"
+
+        if polars_freq is None:
+            raise ValueError(
+                f"Unsupported frequency '{original_frequency}'. Normalization failed. "
+                "Examples: 2m, 5min, 15 minutes, 1h, 4 hours, 1d."
+            )
+        # Ensure datetime dtype (early coercion should have handled; add safety check)
+        if underlying_df[dt_col].dtype not in (pl.Datetime, pl.Date):
+            raise ValueError(
+                f"Cannot aggregate: datetime column '{dt_col}' has unsupported dtype {underlying_df[dt_col].dtype}. "
+                "Provide a DataFrame with a proper datetime column or integer epoch seconds."
+            )
+
+        # Perform aggregation
+        new_df = (
+            underlying_df
+            .sort(dt_col)
+            .group_by_dynamic(
+                dt_col,
+                every=polars_freq,
+                closed="left",
+                **grouper_kwargs
+            )
+            .agg([
+                pl.col("open").first().alias("open"),
+                pl.col("high").max().alias("high"),
+                pl.col("low").min().alias("low"),
+                pl.col("close").last().alias("close"),
+                pl.col("volume").sum().alias("volume"),
+            ])
         )
-        new_df.columns = ["open", "close", "low", "high", "volume"]
-        new_df = new_df.dropna()
-
-        new_bars = Bars(new_df, self.source, self.asset)
-
-        return new_bars
-
-
-class NoBarDataFound(Exception):
-    def __init__(self, source, asset):
-        message = (
-            f"{source} did not return data for symbol {asset}. "
-            f"Make sure there is no symbol typo or use another data source"
-        )
-        super(NoBarDataFound, self).__init__(message)
-
-    def aggregate_bars(self, frequency):
-        """
-        Will convert a set of bars to a different timeframe (eg. 1 min to 15 min)
-        frequency (string): The new timeframe that the bars should be in, eg. "15Min", "1H", or "1D"
-        Returns a new bars object.
-        """
-        new_df = self.df.groupby(pd.Grouper(freq=frequency)).agg(
-            {
-                "open": "first",
-                "close": "last",
-                "low": "min",
-                "high": "max",
-                "volume": "sum",
-            }
-        )
-        new_df.columns = ["open", "close", "low", "high", "volume"]
-        new_df = new_df.dropna()
-
-        new_bars = Bars(new_df, self.source, self.asset)
-
-        return new_bars
-
-
-class NoBarDataFound(Exception):
-    def __init__(self, source, asset):
-        message = (
-            f"{source} did not return data for symbol {asset}. "
-            f"Make sure there is no symbol typo or use another data source"
-        )
-        super(NoBarDataFound, self).__init__(message)
+        new_df = new_df.drop_nulls()
+        # Preserve caller's return_polars preference
+        return Bars(new_df, self.source, self.asset, return_polars=self._return_polars)

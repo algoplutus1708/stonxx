@@ -1,12 +1,24 @@
-import logging
+import logging  # Needed for logging infrastructure setup
 import os
 import signal
-import sys
+import warnings
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
+
+from lumibot.tools.lumibot_logger import get_logger
 
 # Overloading time.sleep to warn users against using it
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+@dataclass
+class _BacktestProfilingConfig:
+    enabled: bool
+    tool: str
+    format: str
+    clock: str
+    output_path: Path
 
 
 class Trader:
@@ -32,13 +44,9 @@ class Trader:
             if not isinstance(logfile, str):
                 raise ValueError("logfile must be a string")
 
-        # Setting debug and _logfile parameters and setting global log format
+        # Setting debug and _logfile parameters
         self.debug = debug
         self.backtest = backtest
-        std_format = "%(asctime)s: %(levelname)s: %(message)s"
-        debug_format = "%(asctime)s: %(name)s: %(levelname)s: %(message)s"
-        log_format = std_format if not self.debug else debug_format
-        self.log_format = logging.Formatter(log_format)
         self.quiet_logs = quiet_logs  # Turns off all logging execpt for error messages in backtesting
 
         if logfile:
@@ -131,34 +139,154 @@ class Trader:
                 )
 
         strat = self._strategies[0]
+        # NOTE: Market auto-detection now happens inside Broker.__init__.
+        # This previous redundancy has been removed to ensure a single
+        # source of truth for market inference (futures / crypto / 24-7).
         if self.is_backtest_broker:
             strat.verify_backtest_inputs(strat.backtesting_start, strat.backtesting_end)
             logger.info("Backtesting starting...")
 
+        profiling = self._get_backtest_profiling_config(strat=strat, base_filename=base_filename)
+
         signal.signal(signal.SIGINT, self._stop_pool)
         self._set_logger()
         self._init_pool()
-        self._start_pool()
-        if not async_:
-            self._join_pool()
-        result = self._collect_analysis()
 
-        if self.is_backtest_broker:
-            logger.setLevel(logging.INFO)
-            logger.info("Backtesting finished")
+        _yappi = None
+        if profiling and profiling.enabled and profiling.tool == "yappi":
+            try:
+                import yappi as _yappi  # type: ignore
 
-            if strat._analyze_backtest:
-                strat.backtest_analysis(
-                    logdir=self.logdir,
-                    show_plot=show_plot,
-                    show_tearsheet=show_tearsheet,
-                    save_tearsheet=save_tearsheet,
-                    show_indicators=show_indicators,
-                    tearsheet_file=tearsheet_file,
-                    base_filename=base_filename,
+                _yappi.set_clock_type(profiling.clock)
+                _yappi.clear_stats()
+                _yappi.start()
+                logger.info(
+                    "Backtest profiling enabled: tool=%s clock=%s artifact=%s",
+                    profiling.tool,
+                    profiling.clock,
+                    profiling.output_path.name,
                 )
+            except Exception as exc:
+                _yappi = None
+                logger.warning("Failed to enable yappi profiling: %s", exc)
 
-        return result
+        try:
+            self._start_pool()
+            if not async_:
+                self._join_pool()
+            result = self._collect_analysis()
+
+            if self.is_backtest_broker:
+                # Don't override the logger level - respect the quiet logs setting
+                logger.info("Backtesting finished")
+
+                if strat._analyze_backtest:
+                    strat.backtest_analysis(
+                        logdir=self.logdir,
+                        show_plot=show_plot,
+                        show_tearsheet=show_tearsheet,
+                        save_tearsheet=save_tearsheet,
+                        show_indicators=show_indicators,
+                        tearsheet_file=tearsheet_file,
+                        base_filename=base_filename,
+                    )
+
+                # Emit a single cache summary line so production runs can quantify S3 hydration
+                # cost without guessing or relying solely on profiler artifacts.
+                try:
+                    from lumibot.tools.backtest_cache import get_backtest_cache
+
+                    get_backtest_cache().log_summary()
+                except Exception:
+                    pass
+
+            return result
+        finally:
+            if _yappi is not None and profiling is not None and profiling.enabled:
+                try:
+                    _yappi.stop()
+                    stats = _yappi.get_func_stats()
+                    stats.sort("ttot", "desc")
+
+                    profiling.output_path.parent.mkdir(parents=True, exist_ok=True)
+                    import csv
+
+                    # Write a text CSV artifact so existing backtest artifact download paths
+                    # (Bot Manager → BotSpot "View Files") can serve it without binary handling.
+                    with open(profiling.output_path, "w", newline="") as handle:
+                        writer = csv.writer(handle)
+                        writer.writerow(
+                            [
+                                "full_name",
+                                "module",
+                                "lineno",
+                                "name",
+                                "ncall",
+                                "nactualcall",
+                                "ttot_s",
+                                "tsub_s",
+                                "tavg_s",
+                                "ctx_name",
+                            ]
+                        )
+                        for entry in stats:
+                            writer.writerow(
+                                [
+                                    getattr(entry, "full_name", ""),
+                                    getattr(entry, "module", ""),
+                                    getattr(entry, "lineno", ""),
+                                    getattr(entry, "name", ""),
+                                    getattr(entry, "ncall", ""),
+                                    getattr(entry, "nactualcall", ""),
+                                    getattr(entry, "ttot", ""),
+                                    getattr(entry, "tsub", ""),
+                                    getattr(entry, "tavg", ""),
+                                    getattr(entry, "ctx_name", ""),
+                                ]
+                            )
+                    logger.info("Wrote backtest profile artifact: %s", profiling.output_path)
+                except Exception as exc:
+                    logger.warning("Failed to write yappi profile artifact: %s", exc)
+                finally:
+                    try:
+                        _yappi.clear_stats()
+                    except Exception:
+                        pass
+
+    def _get_backtest_profiling_config(
+        self,
+        *,
+        strat,
+        base_filename: Optional[str],
+    ) -> Optional[_BacktestProfilingConfig]:
+        if not self.is_backtest_broker:
+            return None
+
+        profile_mode = os.environ.get("BACKTESTING_PROFILE", "").strip().lower()
+        if profile_mode != "yappi":
+            return None
+
+        strategy_name = getattr(strat, "_name", None) or getattr(strat, "name", None) or "strategy"
+        resolved_base = base_filename or strategy_name
+        output_path = (self.logdir / f"{resolved_base}_profile_yappi.csv").resolve()
+
+        # Make settings.json aware of the profiling artifact (best-effort; should never crash).
+        try:
+            setattr(strat, "_backtest_profiling_enabled", True)
+            setattr(strat, "_backtest_profiling_tool", "yappi")
+            setattr(strat, "_backtest_profiling_format", "csv")
+            setattr(strat, "_backtest_profiling_clock", "wall")
+            setattr(strat, "_backtest_profiling_artifact", output_path.name)
+        except Exception:
+            pass
+
+        return _BacktestProfilingConfig(
+            enabled=True,
+            tool="yappi",
+            format="csv",
+            clock="wall",
+            output_path=output_path,
+        )
 
     # Async version of run_all
     def run_all_async(self):
@@ -167,54 +295,49 @@ class Trader:
         return self._strategies
 
     def stop_all(self):
-        logging.info("Stopping all strategies for this trader")
+        logger.info("Stopping all strategies for this trader")
         self._stop_pool()
 
     def _set_logger(self):
         """Setting Logging to both console and a file if logfile is specified"""
+        # Import here to avoid circular imports
+        from lumibot.tools.lumibot_logger import add_file_handler, set_log_level
+        
+        # Set external library log levels to reduce noise
+        # NOTE: lumilogger.get_logger doesn't work with non-lumibot loggers, so we use logging.getLogger directly
         logging.getLogger("urllib3").setLevel(logging.ERROR)
         logging.getLogger("requests").setLevel(logging.ERROR)
         logging.getLogger("apscheduler.scheduler").setLevel(logging.ERROR)
         logging.getLogger("apscheduler.executors.default").setLevel(logging.ERROR)
         logging.getLogger("lumibot.data_sources.yahoo_data").setLevel(logging.ERROR)
-        logger = logging.getLogger()
 
-        for handler in logger.handlers:
-            if handler.__class__.__name__ == "StreamHandler":
-                logger.removeHandler(handler)
-
-        stream_handler = logging.StreamHandler(stream=sys.stdout)
-        stream_handler.setLevel(logging.INFO)
-        logger.addHandler(stream_handler)
-
+        # Configure global log level based on trader settings
         if self.debug:
-            logger.setLevel(logging.DEBUG)
+            set_log_level("DEBUG")
         elif self.is_backtest_broker:
-            logger.setLevel(logging.INFO)
-
             # Quiet logs turns off all backtesting logging except for error messages
             if self.quiet_logs:
-                logger.setLevel(logging.ERROR)
-
-                # Ensure console has minimal logging to keep things clean during backtesting
-                stream_handler.setLevel(logging.ERROR)
-
+                set_log_level("ERROR")
+            else:
+                set_log_level("INFO")
+                # When quiet_logs=False, allow INFO logs to console (respects BACKTESTING_QUIET_LOGS)
         else:
-            # Live trades should always have full logging.
-            logger.setLevel(logging.INFO)
+            # Live trades should always have full logging for both console and file
+            set_log_level("INFO")
 
-        # Setting file logging
+        # PERFORMANCE: avoid spamming identical FutureWarnings thousands of times during backtests
+        # (e.g., pandas chained-assignment warnings inside strategy indicator code).
+        if self.is_backtest_broker:
+            warnings.simplefilter("once", FutureWarning)
+            warnings.filterwarnings(
+                "ignore",
+                category=FutureWarning,
+                message=r"A value is trying to be set on a copy of a DataFrame or Series through chained assignment using an inplace method.*",
+            )
+
+        # Setting file logging if specified
         if self.logfile:
-            dir = os.path.dirname(os.path.abspath(self.logfile))
-            if not os.path.exists(dir):
-                os.mkdir(dir)
-            fileHandler = logging.FileHandler(self.logfile, mode="w", encoding="utf-8")
-            logger.addHandler(fileHandler)
-
-        for handler in logger.handlers:
-            handler.setFormatter(self.log_format)
-
-        logger.propagate = True
+            add_file_handler(str(self.logfile), level="DEBUG" if self.debug else "INFO")
 
         # Disable Interactive Brokers logs
         for log_name, log_obj in logging.Logger.manager.loggerDict.items():
@@ -247,12 +370,12 @@ class Trader:
         needs two positional arguments, the signal
         and the frame"""
 
-        logging.debug(f"Received signal number {sig}.")
-        logging.debug(f"Closing Trader in {frame} frame.")
+        logger.debug(f"Received signal number {sig}.")
+        logger.debug(f"Closing Trader in {frame} frame.")
         for strategy_thread in self._pool:
             if not strategy_thread.abrupt_closing:
                 strategy_thread.stop()
-                logging.info(f"Trading finished for {strategy_thread.strategy._name}")
+                logger.info(f"Trading finished for {strategy_thread.strategy._name}")
 
     def _collect_analysis(self):
         result = {}

@@ -1,14 +1,13 @@
-from typing import Dict, Any, List
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
 import time
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
+from typing import Any, Dict, List
 
 import pandas as pd
 
 from lumibot.entities import Asset, TradingFee
-from lumibot.strategies.strategy import Strategy
 from lumibot.entities.order import Order
+from lumibot.strategies.strategy import Strategy
 from lumibot.tools.pandas import prettify_dataframe_with_decimals
-from lumibot.tools.helpers import quantize_to_num_decimals
 
 
 class DriftType:
@@ -16,61 +15,19 @@ class DriftType:
     RELATIVE = "relative"
 
 
-def get_prices_or_raise(strategy: Strategy, asset: Asset, quote: Asset) -> tuple[Decimal, Decimal, Decimal]:
-    """Return (bid, ask, midpoint) prices.
-
-    Behavior:
-    - Backtesting: use strategy.get_last_price; return it as midpoint and do not return bid/ask (None, None, midpoint).
-    - Live/paper: use strategy.get_quote and compute midpoint from bid/ask; raise if midpoint unavailable.
-    """
-    # If in backtesting, use last price as midpoint and omit bid/ask
+def get_last_price_or_raise(strategy: Strategy, asset: Asset, quote: Asset) -> Decimal:
     try:
-        if getattr(strategy, 'is_backtesting', False) is True:
-            last_price = strategy.get_last_price(asset, quote)
-            if last_price is None:
-                msg = f"DriftRebalancer could not get last price for {asset}-{quote}."
-                strategy.logger.error(msg)
-                raise ValueError(msg)
-            midpoint = Decimal(str(last_price))
-            return None, None, midpoint
+        price = strategy.get_last_price(asset, quote)
     except Exception as e:
-        # Log and re-raise for visibility in tests/strategies
-        strategy.logger.error(f"DriftRebalancer backtesting get_last_price failed for {asset}-{quote}. Error: {e}")
-        raise
-
-    # Not backtesting: use quote data
-    try:
-        q = strategy.get_quote(asset, quote)
-    except Exception as e:
-        strategy.logger.error(f"DriftRebalancer could not get_quote for {asset}-{quote}. Error: {e}")
+        strategy.logger.error(f"DriftRebalancer could not get_last_price for {asset}-{quote}. Error: {e}")
         raise e
 
-    bid = None
-    ask = None
-    midpoint = None
-    if q is not None:
-        try:
-            bid = None if getattr(q, 'bid', None) is None else Decimal(str(q.bid))
-            ask = None if getattr(q, 'ask', None) is None else Decimal(str(q.ask))
-        except Exception:
-            # Fall back in case bid/ask are not numeric
-            bid = None
-            ask = None
-        if bid is not None and ask is not None:
-            midpoint = (bid + ask) / Decimal(2)
-        elif getattr(q, 'price', None) is not None:
-            # Fallback to price field if provided
-            try:
-                midpoint = Decimal(str(q.price))
-            except Exception:
-                midpoint = None
-
-    if midpoint is None:
-        msg = f"DriftRebalancer could not compute midpoint price for {asset}-{quote}."
+    if price is None:
+        msg = f"DriftRebalancer could not get_last_price for {asset}-{quote}."
         strategy.logger.error(msg)
         raise ValueError(msg)
-
-    return bid, ask, midpoint
+    else:
+        return Decimal(str(price))
 
 
 class DriftRebalancerLogic:
@@ -271,8 +228,8 @@ class DriftCalculationLogic:
                 current_value = Decimal(str(position.quantity))
             else:
                 is_quote_asset = False
-                bid, ask, midpoint = get_prices_or_raise(self.strategy, position.asset, self.strategy.quote_asset)
-                current_value = current_quantity * midpoint
+                last_price = get_last_price_or_raise(self.strategy, position.asset, self.strategy.quote_asset)
+                current_value = current_quantity * last_price
             self._add_position(
                 symbol=symbol,
                 base_asset=position.asset,
@@ -320,7 +277,6 @@ class DriftCalculationLogic:
         # Use total portfolio value instead of just current asset values
         # This fixes the issue where starting from all-cash positions would result in zero target values
         total_value = Decimal(str(self.strategy.get_portfolio_value()))
-        
         self.df["current_weight"] = self.df["current_value"] / total_value if total_value > 0 else Decimal(0)
         self.df["target_value"] = self.df["target_weight"] * total_value
         self.df["drift"] = self.df.apply(self._calculate_drift_row, axis=1)
@@ -395,12 +351,8 @@ class DriftOrderLogic:
         self.only_rebalance_drifted_assets = only_rebalance_drifted_assets
 
         # Sanity checks
-        # If drift_threshold == 0, we are in "always rebalance" mode. In that case,
-        # acceptable_slippage is used solely for limit pricing and should NOT be
-        # constrained by the threshold.
-        if self.drift_threshold != Decimal("0"):
-            if self.acceptable_slippage >= self.drift_threshold:
-                raise ValueError("acceptable_slippage must be less than drift_threshold")
+        if self.acceptable_slippage >= self.drift_threshold:
+            raise ValueError("acceptable_slippage must be less than drift_threshold")
         if self.drift_threshold >= Decimal("1.0"):
             raise ValueError("drift_threshold must be less than 1.0")
         if self.order_type not in [Order.OrderType.LIMIT, Order.OrderType.MARKET]:
@@ -423,8 +375,11 @@ class DriftOrderLogic:
         if df is None:
             raise ValueError("You must pass in a DataFrame to DriftOrderLogic.rebalance()")
 
-        # sort dataframe by the largest absolute value drift first
-        df = df.reindex(df["drift"].abs().sort_values(ascending=False).index)
+        # Sort by largest absolute drift first. Use a deterministic tie-break so rebalances
+        # are stable across Python/pandas versions and CI runners when abs(drifts) tie.
+        df = df.assign(_abs_drift=df["drift"].abs())
+        df = df.sort_values(by=["_abs_drift", "symbol"], ascending=[False, True], kind="mergesort")
+        df = df.drop(columns=["_abs_drift"])
 
         # Execute sells first
         sell_orders = []
@@ -434,8 +389,8 @@ class DriftOrderLogic:
                 # Sell everything (or create a short position)
                 base_asset = row["base_asset"]
                 quantity = row["current_quantity"]
-                bid, ask, midpoint = get_prices_or_raise(self.strategy, base_asset, self.strategy.quote_asset)
-                limit_price = self.calculate_limit_price(midpoint_price=midpoint, side="sell", asset=base_asset)
+                last_price = get_last_price_or_raise(self.strategy, base_asset, self.strategy.quote_asset)
+                limit_price = self.calculate_limit_price(last_price=last_price, side="sell", asset=base_asset)
                 if quantity == 0 and self.shorting:
                     # Create a new short position.
                     if self.fractional_shares:
@@ -448,10 +403,7 @@ class DriftOrderLogic:
                         base_asset=base_asset,
                         quantity=quantity,
                         limit_price=limit_price,
-                        side="sell",
-                        bid=bid,
-                        ask=ask,
-                        arrival_price=midpoint,
+                        side="sell"
                     )
                     sell_orders.append(order)
 
@@ -461,9 +413,9 @@ class DriftOrderLogic:
                     continue
 
                 base_asset = row["base_asset"]
-                bid, ask, midpoint = get_prices_or_raise(self.strategy, base_asset, self.strategy.quote_asset)
-                limit_price = self.calculate_limit_price(midpoint_price=midpoint, side="sell", asset=base_asset)
-                
+                last_price = get_last_price_or_raise(self.strategy, base_asset, self.strategy.quote_asset)
+                limit_price = self.calculate_limit_price(last_price=last_price, side="sell", asset=base_asset)
+
                 # For options, account for the 100-share multiplier in selling too
                 if base_asset.asset_type == Asset.AssetType.OPTION:
                     # Options prices are quoted per share but each contract represents 100 shares
@@ -471,7 +423,7 @@ class DriftOrderLogic:
                     quantity = (row["current_value"] - row["target_value"]) / effective_price
                 else:
                     quantity = (row["current_value"] - row["target_value"]) / limit_price
-                
+
                 # Apply quantity rounding - options must be whole contracts
                 if base_asset.asset_type == Asset.AssetType.OPTION:
                     quantity = quantity.quantize(Decimal('1'), rounding=ROUND_DOWN)
@@ -486,10 +438,7 @@ class DriftOrderLogic:
                         base_asset=base_asset,
                         quantity=quantity,
                         limit_price=limit_price,
-                        side="sell",
-                        bid=bid,
-                        ask=ask,
-                        arrival_price=midpoint,
+                        side="sell"
                     )
                     sell_orders.append(order)
 
@@ -506,16 +455,13 @@ class DriftOrderLogic:
                 # Cover our short position
                 base_asset = row["base_asset"]
                 quantity = abs(row["current_quantity"])
-                bid, ask, midpoint = get_prices_or_raise(self.strategy, base_asset, self.strategy.quote_asset)
-                limit_price = self.calculate_limit_price(midpoint_price=midpoint, side="buy", asset=base_asset)
+                last_price = get_last_price_or_raise(self.strategy, base_asset, self.strategy.quote_asset)
+                limit_price = self.calculate_limit_price(last_price=last_price, side="buy", asset=base_asset)
                 order = self.place_order(
                     base_asset=base_asset,
                     quantity=quantity,
                     limit_price=limit_price,
-                    side="buy",
-                    bid=bid,
-                    ask=ask,
-                    arrival_price=midpoint,
+                    side="buy"
                 )
                 buy_orders.append(order)
                 cash_position -= quantity * limit_price
@@ -526,10 +472,10 @@ class DriftOrderLogic:
                     continue
 
                 base_asset = row["base_asset"]
-                bid, ask, midpoint = get_prices_or_raise(self.strategy, base_asset, self.strategy.quote_asset)
-                limit_price = self.calculate_limit_price(midpoint_price=midpoint, side="buy", asset=base_asset)
+                last_price = get_last_price_or_raise(self.strategy, base_asset, self.strategy.quote_asset)
+                limit_price = self.calculate_limit_price(last_price=last_price, side="buy", asset=base_asset)
                 order_value = row["target_value"] - row["current_value"]
-                
+
                 # For options, account for the 100-share multiplier
                 if base_asset.asset_type == Asset.AssetType.OPTION:
                     # Options prices are quoted per share but each contract represents 100 shares
@@ -560,7 +506,7 @@ class DriftOrderLogic:
                         actual_cost = quantity * limit_price * 100
                     else:
                         actual_cost = quantity * limit_price
-                        
+
                     if actual_cost > cash_position:
                         self.strategy.logger.error(
                             f"Quantity {quantity} of {base_asset.symbol} * cost: {actual_cost:.2f}"
@@ -572,24 +518,21 @@ class DriftOrderLogic:
                         base_asset=base_asset,
                         quantity=quantity,
                         limit_price=limit_price,
-                        side="buy",
-                        bid=bid,
-                        ask=ask,
-                        arrival_price=midpoint,
+                        side="buy"
                     )
                     buy_orders.append(order)
-                    
+
                     # Deduct actual cost from cash position
                     if base_asset.asset_type == Asset.AssetType.OPTION:
                         cash_position -= quantity * limit_price * 100
                     else:
                         cash_position -= quantity * limit_price
 
-    def calculate_limit_price(self, *, midpoint_price: Decimal, side: str, asset: Asset) -> Decimal:
+    def calculate_limit_price(self, *, last_price: Decimal, side: str, asset: Asset) -> Decimal:
         if side == "sell":
-            limit_price = midpoint_price * (1 - self.acceptable_slippage)
+            limit_price = last_price * (1 - self.acceptable_slippage)
         else:
-            limit_price = midpoint_price * (1 + self.acceptable_slippage)
+            limit_price = last_price * (1 + self.acceptable_slippage)
 
         if asset.asset_type == Asset.AssetType.CRYPTO:
             # Keep full precision for crypto
@@ -621,29 +564,12 @@ class DriftOrderLogic:
             base_asset: Asset,
             quantity: Decimal,
             limit_price: Decimal,
-            side: str,
-            *,
-            bid: Decimal,
-            ask: Decimal,
-            arrival_price: Decimal,
+            side: str
     ) -> Order:
         quote_asset = self.strategy.quote_asset or Asset(symbol="USD", asset_type="forex")
         # If orders don't fill at the end of the day, and there is a split the next day,
         # unexpected things can happen. Use the 'day' time in force to address this.
         time_in_force = 'day'
-
-        # Build custom_params based on environment:
-        if getattr(self.strategy, 'is_backtesting', False) is True:
-            # In backtesting, only send arrival_price per new behavior
-            custom_params = {
-                "arrival_price": arrival_price,
-            }
-        else:
-            custom_params = {
-                "arrival_price": arrival_price,
-                "bid": bid,
-                "ask": ask,
-            }
 
         if self.order_type == Order.OrderType.LIMIT:
             order = self.strategy.create_order(
@@ -652,8 +578,7 @@ class DriftOrderLogic:
                 side=side,
                 limit_price=float(limit_price),
                 quote=quote_asset,
-                time_in_force=time_in_force,
-                custom_params=custom_params,
+                time_in_force=time_in_force
             )
         else:
             order = self.strategy.create_order(
@@ -661,8 +586,7 @@ class DriftOrderLogic:
                 quantity=quantity,
                 side=side,
                 quote=quote_asset,
-                time_in_force=time_in_force,
-                custom_params=custom_params,
+                time_in_force=time_in_force
             )
 
         self.strategy.logger.info(f"Submitting order: {order}")
@@ -670,11 +594,6 @@ class DriftOrderLogic:
         return order
 
     def _check_if_rebalance_needed(self, drift_df: pd.DataFrame) -> bool:
-        # If threshold is zero, "always rebalance" mode is active
-        if self.drift_threshold == Decimal("0"):
-            self.strategy.logger.info("drift_threshold is 0: always rebalance mode enabled.")
-            return True
-
         # Check if the absolute value of any drift is greater than the threshold
         rebalance_needed = False
         for index, row in drift_df.iterrows():
@@ -685,7 +604,7 @@ class DriftOrderLogic:
             if abs(row["drift"]) > self.drift_threshold:
                 rebalance_needed = True
                 msg += (
-                    f" Drift exceeds threshold."
+                    " Drift exceeds threshold."
                 )
             self.strategy.logger.info(msg)
 
@@ -723,7 +642,7 @@ class DriftOrderLogic:
             # For options, calculate fees based on actual cost (price * 100 * quantity)
             # Note: We need to determine if this is an options trade - we'll approximate by checking the calling context
             # This is a limitation of the current design, but works for most cases
-            
+
             fees = self.calculate_trading_costs(desired_quantity, price, trading_fees)
             total_cost = desired_quantity * price + fees
 

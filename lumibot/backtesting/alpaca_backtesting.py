@@ -1,30 +1,29 @@
-import logging
 import os
+from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Optional
 
-import pytz
-from datetime import datetime, timedelta
-from decimal import Decimal, ROUND_HALF_EVEN
-
 import pandas as pd
-from alpaca.data.historical import CryptoHistoricalDataClient
-from alpaca.data.historical import StockHistoricalDataClient
+import pytz
+from alpaca.data.historical import CryptoHistoricalDataClient, StockHistoricalDataClient
 from alpaca.data.requests import CryptoBarsRequest, StockBarsRequest
-from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from alpaca.data.timeframe import TimeFrame
 
-from lumibot.data_sources import DataSourceBacktesting, AlpacaData
+from lumibot.constants import LUMIBOT_CACHE_FOLDER
+from lumibot.data_sources import AlpacaData, DataSourceBacktesting
 from lumibot.entities import Asset, Bars
-from lumibot import (
-    LUMIBOT_CACHE_FOLDER,
-)
 from lumibot.tools.helpers import (
     date_n_trading_days_from_date,
+    get_decimals,
+    get_timezone_from_datetime,
     get_trading_days,
     get_trading_times,
-    get_timezone_from_datetime,
-    get_decimals,
-    quantize_to_num_decimals
+    quantize_to_num_decimals,
 )
+from lumibot.tools.lumibot_logger import get_logger
+
+logger = get_logger(__name__)
+
 from lumibot.tools.alpaca_helpers import sanitize_base_and_quote_asset
 
 
@@ -246,7 +245,14 @@ class AlpacaBacktesting(DataSourceBacktesting):
         # as the last price). This approach works for daily and minute bars. For daily bars, this returns the open
         # price, even if now is 9:30 and the daily bar was indexed at 00:00. Thats the only weird thing. But it makes
         # sense. The open of the daily bar for stocks was not at 00:00. It was at 9:30 anyway.
-        price = bars.df.iloc[0].open
+        # Support both pandas and polars-backed Bars without exceptions
+        df_local = bars.df
+        if hasattr(df_local, "iloc"):
+            # pandas: scalar-fast path
+            price = df_local["open"].iat[0]
+        else:
+            # polars
+            price = df_local["open"][0]
         num_decimals = get_decimals(price)
         return quantize_to_num_decimals(price, num_decimals)
 
@@ -259,6 +265,7 @@ class AlpacaBacktesting(DataSourceBacktesting):
             quote: Asset | None = None,
             exchange: str | None = None,
             include_after_hours: bool = True,
+            return_polars: bool = False,
             remove_incomplete_current_bar: Optional[bool] = None,
     ) -> Bars | None:
         """
@@ -367,7 +374,14 @@ class AlpacaBacktesting(DataSourceBacktesting):
         else:
             result_df = df.iloc[max(0, current_index - length + 1): current_index + 1]
 
-        return Bars(result_df, self.SOURCE, asset=asset, quote=quote)
+        return Bars(
+            result_df,
+            self.SOURCE,
+            asset=asset,
+            quote=quote,
+            return_polars=return_polars,
+            tzinfo=self.tzinfo,
+        )
 
     def get_chains(self, asset, quote=None):
         """Mock implementation for getting option chains"""
@@ -494,7 +508,7 @@ class AlpacaBacktesting(DataSourceBacktesting):
         filename = f"{key}.csv"
         filepath = os.path.join(cache_dir, filename)
 
-        logging.info(f"Fetching and caching data for {key}")
+        logger.info(f"Fetching and caching data for {key}")
 
         if base_asset.asset_type == 'crypto':
             client = self._crypto_client
@@ -560,7 +574,7 @@ class AlpacaBacktesting(DataSourceBacktesting):
         # Store in _data_store
         df.set_index('timestamp', inplace=True)
         self._data_store[key] = df
-        logging.info(f"Finished fetching and caching data for {key}")
+        logger.info(f"Finished fetching and caching data for {key}")
         return df
 
     def _load_ohlcv_into_data_store(self, key: str) -> bool:
@@ -601,10 +615,10 @@ class AlpacaBacktesting(DataSourceBacktesting):
 
             df.set_index('timestamp', inplace=True)
             self._data_store[key] = df
-            logging.info(f"Loaded cached data for key: {key} from cache.")
+            logger.info(f"Loaded cached data for key: {key} from cache.")
             return True
         except Exception as e:
-            logging.error(f"Failed to load cached data for key: {key}. Error: {e}")
+            logger.error(f"Failed to load cached data for key: {key}. Error: {e}")
             return False
 
     def get_historical_prices_between_dates(

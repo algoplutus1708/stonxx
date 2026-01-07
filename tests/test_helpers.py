@@ -1,4 +1,5 @@
 import datetime as dt
+import io
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 import pytz
@@ -11,8 +12,9 @@ from lumibot.tools.helpers import (
     get_trading_days,
     get_trading_times,
     get_timezone_from_datetime,
-    quantize_to_num_decimals, is_market_open
+    quantize_to_num_decimals, is_market_open, print_progress_bar
 )
+from lumibot.tools import helpers as helpers_module
 
 
 def test_has_more_than_n_decimal_places():
@@ -197,11 +199,10 @@ def test_get_trading_times_minute_24_7_utc():
     assert result[-1].time().minute == 59
     assert all(dtm.tzinfo.zone == tzinfo.zone for dtm in result)
 
-
-def test_get_trading_times_minute_24_7_america_chicago():
+def test_get_trading_times_minute_24_7_UTC():
     start_date = dt.datetime(2024, 1, 8)
     end_date = dt.datetime(2024, 1, 10)
-    tzinfo = pytz.timezone('America/Chicago')
+    tzinfo = pytz.timezone('UTC')
     pcal = get_trading_days(
         market='24/7',
         start_date=start_date,
@@ -217,6 +218,54 @@ def test_get_trading_times_minute_24_7_america_chicago():
     assert result[-1].time().hour == 23
     assert result[-1].time().minute == 59
     assert all(dtm.tzinfo.zone == tzinfo.zone for dtm in result)
+
+
+def test_print_progress_bar_throttles_output(monkeypatch):
+    """Progress printing should be capped to ~1 line/sec to avoid log spam."""
+    monkeypatch.setenv("BACKTESTING_QUIET_LOGS", "false")
+
+    helpers_module._PROGRESS_LAST_PRINT.clear()
+    buf = io.StringIO()
+
+    monotonic_values = [0.0, 0.2, 1.2]
+
+    def fake_monotonic():
+        if monotonic_values:
+            return monotonic_values.pop(0)
+        # Avoid breaking other background loops that may also call time.monotonic().
+        return 1.2
+
+    monkeypatch.setattr(helpers_module.time, "monotonic", fake_monotonic)
+
+    started = dt.datetime.now() - dt.timedelta(seconds=5)
+
+    print_progress_bar(
+        value=1,
+        start_value=0,
+        end_value=100,
+        backtesting_started=started,
+        file=buf,
+        portfolio_value=100_000.0,
+    )
+    print_progress_bar(
+        value=2,
+        start_value=0,
+        end_value=100,
+        backtesting_started=started,
+        file=buf,
+        portfolio_value=100_000.0,
+    )
+    print_progress_bar(
+        value=3,
+        start_value=0,
+        end_value=100,
+        backtesting_started=started,
+        file=buf,
+        portfolio_value=100_000.0,
+    )
+
+    progress_lines = [line for line in buf.getvalue().splitlines() if "Progress |" in line]
+    assert len(progress_lines) == 2
 
 
 def test_get_trading_times_minute():

@@ -1,0 +1,174 @@
+{
+  "cases": [
+    {
+      "backtest_time_seconds": 34.253473874996416,
+      "baseline_run_id": "AAPLDeepDipCalls_2026-01-05_09-33_aLJW35",
+      "data_source": "thetadata",
+      "end_date": "2025-12-01",
+      "lumibot_version": "4.4.27",
+      "max_backtest_time_seconds": 300,
+      "metrics_centipercent": {
+        "cagr": 4818,
+        "max_drawdown": -3430,
+        "total_return": 84600
+      },
+      "metrics_raw": {
+        "cagr": "48.18%",
+        "max_drawdown": "-34.30%",
+        "total_return": "846.00%"
+      },
+      "script_filename": "AAPL Deep Dip Calls (Copy 4).py",
+      "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
+      "settings_backtesting_start": "2020-01-01 00:00:00-05:00",
+      "slug": "aapl_deep_dip_calls",
+      "start_date": "2020-01-01",
+      "strategy_name": "AAPLDeepDipCalls"
+    },
+    {
+      "backtest_time_seconds": 34.633213000022806,
+      "baseline_run_id": "LeapsCallDebitSpread_2026-01-05_09-34_qqykop",
+      "data_source": "thetadata",
+      "end_date": "2025-10-15",
+      "lumibot_version": "4.4.27",
+      "max_backtest_time_seconds": 120,
+      "metrics_centipercent": {
+        "cagr": 864,
+        "max_drawdown": -143,
+        "total_return": 0
+      },
+      "metrics_raw": {
+        "cagr": "8.64%",
+        "max_drawdown": "-1.43%",
+        "total_return": "0.00%"
+      },
+      "script_filename": "Leaps Buy Hold (Alpha Picks).py",
+      "settings_backtesting_end": "2025-10-14 23:59:00-04:00",
+      "settings_backtesting_start": "2025-10-01 00:00:00-04:00",
+      "slug": "leaps_alpha_picks_short",
+      "start_date": "2025-10-01",
+      "strategy_name": "LeapsCallDebitSpread"
+    },
+    {
+      "backtest_time_seconds": 35.419062666012906,
+      "baseline_run_id": "TqqqSma200Strategy_2026-01-05_09-35_IibziX",
+      "data_source": "thetadata",
+      "end_date": "2025-12-01",
+      "lumibot_version": "4.4.27",
+      "max_backtest_time_seconds": 180,
+      "metrics_centipercent": {
+        "cagr": 4216,
+        "max_drawdown": -4840,
+        "total_return": 858500
+      },
+      "metrics_raw": {
+        "cagr": "42.16%",
+        "max_drawdown": "-48.40%",
+        "total_return": "8,585.00%"
+      },
+      "script_filename": "TQQQ 200-Day MA.py",
+      "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
+      "settings_backtesting_start": "2013-01-01 00:00:00-05:00",
+      "slug": "tqqq_sma200_thetadata",
+      "start_date": "2013-01-01",
+      "strategy_name": "TqqqSma200Strategy"
+    },
+    {
+      "backtest_time_seconds": 291.9957483340404,
+      "baseline_run_id": "BackdoorButterfly0DTE_2026-01-05_09-36_7AP0H8",
+      "data_source": "thetadata",
+      "end_date": "2025-12-01",
+      "lumibot_version": "4.4.27",
+      "max_backtest_time_seconds": 600,
+      "metrics_centipercent": {
+        "cagr": -2102,
+        "max_drawdown": -2630,
+        "total_return": -1900
+      },
+      "metrics_raw": {
+        "cagr": "-21.02%",
+        "max_drawdown": "-26.30%",
+        "total_return": "-19.00%"
+      },
+      "script_filename": "Backdoor Butterfly 0 DTE (Copy).py",
+      "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
+      "settings_backtesting_start": "2025-01-01 00:00:00-05:00",
+      "slug": "backdoor_butterfly_full_year",
+      "start_date": "2025-01-01",
+      "strategy_name": "BackdoorButterfly0DTE"
+    },
+    {
+      "backtest_time_seconds": 122.6331987909507,
+      "baseline_run_id": "MeliDeepDrawdownCalls_2026-01-05_09-42_bMjRNX",
+      "data_source": "thetadata",
+      "end_date": "2025-12-18",
+      "lumibot_version": "4.4.27",
+      "max_backtest_time_seconds": 300,
+      "metrics_centipercent": {
+        "cagr": 702,
+        "max_drawdown": -9932,
+        "total_return": 12500
+      },
+      "metrics_raw": {
+        "cagr": "7.02%",
+        "max_drawdown": "-99.32%",
+        "total_return": "125.00%"
+      },
+      "script_filename": "Meli Deep Drawdown Calls.py",
+      "settings_backtesting_end": "2025-12-17 23:59:00-05:00",
+      "settings_backtesting_start": "2013-01-01 00:00:00-05:00",
+      "slug": "meli_deep_drawdown",
+      "start_date": "2013-01-01",
+      "strategy_name": "MeliDeepDrawdownCalls"
+    },
+    {
+      "backtest_time_seconds": 290.771020959015,
+      "baseline_run_id": "BackdoorButterfly0DTESmartLimit_2026-01-05_09-44_qLKdxw",
+      "data_source": "thetadata",
+      "end_date": "2025-12-01",
+      "lumibot_version": "4.4.27",
+      "max_backtest_time_seconds": 600,
+      "metrics_centipercent": {
+        "cagr": -382,
+        "max_drawdown": -1338,
+        "total_return": -300
+      },
+      "metrics_raw": {
+        "cagr": "-3.82%",
+        "max_drawdown": "-13.38%",
+        "total_return": "-3.00%"
+      },
+      "script_filename": "Backdoor Butterfly 0 DTE (Copy) - with SMART LIMITS.py",
+      "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
+      "settings_backtesting_start": "2025-01-01 00:00:00-05:00",
+      "slug": "backdoor_smartlimit",
+      "start_date": "2025-01-01",
+      "strategy_name": "BackdoorButterfly0DTESmartLimit"
+    },
+    {
+      "backtest_time_seconds": 193.22364787501283,
+      "baseline_run_id": "SPXShortStraddle_2026-01-05_09-49_35TJJl",
+      "data_source": "thetadata",
+      "end_date": "2025-12-26",
+      "lumibot_version": "4.4.27",
+      "max_backtest_time_seconds": 600,
+      "metrics_centipercent": {
+        "cagr": -1172,
+        "max_drawdown": -2872,
+        "total_return": -1100
+      },
+      "metrics_raw": {
+        "cagr": "-11.72%",
+        "max_drawdown": "-28.72%",
+        "total_return": "-11.00%"
+      },
+      "script_filename": "SPX Short Straddle Intraday (Copy).py",
+      "settings_backtesting_end": "2025-12-25 23:59:00-05:00",
+      "settings_backtesting_start": "2025-01-06 00:00:00-05:00",
+      "slug": "spx_short_straddle_repro",
+      "start_date": "2025-01-06",
+      "strategy_name": "SPXShortStraddle"
+    }
+  ],
+  "notes": "Percent metrics are stored as centipercent integers (0.01% units) for strict comparisons.",
+  "schema_version": 1
+}

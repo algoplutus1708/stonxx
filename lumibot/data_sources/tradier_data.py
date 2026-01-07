@@ -1,23 +1,20 @@
-import logging
-from collections import defaultdict
 import datetime as dt
+from collections import defaultdict
 from decimal import Decimal
 from typing import Union
-import pytz
 
 import pandas as pd
-
-from lumibot import LUMIBOT_DEFAULT_PYTZ, LUMIBOT_DEFAULT_TIMEZONE
-from lumibot.entities import Asset, Bars, Quote
-from lumibot.tools.helpers import (
-    create_options_symbol,
-    parse_timestep_qty_and_unit,
-    get_trading_days,
-    date_n_trading_days_from_date
-)
+import pytz
 from lumiwealth_tradier import Tradier
 
+from lumibot.constants import LUMIBOT_DEFAULT_TIMEZONE
+from lumibot.entities import Asset, Bars, Quote
+from lumibot.tools.helpers import create_options_symbol, date_n_trading_days_from_date, parse_timestep_qty_and_unit
+from lumibot.tools.lumibot_logger import get_logger
+
 from .data_source import DataSource
+
+logger = get_logger(__name__)
 
 
 class TradierAPIError(Exception):
@@ -201,7 +198,7 @@ class TradierData(DataSource):
         return df
 
     def get_historical_prices(
-        self, asset, length, timestep="", timeshift=None, quote=None, exchange=None, include_after_hours=True
+        self, asset, length, timestep="", timeshift=None, quote=None, exchange=None, include_after_hours=True, return_polars: bool = False
     ):
         """
         Get bars for a given asset
@@ -258,8 +255,9 @@ class TradierData(DataSource):
             days_needed = length
         else:
             # For minute bars, calculate additional days needed accounting for weekends/holidays
-            minutes_per_day = 390  # ~6.5 hours of trading per day
-            days_needed = (length // minutes_per_day) + 1
+            # minutes_per_day = 390  # ~6.5 hours of trading per day
+            minutes_per_day = 24 * 60 / timestep_qty  # Need to include premarket and after hours
+            days_needed = int(length // minutes_per_day) + 1
 
         start_date = date_n_trading_days_from_date(
             n_days=days_needed,
@@ -289,7 +287,7 @@ class TradierData(DataSource):
                     session_filter="all" if include_after_hours else "open",
                 )
         except Exception as e:
-            logging.error(f"Error getting historical prices for {symbol}: {e}")
+            logger.error(f"Error getting historical prices for {symbol}: {e}")
             return None
 
         # Drop the "time" and "timestamp" columns if they exist
@@ -365,7 +363,7 @@ class TradierData(DataSource):
             return price
 
         except Exception as e:
-            logging.error(f"Error getting last price for {symbol or asset.symbol}: {e}")
+            logger.error(f"Error getting last price for {symbol or asset.symbol}: {e}")
             return None
 
     def get_quote(self, asset, quote=None, exchange=None) -> Quote:

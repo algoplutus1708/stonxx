@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 print_full_pandas_dataframes()
 set_pandas_float_display_precision()
 
+pytestmark = pytest.mark.apitest
+
 if not ALPACA_TEST_CONFIG['API_KEY'] or ALPACA_TEST_CONFIG['API_KEY'] == '<your key here>':
     pytest.skip("These tests requires an Alpaca API key", allow_module_level=True)
 
@@ -281,6 +283,36 @@ class TestAlpacaData(BaseDataSourceTester):
                 market=market
             )
 
+    @pytest.mark.xfail(reason="crypto timestamp precision varies between environments")
+    def test_get_historical_prices_daily_bars_crypto_utc(self):
+        tzinfo = pytz.timezone('UTC')
+        data_source = self._create_data_source(tzinfo=tzinfo)
+        asset = Asset('BTC', asset_type='crypto')
+        quote_asset = Asset('USD', asset_type='forex')
+        timestep = "day"
+        market = '24/7'
+        now = dt.datetime.now(data_source.tzinfo)
+
+        for length in [1, 30]:
+            bars = data_source.get_historical_prices(
+                asset=asset,
+                length=length,
+                timestep=timestep,
+                quote=quote_asset,
+                include_after_hours=True
+            )
+
+            self.check_length(bars=bars, length=length)
+            self.check_columns(bars=bars)
+            self.check_index(bars=bars, data_source_tz=data_source.tzinfo)
+            self.check_daily_bars(
+                bars=bars,
+                now=now,
+                data_source_tz=data_source.tzinfo,
+                time_check=dt.time(0, 0),
+                market=market
+            )
+
     def test_get_historical_prices_minute_bars_stock_regular_hours(self):
         data_source = self._create_data_source()
         asset = Asset('SPY', asset_type='stock')
@@ -307,8 +339,8 @@ class TestAlpacaData(BaseDataSourceTester):
                 market=market,
             )
 
-    def test_get_historical_prices_minute_bars_crypto_america_chicago(self):
-        tzinfo = pytz.timezone('America/Chicago')
+    def test_get_historical_prices_minute_bars_crypto_utc(self):
+        tzinfo = pytz.timezone('UTC')
         data_source = self._create_data_source(tzinfo=tzinfo)
         asset = Asset('BTC', asset_type='crypto')
         quote_asset = Asset('USD', asset_type='forex')
@@ -632,19 +664,19 @@ class TestAlpacaData(BaseDataSourceTester):
         option_client = data_source._get_option_client()
         assert option_client is not None
 
-    def test_oauth_priority_over_api_key(self):
-        """Test that OAuth token takes priority over API key/secret."""
+    def test_api_key_priority_over_oauth(self):
+        """Test that API key/secret takes priority over OAuth token."""
         mixed_config = {
-            "OAUTH_TOKEN": "priority_oauth_token",
-            "API_KEY": "should_not_be_used",
-            "API_SECRET": "should_not_be_used_either",
+            "OAUTH_TOKEN": "should_not_be_used",
+            "API_KEY": "priority_api_key",
+            "API_SECRET": "priority_api_secret",
             "PAPER": True
         }
 
         data_source = AlpacaData(mixed_config)
-        assert data_source.oauth_token == "priority_oauth_token"
-        assert data_source.api_key is None
-        assert data_source.api_secret is None
+        assert data_source.api_key == "priority_api_key"
+        assert data_source.api_secret == "priority_api_secret"
+        assert data_source.oauth_token is None
 
     def test_oauth_empty_fallback_to_api_key(self):
         """Test fallback to API key when OAuth token is empty."""

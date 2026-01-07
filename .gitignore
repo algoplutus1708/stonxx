@@ -8,6 +8,11 @@
 # Cache files
 lumibot/cache
 *cache*
+!lumibot/tools/backtest_cache.py
+!tests/test_backtest_cache_manager.py
+!docs/remote_cache.md
+generated-docs/
+docsrc/_build/
 **/*.pkl
 .pytest*
 
@@ -48,3 +53,17 @@ data/SRNE_Minute.csv
 .env
 token.json
 schwab_token.json
+
+# AI assistant instruction files (contain local paths)
+CLAUDE.md
+AGENTS.md
+
+# Allow scoped agent instructions for the test suite.
+!tests/AGENTS.md
+
+# Acceptance backtest run artifacts (local + CI)
+tests/backtest/_acceptance_runs/
+
+# Local tool configs (untracked, user-specific)
+context*.json
+!context7.json

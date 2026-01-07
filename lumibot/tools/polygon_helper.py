@@ -1,33 +1,29 @@
 # This file contains helper functions for getting data from Polygon.io
-import logging
+import os
 import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from urllib3.exceptions import MaxRetryError
+from typing import Iterator, List, Optional
 from urllib.parse import urlparse, urlunparse
-from collections import defaultdict
-from typing import Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional, List
 
 import pandas as pd
 import pandas_market_calendars as mcal
-from lumibot import LUMIBOT_CACHE_FOLDER
-from lumibot.entities import Asset
+from polygon.exceptions import BadResponse
 
 # noinspection PyPackageRequirements
 from polygon.rest import RESTClient
-from polygon.exceptions import BadResponse
-from typing import Iterator
 from termcolor import colored
 from tqdm import tqdm
+from urllib3.exceptions import MaxRetryError
 
-from lumibot import LUMIBOT_CACHE_FOLDER
-from lumibot.entities import Asset
-from lumibot import LUMIBOT_DEFAULT_PYTZ
+from lumibot.constants import LUMIBOT_CACHE_FOLDER, LUMIBOT_DEFAULT_PYTZ
 from lumibot.credentials import POLYGON_API_KEY
-from lumibot.credentials import LOG_ERRORS_TO_CSV
-from lumibot.tools.error_logger import ErrorLogger
+from lumibot.entities import Asset
+from lumibot.tools.lumibot_logger import get_logger
+
+logger = get_logger(__name__)
 
 # Adjust as desired, in days. We'll reuse any existing chain file
 # that is not older than RECENT_FILE_TOLERANCE_DAYS.
@@ -90,8 +86,7 @@ def get_price_data_from_polygon(
     timespan: str = "minute",
     quote_asset: Optional[Asset] = None,
     force_cache_update: bool = False,
-    max_workers: int = 10,
-    errors_csv_path: Optional[str] = None,
+    max_workers: int = 10
 ) -> Optional[pd.DataFrame]:
     """
     Query Polygon.io for historical pricing data for the given asset, using parallel downloads.
@@ -118,8 +113,6 @@ def get_price_data_from_polygon(
         If True, forces re-downloading data even if cached data exists. Defaults to False.
     max_workers : int, optional
         The number of parallel threads to use for downloading data. Defaults to 10.
-    errors_csv_path : Optional[str], optional
-        Path to the CSV file for logging errors. Defaults to None.
         
     Returns
     -------
@@ -139,7 +132,7 @@ def get_price_data_from_polygon(
     # Build the cache file path based on the asset, timespan, and quote asset.
     cache_file = build_cache_filename(asset, timespan, quote_asset)
     # Validate cache (e.g., check if splits have changed) and possibly force a cache update.
-    force_cache_update = validate_cache(force_cache_update, asset, cache_file, api_key, errors_csv_path)
+    force_cache_update = validate_cache(force_cache_update, asset, cache_file, api_key)
     df_all: Optional[pd.DataFrame] = None
     # Load cached data if available.
     if cache_file.exists() and not force_cache_update:
@@ -150,10 +143,39 @@ def get_price_data_from_polygon(
     if not missing_dates:
         if df_all is not None:
             df_all = df_all.dropna(how="all")
+            # Filter cached data to requested date range before returning
+            if not df_all.empty:
+                # For daily data, use date-based filtering (timestamps vary by provider)
+                # For intraday data, use precise datetime filtering
+                if timespan == "day":
+                    # Convert index to dates for comparison
+                    import pandas as pd
+                    df_dates = pd.to_datetime(df_all.index).date
+                    start_date = start.date() if hasattr(start, 'date') else start
+                    end_date = end.date() if hasattr(end, 'date') else end
+                    mask = (df_dates >= start_date) & (df_dates <= end_date)
+                    df_all = df_all[mask]
+                else:
+                    # Intraday: use precise datetime filtering
+                    import datetime as dt
+                    import pytz
+                    from lumibot import LUMIBOT_DEFAULT_PYTZ
+
+                    # Convert date to datetime if needed
+                    if isinstance(start, dt.date) and not isinstance(start, dt.datetime):
+                        start = dt.datetime.combine(start, dt.time.min)
+                    if isinstance(end, dt.date) and not isinstance(end, dt.datetime):
+                        end = dt.datetime.combine(end, dt.time.max)
+
+                    if start.tzinfo is None:
+                        start = LUMIBOT_DEFAULT_PYTZ.localize(start).astimezone(pytz.UTC)
+                    if end.tzinfo is None:
+                        end = LUMIBOT_DEFAULT_PYTZ.localize(end).astimezone(pytz.UTC)
+                    df_all = df_all[(df_all.index >= start) & (df_all.index <= end)]
         return df_all
 
     # Create a PolygonClient and get the symbol for the asset.
-    polygon_client = PolygonClient.create(api_key=api_key, errors_csv_path=errors_csv_path)
+    polygon_client = PolygonClient.create(api_key=api_key)
     symbol = get_polygon_symbol(asset, polygon_client, quote_asset)
     if symbol is None:
         # If no valid symbol is found, mark all trading dates as checked.
@@ -217,10 +239,46 @@ def get_price_data_from_polygon(
     else:
         df_all_output = df_all_full.copy()
     df_all_output = df_all_output.dropna(how="all")
+
+    # Filter cached data to requested date range before returning
+    if not df_all_output.empty:
+        # For daily data, use date-based filtering (timestamps vary by provider)
+        # For intraday data, use precise datetime filtering
+        if timespan == "day":
+            # Convert index to dates for comparison
+            import pandas as pd
+            df_dates = pd.to_datetime(df_all_output.index).date
+            start_date = start.date() if hasattr(start, 'date') else start
+            end_date = end.date() if hasattr(end, 'date') else end
+            mask = (df_dates >= start_date) & (df_dates <= end_date)
+            df_all_output = df_all_output[mask]
+        else:
+            # Intraday: use precise datetime filtering
+            import datetime as dt
+            import pytz
+            from lumibot import LUMIBOT_DEFAULT_PYTZ
+
+            # Convert date to datetime if needed
+            if isinstance(start, dt.date) and not isinstance(start, dt.datetime):
+                start = dt.datetime.combine(start, dt.time.min)
+            if isinstance(end, dt.date) and not isinstance(end, dt.datetime):
+                end = dt.datetime.combine(end, dt.time.max)
+
+            # Handle datetime objects with midnight time (users often pass datetime(YYYY, MM, DD))
+            if isinstance(end, dt.datetime) and end.time() == dt.time.min:
+                # Convert end-of-period midnight to end-of-day
+                end = dt.datetime.combine(end.date(), dt.time.max)
+
+            if start.tzinfo is None:
+                start = LUMIBOT_DEFAULT_PYTZ.localize(start).astimezone(pytz.UTC)
+            if end.tzinfo is None:
+                end = LUMIBOT_DEFAULT_PYTZ.localize(end).astimezone(pytz.UTC)
+            df_all_output = df_all_output[(df_all_output.index >= start) & (df_all_output.index <= end)]
+
     return df_all_output
 
 
-def validate_cache(force_cache_update: bool, asset: Asset, cache_file: Path, api_key: str, errors_csv_path: Optional[str] = None):
+def validate_cache(force_cache_update: bool, asset: Asset, cache_file: Path, api_key: str):
     """
     If the list of splits for a stock have changed then we need to invalidate its cache
     because all of the prices will have changed (because we're using split adjusted prices).
@@ -232,13 +290,16 @@ def validate_cache(force_cache_update: bool, asset: Asset, cache_file: Path, api
         return force_cache_update
     cached_splits = pd.DataFrame()
     splits_file_stale = True
-    splits_file_path = Path(str(cache_file).rpartition(".feather")[0] + "_splits.feather")
+    # Use parquet only
+    base_path = str(cache_file).rpartition(".parquet")[0]
+    splits_file_path = Path(base_path + "_splits.parquet")
+
     if splits_file_path.exists():
         splits_file_stale = datetime.fromtimestamp(splits_file_path.stat().st_mtime).date() != date.today()
         if splits_file_stale:
-            cached_splits = pd.read_feather(splits_file_path)
+            cached_splits = pd.read_parquet(splits_file_path, engine='pyarrow')
     if splits_file_stale or force_cache_update:
-        polygon_client = PolygonClient.create(api_key=api_key, errors_csv_path=errors_csv_path)
+        polygon_client = PolygonClient.create(api_key=api_key)
         # Need to get the splits in execution order to make the list comparable across invocations.
         splits = polygon_client.list_splits(ticker=asset.symbol, sort="execution_date", order="asc")
         if isinstance(splits, Iterator):
@@ -248,14 +309,14 @@ def validate_cache(force_cache_update: bool, asset: Asset, cache_file: Path, api
                 # No need to rewrite contents.  Just update the timestamp.
                 splits_file_path.touch()
             else:
-                logging.info(f"Invalidating cache for {asset.symbol} because its splits have changed.")
+                logger.info(f"Invalidating cache for {asset.symbol} because its splits have changed.")
                 force_cache_update = True
                 cache_file.unlink(missing_ok=True)
                 # Create the directory if it doesn't exist
                 cache_file.parent.mkdir(parents=True, exist_ok=True)
-                splits_df.to_feather(splits_file_path)
+                splits_df.to_parquet(splits_file_path, compression='snappy', engine='pyarrow')
         else:
-            logging.warning(f"Unexpected response getting splits for {asset.symbol} from Polygon.  Response: {splits}")
+            logger.warning(f"Unexpected response getting splits for {asset.symbol} from Polygon.  Response: {splits}")
     return force_cache_update
 
 
@@ -359,7 +420,7 @@ def get_polygon_symbol(asset, polygon_client, quote_asset=None):
 
         if len(contracts) == 0:
             text = colored(f"Unable to find option contract for {asset}", "red")
-            logging.debug(text)
+            logger.debug(text)
             return
 
         # Example: O:SPY230802C00457000
@@ -405,7 +466,8 @@ def build_cache_filename(asset: Asset, timespan: str, quote_asset: Asset = None)
     else:
         uniq_str = asset.symbol
 
-    cache_filename = f"{asset.asset_type}_{uniq_str}_{timespan}.feather"
+    # Use .parquet for better compression and performance
+    cache_filename = f"{asset.asset_type}_{uniq_str}_{timespan}.parquet"
     cache_file = lumibot_polygon_cache_folder / cache_filename
     return cache_file
 
@@ -446,11 +508,18 @@ def get_missing_dates(
         trading_dates = [d for d in trading_dates if d <= asset.expiration]
     if df_all is None or df_all.empty:
         return trading_dates
-    # Use only the date portion of the cache index.
-    cached_dates = {d.date() for d in df_all.index}
-    missing_dates = sorted(set(trading_dates) - cached_dates)
+
+    # Optimized: Use pandas built-in date normalization instead of iterating
+    # This is much faster than iterating through the index
+    cached_dates = pd.Index(df_all.index.date).unique()
+    trading_dates_set = set(trading_dates)
+    cached_dates_set = set(cached_dates)
+    missing_dates = sorted(trading_dates_set - cached_dates_set)
+
     # Ensure the missing dates fall within the requested range.
-    missing_dates = [d for d in missing_dates if start.date() <= d <= end.date()]
+    start_date = start.date()
+    end_date = end.date()
+    missing_dates = [d for d in missing_dates if start_date <= d <= end_date]
     return missing_dates
 
 
@@ -461,7 +530,7 @@ def load_cache(cache_file: Path) -> pd.DataFrame:
     Parameters
     ----------
     cache_file : Path
-        The path to the Feather cache file.
+        The path to the Parquet cache file.
         
     Returns
     -------
@@ -473,7 +542,10 @@ def load_cache(cache_file: Path) -> pd.DataFrame:
     KeyError
         If the 'datetime' column is not found in the cache file.
     """
-    df = pd.read_feather(cache_file)
+    # Normalize to Path in case a py.path local was passed
+    cache_file = Path(str(cache_file))
+    # Read parquet exclusively
+    df = pd.read_parquet(cache_file, engine='pyarrow')
     if "datetime" not in df.columns:
         raise KeyError(f"'datetime' column not found in {cache_file}")
     # Set 'datetime' column as index and convert to datetime objects
@@ -488,8 +560,8 @@ def load_cache(cache_file: Path) -> pd.DataFrame:
     return df
 
 def update_cache(
-    cache_file: Path, 
-    df_all: Optional[pd.DataFrame], 
+    cache_file: Path,
+    df_all: Optional[pd.DataFrame],
     missing_dates: Optional[List[datetime.date]] = None
 ) -> pd.DataFrame:
     """
@@ -551,7 +623,8 @@ def update_cache(
     if not df_all.empty:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         df_to_save = df_all.reset_index()
-        df_to_save.to_feather(cache_file)
+        # Save as parquet with compression
+        df_to_save.to_parquet(cache_file, engine='pyarrow', compression='snappy')
     return df_all
 
 def update_polygon_data(df_all, result):
@@ -614,8 +687,7 @@ def get_chains_cached(
     quote: Asset = None,
     exchange: str = None,
     current_date: date = None,
-    polygon_client: Optional["PolygonClient"] = None,
-    errors_csv_path: Optional[str] = None,
+    polygon_client: Optional["PolygonClient"] = None
 ) -> dict:
     """
     Retrieve an option chain for a given asset and historical date using Polygon, 
@@ -665,21 +737,21 @@ def get_chains_cached(
     2) If a suitable chain file from within RECENT_FILE_TOLERANCE_DAYS of current_date 
        exists, it is reused directly.
     3) Otherwise, the function downloads fresh data from Polygon, then saves it under 
-       `LUMIBOT_CACHE_FOLDER/polygon/option_chains/{symbol}_{date}.feather`.
+       `LUMIBOT_CACHE_FOLDER/polygon/option_chains/{symbol}_{date}.parquet`.
     4) By default, we fetch both 'expired=True' and 'expired=False', so you get 
        historical + near-future options for your specified date.
     """
-    logging.debug(f"get_chains_cached called for {asset.symbol} on {current_date}")
+    logger.debug(f"get_chains_cached called for {asset.symbol} on {current_date}")
 
     # 1) If current_date is None => bail out (no real date to query).
     if current_date is None:
-        logging.debug("No current_date provided; returning None.")
+        logger.debug("No current_date provided; returning None.")
         return None
 
     # 2) Ensure we have a PolygonClient
     if polygon_client is None:
-        logging.debug("No polygon_client provided; creating a new one.")
-        polygon_client = PolygonClient.create(api_key=api_key, errors_csv_path=errors_csv_path)
+        logger.debug("No polygon_client provided; creating a new one.")
+        polygon_client = PolygonClient.create(api_key=api_key)
 
     # 3) Build the chain folder path and create if not present
     chain_folder = Path(LUMIBOT_CACHE_FOLDER) / "polygon" / "option_chains"
@@ -687,7 +759,7 @@ def get_chains_cached(
 
     # 4) Attempt to find a suitable recent file (reuse it if found)
     earliest_okay_date = current_date - timedelta(days=RECENT_FILE_TOLERANCE_DAYS)
-    pattern = f"{asset.symbol}_*.feather"
+    pattern = f"{asset.symbol}_*.parquet"
     potential_files = sorted(chain_folder.glob(pattern), reverse=True)
 
     for fpath in potential_files:
@@ -706,11 +778,11 @@ def get_chains_cached(
 
         # If file_date is recent enough, reuse it
         if earliest_okay_date <= file_date <= current_date:
-            logging.debug(
+            logger.debug(
                 f"Reusing chain file {fpath} (file_date={file_date}), "
                 f"within {RECENT_FILE_TOLERANCE_DAYS} days of {current_date}."
             )
-            df_cached = pd.read_feather(fpath)
+            df_cached = pd.read_parquet(fpath, engine='pyarrow')
 
             # Convert the data back to a dictionary of lists instead of NP arrays to match original return types
             data = df_cached["data"][0]
@@ -721,7 +793,7 @@ def get_chains_cached(
             return data
 
     # 5) No suitable file => must fetch from Polygon
-    logging.debug(
+    logger.debug(
         f"No suitable recent file found for {asset.symbol} on {current_date}. "
         "Downloading from Polygon..."
     )
@@ -733,7 +805,7 @@ def get_chains_cached(
         "Chains": {"CALL": defaultdict(list), "PUT": defaultdict(list)},
     }
 
-    # 6) We do not use real "today" at all. By default, let's fetch both expired & unexpired 
+    # 6) We do not use real "today" at all. By default, let's fetch both expired & unexpired
     #    to ensure we get all relevant strikes near that historical date.
     expired_list = [True, False]
 
@@ -762,10 +834,10 @@ def get_chains_cached(
         option_contracts["Chains"][right][exp_date].append(strike)
 
     # 8) Save to a new file for future reuse
-    cache_file = chain_folder / f"{asset.symbol}_{current_date.isoformat()}.feather"
+    cache_file = chain_folder / f"{asset.symbol}_{current_date.isoformat()}.parquet"
     df_to_cache = pd.DataFrame({"data": [option_contracts]})
-    df_to_cache.to_feather(cache_file)
-    logging.debug(
+    df_to_cache.to_parquet(cache_file, compression='snappy', engine='pyarrow')
+    logger.debug(
         f"Download complete for {asset.symbol} on {current_date}. "
         f"Saved chain file to {cache_file}"
     )
@@ -778,15 +850,14 @@ class PolygonClient(RESTClient):
 
     WAIT_SECONDS_RETRY = 60
 
-    def __init__(self, errors_csv_path = None, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         # Time of last "rate limit reached" log (epoch time).
         self._last_rate_limit_log_time = 0.0
         # Only log once every 300s (5 minutes); tweak as you see fit.
         self._rate_limit_log_cooldown = 300.0
-        # Initialize error logger
-        self.error_logger = ErrorLogger(errors_csv_path, "POLYGON", LOG_ERRORS_TO_CSV)
+        # Store the CSV path for potential future use
 
     @classmethod
     def create(cls, *args, **kwargs) -> RESTClient:
@@ -802,8 +873,6 @@ class PolygonClient(RESTClient):
         api_key : str, optional
             The API key to authenticate with the service. Defaults to the value of the 
             `POLYGON_API_KEY` environment variable if not provided.
-        errors_csv_path : str, optional
-            Path to the CSV file for logging errors. Defaults to None.
 
         Returns:
         RESTClient
@@ -820,7 +889,7 @@ class PolygonClient(RESTClient):
         >>> client = PolygonClient.create(api_key='your_api_key_here')
 
         """
-        if 'api_key' not in kwargs:
+        if 'api_key' not in kwargs or kwargs.get('api_key') is None:
             kwargs['api_key'] = POLYGON_API_KEY
 
         return cls(*args, **kwargs)
@@ -830,12 +899,26 @@ class PolygonClient(RESTClient):
         Override to handle rate-limits by sleeping 60s, but *throttle*
         the log message so it isn't repeated too frequently.
         """
+        max_attempts = int(os.environ.get("POLYGON_MAX_RETRY_ATTEMPTS", "0") or "0")
+        max_total_sleep = int(os.environ.get("POLYGON_MAX_RETRY_SLEEP_SECONDS", "0") or "0")
+        wait_seconds = int(os.environ.get("POLYGON_WAIT_SECONDS_RETRY", str(PolygonClient.WAIT_SECONDS_RETRY)) or "0")
+
+        attempts = 0
+        slept = 0
         while True:
             try:
                 # Normal get from polygon-api-client
                 return super()._get(*args, **kwargs)
 
             except MaxRetryError as e:
+                attempts += 1
+
+                if max_attempts and attempts > max_attempts:
+                    raise
+
+                if max_total_sleep and slept >= max_total_sleep:
+                    raise
+
                 # We interpret MaxRetryError as a rate-limit or server rejection
                 url = urlunparse(urlparse(kwargs['path'])._replace(query=""))
 
@@ -854,16 +937,12 @@ class PolygonClient(RESTClient):
                         "it helps support this project.\n"
                         "You can use the coupon code 'LUMI10' for 10% off."
                     )
-                    colored_message = colored(message, "red")
-                    logging.error(colored_message)
-                    logging.debug(f"Error: {e}")
+                    colored_message = colored(message, "yellow")
+                    logger.warning(colored_message)
+                    logger.debug(f"Error: {e}")
 
-                    # Log to CSV using the ErrorLogger
-                    self.error_logger.log_rate_limit(
-                        wait_time=PolygonClient.WAIT_SECONDS_RETRY,
-                        url=str(url),
-                        error_details=str(e)
-                    )
+                    # Log to CSV using standard logger (will auto-capture to CSV if enabled)
+                    logger.warning(f"POLYGON_RATE_LIMIT_EXCEEDED: Polygon rate limit reached | URL: {str(url)}, Wait time: {PolygonClient.WAIT_SECONDS_RETRY}s, Error: {str(e)}")
 
                     # Update our last log time
                     self._last_rate_limit_log_time = now
@@ -871,39 +950,57 @@ class PolygonClient(RESTClient):
                     # If it's too soon, skip logging again
                     pass
 
-                # Sleep for WAIT_SECONDS_RETRY, then try again
-                time.sleep(PolygonClient.WAIT_SECONDS_RETRY)
-            
+                # Sleep before retrying. In CI/tests, keep this bounded so jobs don't hang forever.
+                sleep_for = wait_seconds if wait_seconds > 0 else PolygonClient.WAIT_SECONDS_RETRY
+                if max_total_sleep:
+                    remaining = max_total_sleep - slept
+                    if remaining <= 0:
+                        raise
+                    sleep_for = min(sleep_for, remaining)
+
+                time.sleep(sleep_for)
+                slept += sleep_for
+
             except BadResponse as e:
                 # Handle Polygon BadResponse errors specifically
                 url = str(urlunparse(urlparse(kwargs.get('path', 'unknown'))._replace(query=""))) if 'path' in kwargs else 'unknown'
-                
+
                 # Check if this is an authorization/entitlement error
                 error_str = str(e)
                 if "NOT_AUTHORIZED" in error_str or "not entitled to this data" in error_str.lower():
-                    self.error_logger.log_authorization_error(
-                        url=url,
-                        operation="HTTP GET request",
-                        error_details=error_str
-                    )
+                    # Distinguish between true auth failure and plan/timeframe limitation
+                    if (
+                        "plan doesn't include this data timeframe" in error_str.lower()
+                        or "plan doesn\u2019t include this data timeframe" in error_str.lower()
+                    ):
+                        # Non-fatal: user plan doesn't cover requested timeframe
+                        logger.error(
+                            "Polygon Access Denied: Your subscription does not allow you to backtest that far back in time. "
+                            f"URL: {url}, Error: {error_str}. "
+                            "We strongly recommend switching to ThetaData (https://www.thetadata.net/ with promo code 'BotSpot10') "
+                            "for better coverage, faster pulls, and LumiBot-native support. "
+                            "If you stay on Polygon, shorten the range or upgrade your plan (https://polygon.io/?utm_source=affiliate&utm_campaign=lumi10, code 'LUMI10')."
+                        )
+                        # Return None instead of raising to allow caller to skip this chunk
+                        return None
+                    else:
+                        # True authorization/entitlement failure remains critical
+                        logger.critical(
+                            f"POLYGON_NOT_AUTHORIZED: Polygon authorization error - insufficient permissions | URL: {url}, Operation: HTTP GET request, Error: {error_str}"
+                        )
                 else:
                     # Other BadResponse errors (e.g., invalid parameters, server errors)
-                    self.error_logger.log_error(
-                        severity="ERROR",
-                        error_code="BAD_REQUEST",
-                        message=f"{self.error_logger.data_source_name} bad request error",
-                        details=f"URL: {url}, Operation: HTTP GET request, Error: {error_str}"
-                    )
-                
+                    logger.error(f"POLYGON_BAD_REQUEST: Polygon bad request error | URL: {url}, Operation: HTTP GET request, Error: {error_str}")
+
                 # Log to console as well
-                message = f"Polygon BadResponse error: {type(e).__name__}"
+                message = f"Polygon BadResponse error: {error_str}"
                 colored_message = colored(message, "red")
-                logging.error(colored_message)
-                logging.debug(f"Full error details: {e}")
-                
+                logger.error(colored_message)
+                logger.debug(f"Full error details: {e}")
+
                 # Re-raise the exception since this is not a rate limit we can handle
                 raise e
-            
+
             except Exception as e:
                 # Check if we've logged an exception message recently
                 now = time.time()
@@ -913,16 +1010,13 @@ class PolygonClient(RESTClient):
                     "This may be due to insufficient subscriptions or temporary server issues. "
                 )
                 colored_message = colored(message, "yellow")
-                logging.warning(colored_message)
-                logging.debug(f"Full error details: {e}")
+                logger.warning(colored_message)
+                logger.debug(f"Full error details: {e}")
 
-                # Log to CSV using the ErrorLogger
+                # Log to CSV using standard logger (will auto-capture to CSV if enabled)
                 url = str(urlunparse(urlparse(kwargs.get('path', 'unknown'))._replace(query=""))) if 'path' in kwargs else 'unknown'
-                self.error_logger.log_api_error(
-                    exception=e,
-                    url=url,
-                    operation="HTTP GET request"
-                )
+                error_type = type(e).__name__
+                logger.error(f"POLYGON_API_{error_type.upper()}: Polygon API error: {error_type} | URL: {url}, Operation: HTTP GET request, Error: {str(e)}")
 
                 # Re-raise the exception since this is not a rate limit we can handle
-                raise e                
+                raise e

@@ -10,13 +10,13 @@ import os
 import sys
 
 from .brokers import Alpaca, Ccxt, InteractiveBrokers, InteractiveBrokersREST, Tradier, Tradovate, Schwab, Bitunix, ProjectX
-import logging
 from dotenv import load_dotenv
 import termcolor
 from dateutil import parser
 
 # Configure logging
-logger = logging.getLogger(__name__)
+from lumibot.tools.lumibot_logger import get_logger
+logger = get_logger(__name__)
 
 
 def find_and_load_dotenv(base_dir) -> bool:
@@ -48,8 +48,11 @@ if not found_dotenv:
 # If no .env file was found, print a warning message
 if not found_dotenv:
     # Create a colored message for the log using termcolor
-    colored_message = termcolor.colored("No .env file found. This is ok if you are using environment variables or secrets (like on Replit, AWS, etc), but if you are not, please create a .env file in the root directory of the project.", "yellow")
-    logger.warning(colored_message)
+    colored_message = termcolor.colored(
+        "No .env file found. This is expected when relying on environment variables or external secrets.",
+        "blue",
+    )
+    logger.debug(colored_message)
 
 # dotenv.load_dotenv()
 broker=None
@@ -77,6 +80,9 @@ if backtesting_start:
 BACKTESTING_END = None
 if backtesting_end:
     BACKTESTING_END = parser.parse(backtesting_end)
+
+# Get the backtesting data source
+BACKTESTING_DATA_SOURCE = os.environ.get("BACKTESTING_DATA_SOURCE", "ThetaData")
 
 # Check if we should hide trades
 hide_trades = os.environ.get("HIDE_TRADES")
@@ -137,18 +143,9 @@ STRATEGY_NAME = os.environ.get("STRATEGY_NAME")
 # Flag to determine if backtest progress should be logged to a file (True/False)
 LOG_BACKTEST_PROGRESS_TO_FILE = os.environ.get("LOG_BACKTEST_PROGRESS_TO_FILE")
 
-# Flag to determine if error logs should be logged to a CSV file (True/False)
-_log_errors_to_csv = os.environ.get("LOG_ERRORS_TO_CSV")
-if _log_errors_to_csv is None:
-    LOG_ERRORS_TO_CSV = False
-elif _log_errors_to_csv.lower() in ("true", "1", "yes", "on"):
-    LOG_ERRORS_TO_CSV = True
-elif _log_errors_to_csv.lower() in ("false", "0", "no", "off"):
-    LOG_ERRORS_TO_CSV = False
-else:
-    LOG_ERRORS_TO_CSV = False
+BACKTESTING_SHOW_PROGRESS_BAR = os.environ.get("BACKTESTING_SHOW_PROGRESS_BAR", "true").lower() == "true"
 
-# Determine if backtesting logs should be quiet via env variable (default True)
+# Determine if backtesting logs should be quiet via env variable (default None means not set)
 _btl = os.environ.get("BACKTESTING_QUIET_LOGS", None)
 if _btl is not None:
     if _btl.lower() == "true":
@@ -156,35 +153,18 @@ if _btl is not None:
     elif _btl.lower() == "false":
         BACKTESTING_QUIET_LOGS = False
     else:
-        colored_message = termcolor.colored(f"BACKTESTING_QUIET_LOGS must be set to 'true' or 'false'. Got '{_btl}'. Defaulting to True.", "yellow")
+        colored_message = termcolor.colored(f"BACKTESTING_QUIET_LOGS must be set to 'true' or 'false'. Got '{_btl}'. Defaulting to None.", "yellow")
         logger.warning(colored_message)
-        BACKTESTING_QUIET_LOGS = True
+        BACKTESTING_QUIET_LOGS = None
 else:
-    BACKTESTING_QUIET_LOGS = None
-
-_btl = os.environ.get("BACKTESTING_SHOW_PROGRESS_BAR", None)
-if _btl is not None:
-    if _btl.lower() == "true":
-        BACKTESTING_SHOW_PROGRESS_BAR = True
-    elif _btl.lower() == "false":
-        BACKTESTING_SHOW_PROGRESS_BAR = False
-    else:
-        colored_message = termcolor.colored(f"BACKTESTING_SHOW_PROGRESS_BAR must be set to 'true' or 'false'. Got '{_btl}'. Defaulting to True.", "yellow")
-        logger.warning(colored_message)
-        BACKTESTING_SHOW_PROGRESS_BAR = True
-else:
-    BACKTESTING_SHOW_PROGRESS_BAR = None
+    BACKTESTING_QUIET_LOGS = True  # Default to quiet logs for better performance
 
 # Set a hard limit on the memory polygon uses
 POLYGON_MAX_MEMORY_BYTES = os.environ.get("POLYGON_MAX_MEMORY_BYTES")
 
 POLYGON_CONFIG = {
-    # Add POLYGON_API_KEY and POLYGON_IS_PAID_SUBSCRIPTION to your .env file or set them as secrets
+    # Add POLYGON_API_KEY to your .env file or set it as secrets
     "API_KEY": os.environ.get("POLYGON_API_KEY"),
-    "IS_PAID_SUBSCRIPTION": os.environ.get("POLYGON_IS_PAID_SUBSCRIPTION").lower()
-    == "true"
-    if os.environ.get("POLYGON_IS_PAID_SUBSCRIPTION")
-    else False,
 }
 
 # Polygon API Key
@@ -203,6 +183,19 @@ DATABENTO_CONFIG = {
     "API_KEY": os.environ.get("DATABENTO_API_KEY"),
     "TIMEOUT": int(os.environ.get("DATABENTO_TIMEOUT", "30")),
     "MAX_RETRIES": int(os.environ.get("DATABENTO_MAX_RETRIES", "3")),
+}
+
+# Remote cache configuration (disabled by default)
+CACHE_REMOTE_CONFIG = {
+    "backend": os.environ.get("LUMIBOT_CACHE_BACKEND", "local"),
+    "mode": os.environ.get("LUMIBOT_CACHE_MODE", "disabled"),
+    "s3_bucket": os.environ.get("LUMIBOT_CACHE_S3_BUCKET"),
+    "s3_prefix": os.environ.get("LUMIBOT_CACHE_S3_PREFIX", ""),
+    "s3_region": os.environ.get("LUMIBOT_CACHE_S3_REGION"),
+    "s3_access_key_id": os.environ.get("LUMIBOT_CACHE_S3_ACCESS_KEY_ID"),
+    "s3_secret_access_key": os.environ.get("LUMIBOT_CACHE_S3_SECRET_ACCESS_KEY"),
+    "s3_session_token": os.environ.get("LUMIBOT_CACHE_S3_SESSION_TOKEN"),
+    "s3_version": os.environ.get("LUMIBOT_CACHE_S3_VERSION", "v1"),
 }
 
 # Alpaca Configuration
@@ -318,47 +311,47 @@ BITUNIX_CONFIG = {
 # ProjectX URL mappings - REST API base URLs (v2 gateway URLs preferred)
 PROJECTX_BASE_URLS = {
     "topstepx": "https://api.topstepx.com/",
-    "topone": "https://gateway-api-toponefutures.s2f.projectx.com/",  # Top One Futures
-    "tickticktrader": "https://gateway-api-tickticktrader.s2f.projectx.com/",
-    "alphaticks": "https://gateway-api-alphaticks.s2f.projectx.com/",
-    "aquafutures": "https://gateway-api-aquafutures.s2f.projectx.com/",
-    "blueguardianfutures": "https://gateway-api-blueguardianfutures.s2f.projectx.com/",
-    "blusky": "https://gateway-api-blusky.s2f.projectx.com/",
-    "bulenox": "https://gateway-api-bulenox.s2f.projectx.com/",
-    "e8x": "https://gateway-api-e8x.s2f.projectx.com/",
-    "fundingfutures": "https://gateway-api-fundingfutures.s2f.projectx.com/",
-    "thefuturesdesk": "https://gateway-api-thefuturesdesk.s2f.projectx.com/",
-    "futureselite": "https://gateway-api-futureselite.s2f.projectx.com/",
-    "fxifyfutures": "https://gateway-api-fxifyfutures.s2f.projectx.com/",
-    "goatfundedfutures": "https://gateway-api-goatfundedfutures.s2f.projectx.com/",
-    "holaprime": "https://gateway-api-holaprime.s2f.projectx.com/",
-    "nexgen": "https://gateway-api-nexgen.s2f.projectx.com/",
-    "tx3funding": "https://gateway-api-tx3funding.s2f.projectx.com/",
-    "demo": "https://gateway-api-demo.s2f.projectx.com/",
-    "daytraders": "https://gateway-api-daytraders.s2f.projectx.com/",
+    "topone": "https://api.toponefutures.projectx.com/",  # Top One Futures
+    "tickticktrader": "https://api.tickticktrader.projectx.com/",
+    "alphaticks": "https://api.alphaticks.projectx.com/",
+    "aquafutures": "https://api.aquafutures.projectx.com/",
+    "blueguardianfutures": "https://api.blueguardianfutures.projectx.com/",
+    "blusky": "https://api.blusky.projectx.com/",
+    "bulenox": "https://api.bulenox.projectx.com/",
+    "e8x": "https://api.e8.projectx.com/",  # E8X uses "e8" not "e8x"
+    "fundingfutures": "https://api.fundingfutures.projectx.com/",
+    "thefuturesdesk": "https://api.thefuturesdesk.projectx.com/",
+    "futureselite": "https://api.futureselite.projectx.com/",
+    "fxifyfutures": "https://api.fxifyfutures.projectx.com/",
+    "goatfundedfutures": "https://api.goatfundedfutures.projectx.com/",
+    "holaprime": "https://api.holaprime.projectx.com/",
+    "nexgen": "https://api.nexgen.projectx.com/",
+    "tx3funding": "https://api.tx3funding.projectx.com/",
+    "demo": "https://gateway-api-demo.s2f.projectx.com/",  # Demo still uses old pattern
+    "daytraders": "https://api.daytraders.projectx.com/",
 }
 
 # ProjectX SignalR streaming URL mappings
 PROJECTX_STREAMING_URLS = {
-    "topstepx": "https://gateway-rtc-topstepx.s2f.projectx.com/",
-    "topone": "https://gateway-rtc-demo.s2f.projectx.com/",  # Top One Futures
-    "tickticktrader": "https://gateway-rtc-tickticktrader.s2f.projectx.com/",
-    "alphaticks": "https://gateway-rtc-alphaticks.s2f.projectx.com/",
-    "aquafutures": "https://gateway-rtc-aquafutures.s2f.projectx.com/",
-    "blueguardianfutures": "https://gateway-rtc-blueguardianfutures.s2f.projectx.com/",
-    "blusky": "https://gateway-rtc-blusky.s2f.projectx.com/",
-    "bulenox": "https://gateway-rtc-bulenox.s2f.projectx.com/",
-    "e8x": "https://gateway-rtc-e8x.s2f.projectx.com/",
-    "fundingfutures": "https://gateway-rtc-fundingfutures.s2f.projectx.com/",
-    "thefuturesdesk": "https://gateway-rtc-thefuturesdesk.s2f.projectx.com/",
-    "futureselite": "https://gateway-rtc-futureselite.s2f.projectx.com/",
-    "fxifyfutures": "https://gateway-rtc-fxifyfutures.s2f.projectx.com/",
-    "goatfundedfutures": "https://gateway-rtc-goatfundedfutures.s2f.projectx.com/",
-    "holaprime": "https://gateway-rtc-holaprime.s2f.projectx.com/",
-    "nexgen": "https://gateway-rtc-nexgen.s2f.projectx.com/",
-    "tx3funding": "https://gateway-rtc-tx3funding.s2f.projectx.com/",
+    "topstepx": "https://rtc.topstepx.com/",
+    "topone": "https://rtc.toponefutures.projectx.com/",  # Top One Futures
+    "tickticktrader": "https://rtc.tickticktrader.projectx.com/",
+    "alphaticks": "https://rtc.alphaticks.projectx.com/",
+    "aquafutures": "https://rtc.aquafutures.projectx.com/",
+    "blueguardianfutures": "https://rtc.blueguardianfutures.projectx.com/",
+    "blusky": "https://rtc.blusky.projectx.com/",
+    "bulenox": "https://rtc.bulenox.projectx.com/",
+    "e8x": "https://rtc.e8.projectx.com/",
+    "fundingfutures": "https://rtc.fundingfutures.projectx.com/",
+    "thefuturesdesk": "https://rtc.thefuturesdesk.projectx.com/",
+    "futureselite": "https://rtc.futureselite.projectx.com/",
+    "fxifyfutures": "https://rtc.fxifyfutures.projectx.com/",
+    "goatfundedfutures": "https://rtc.goatfundedfutures.projectx.com/",
+    "holaprime": "https://rtc.holaprime.projectx.com/",
+    "nexgen": "https://rtc.nexgen.projectx.com/",
+    "tx3funding": "https://rtc.tx3funding.projectx.com/",
     "demo": "https://gateway-rtc-demo.s2f.projectx.com/",
-    "daytraders": "https://gateway-rtc-daytraders.s2f.projectx.com/",
+    "daytraders": "https://rtc.daytraders.projectx.com/",
 }
 
 # ProjectX Configuration - Multi-firm support
@@ -462,6 +455,52 @@ if not is_backtesting or is_backtesting.lower() == "false":
             except Exception as e:
                 colored_message = termcolor.colored(f"Failed to initialize ProjectX broker: {e}", "red")
                 logger.error(colored_message)
+        elif trading_broker_name.lower().startswith("projectx-"):
+            try:
+                # Extract firm name from broker name (e.g., "projectx-topone" -> "topone")
+                firm_suffix = trading_broker_name.lower()[9:]  # Remove "projectx-" prefix
+                
+                # Map broker suffixes to firm names (must match Node.js mapping)
+                suffix_to_firm_mapping = {
+                    'topstepx': 'TOPSTEPX',
+                    'topone': 'TOPONE', 
+                    'tickticktrader': 'TICKTICKTRADER',
+                    'alphaticks': 'ALPHATICKS',
+                    'aquafutures': 'AQUAFUTURES',
+                    'blueguardianfutures': 'BLUEGUARDIANFUTURES',
+                    'blusky': 'BLUSKY',
+                    'bulenox': 'BULENOX',
+                    'e8x': 'E8X',
+                    'fundingfutures': 'FUNDINGFUTURES',
+                    'thefuturesdesk': 'THEFUTURESDESK',
+                    'futureselite': 'FUTURESELITE',
+                    'fxifyfutures': 'FXIFYFUTURES',
+                    'goatfundedfutures': 'GOATFUNDEDFUTURES',
+                    'holaprime': 'HOLAPRIME',
+                    'nexgen': 'NEXGEN',
+                    'tx3funding': 'TX3FUNDING',
+                    'daytraders': 'DAYTRADERS',
+                    'demo': 'DEMO',
+                    # Legacy brokers for backward compatibility
+                    'earn2trade': 'EARN2TRADE',
+                    'uprofit': 'UPROFIT'
+                }
+                
+                if firm_suffix not in suffix_to_firm_mapping:
+                    raise ValueError(f"Unknown ProjectX firm: {firm_suffix}. Supported firms: {list(suffix_to_firm_mapping.keys())}")
+                
+                firm = suffix_to_firm_mapping[firm_suffix]
+                config = get_projectx_config(firm)
+                
+                if not config or not config.get("api_key"):
+                    raise ValueError(f"No valid ProjectX configuration found for firm {firm}. Please set environment variables.")
+                
+                from .data_sources import ProjectXData
+                data_source = ProjectXData(config)
+                broker = ProjectX(config, data_source=data_source)
+            except Exception as e:
+                colored_message = termcolor.colored(f"Failed to initialize ProjectX broker {trading_broker_name}: {e}", "red")
+                logger.error(colored_message)
         else:
             colored_message = termcolor.colored(f"Unknown trading broker name: {trading_broker_name}. Please check your environment variables.", "red")
             logger.error(colored_message)
@@ -483,7 +522,21 @@ if not is_backtesting or is_backtesting.lower() == "false":
         elif INTERACTIVE_BROKERS_REST_CONFIG["IB_USERNAME"]:
             broker = InteractiveBrokersREST(INTERACTIVE_BROKERS_REST_CONFIG)
         elif TRADOVATE_CONFIG["USERNAME"]:
-            broker = Tradovate(TRADOVATE_CONFIG)
+            try:
+                broker = Tradovate(TRADOVATE_CONFIG)
+            except Exception as e:
+                # Handle rate limiting and other connection errors gracefully
+                error_str = str(e)
+                if "rate limited" in error_str.lower() or "429" in error_str:
+                    message = (
+                        "Tradovate connection blocked due to rate limiting. "
+                        "Too many requests were made. Wait 5-10 minutes and try again."
+                    )
+                    logger.error(termcolor.colored(message, "red"))
+                    raise RuntimeError(message) from e
+                else:
+                    logger.error(termcolor.colored(f"Could not initialize Tradovate broker: {e}", "red"))
+                    raise
         # Only check for SCHWAB_ACCOUNT_NUMBER to select Schwab
         elif SCHWAB_CONFIG.get("SCHWAB_ACCOUNT_NUMBER"):
             broker = Schwab(SCHWAB_CONFIG)
