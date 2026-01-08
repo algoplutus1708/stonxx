@@ -417,6 +417,9 @@ class TestThetaDataSource:
         data_source = ThetaDataBacktesting(
             start, end, username=THETADATA_USERNAME, password=THETADATA_PASSWORD
         )
+        # CI/runtime guard: building a full SPY chain can include hundreds of expirations (each requires a strike-list
+        # request). We only need a representative near-dated chain for this test, so bound the expiry window.
+        data_source._chain_constraints = {"max_expiration_date": start.date() + timedelta(days=30)}
 
         asset = Asset(symbol="SPY", asset_type="stock")
         chains = data_source.get_chains(asset)
