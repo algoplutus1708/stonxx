@@ -154,13 +154,12 @@ def test_pltr_minute_theta_integration():
         assert trades["price"].notnull().all()
 
 
-@pytest.mark.apitest
 def test_iron_condor_minute_theta_integration():
     _ensure_env_loaded()
-    # Use 3 trading days for minute-level options (much faster than 1 month)
-    # Purpose: verify ThetaData SPX index + options data works
-    backtesting_start = dt.datetime(2024, 9, 9)
-    backtesting_end = dt.datetime(2024, 9, 11)
+    # Purpose: verify ThetaData SPX index + options data works.
+    # Keep window to a single session for CI reliability/runtime.
+    backtesting_start = dt.datetime(2024, 9, 11, 9, 30)
+    backtesting_end = dt.datetime(2024, 9, 11, 16, 0)
 
     results, strat_obj = IronCondor0DTE.run_backtest(
         ThetaDataBacktesting,

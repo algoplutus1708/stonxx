@@ -296,7 +296,6 @@ class TestThetaDataMethods:
 class TestThetaDataOptions:
     """Test options pricing."""
 
-    @pytest.mark.apitest
     def test_atm_call_and_put(self):
         """Test ATM call and put pricing."""
         username = os.environ.get("THETADATA_USERNAME")
@@ -308,6 +307,9 @@ class TestThetaDataOptions:
             username=username,
             password=password,
         )
+        # CI/runtime guard: chain building can include many expirations (each requires a strike-list request).
+        # We only need representative near-dated expirations for this integration check.
+        theta._chain_constraints = {"max_expiration_date": theta.datetime_start.date() + datetime.timedelta(days=30)}
 
         # Get underlying price
         underlying = Asset("SPY", asset_type="stock")
