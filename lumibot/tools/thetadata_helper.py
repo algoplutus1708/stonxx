@@ -3863,10 +3863,11 @@ def load_cache(cache_file, *, start=None, end=None, preserve_full_history: bool 
     df = None
     if start is not None and end is not None and not preserve_full_history:
         try:
-            import pyarrow.dataset as ds
             from datetime import date as date_type
             from datetime import datetime as datetime_type
             from datetime import time as time_type
+
+            import pyarrow.dataset as ds
 
             def _coerce_bound(value, *, is_end: bool):
                 if value is None:
