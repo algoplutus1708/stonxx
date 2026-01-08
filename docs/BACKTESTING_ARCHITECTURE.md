@@ -495,7 +495,7 @@ ThetaData downloads can occur at any point during a backtest when data is needed
 **Functions:**
 - `get_download_status()` - Get current download state
 - `set_download_status(asset, quote_asset, data_type, timespan, current, total)` - Update status
-- `clear_download_status()` - Clear status after download completes
+- `finalize_download_status()` / `clear_download_status()` - Mark inactive (finalize keeps the last `current/total` visible for UI polling)
 
 **Download Status Format:**
 ```python
@@ -506,10 +506,15 @@ ThetaData downloads can occur at any point during a backtest when data is needed
     "data_type": "ohlc",      # Data type (ohlc, trades, quotes)
     "timespan": "minute",     # Timespan (minute, day, etc.)
     "progress": 50,           # Progress percentage (0-100)
-    "current": 5,             # Current chunk number
-    "total": 10               # Total chunks
+    "current": 5,             # Completed request "pieces" for THIS asset operation
+    "total": 10               # Total request "pieces" for THIS asset operation
 }
 ```
+
+**Semantics (important):**
+- `current/total` are **not** “percent of the whole backtest downloaded”.
+- They represent progress for the **single asset currently being hydrated** (e.g., one stock, or one option contract identified by symbol + strike + expiration + right).
+- A “piece” is whatever deterministic request plan the data source uses for that asset (e.g., per-trading-day requests for intraday history, or per-date-window requests for EOD history).
 
 **Extending to Other Data Sources:**
 

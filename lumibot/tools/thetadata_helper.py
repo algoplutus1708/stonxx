@@ -182,12 +182,38 @@ def advance_download_status_progress(
 
         if asset is not None:
             try:
-                status_symbol = (_download_status.get("asset") or {}).get("symbol")
+                status_asset = _download_status.get("asset") or {}
+                status_symbol = status_asset.get("symbol")
                 asset_symbol = getattr(asset, "symbol", None)
                 if status_symbol is not None and asset_symbol is not None and str(status_symbol) != str(asset_symbol):
                     return
+
+                # Options share the same underlying symbol across many contracts; only treat a
+                # progress update as applicable if the contract identity matches.
+                status_type = str(status_asset.get("type") or "").lower()
+                if status_type == "option" or str(getattr(asset, "asset_type", "")).lower() == "option":
+                    status_exp = status_asset.get("exp")
+                    status_strike = status_asset.get("strike")
+                    status_right = status_asset.get("right")
+
+                    asset_exp = getattr(asset, "expiration", None)
+                    asset_exp_str = asset_exp.isoformat() if hasattr(asset_exp, "isoformat") else (str(asset_exp) if asset_exp else None)
+                    asset_strike = getattr(asset, "strike", None)
+                    asset_right = getattr(asset, "right", None)
+
+                    if status_exp is not None and asset_exp_str is not None and str(status_exp) != str(asset_exp_str):
+                        return
+                    if status_right is not None and asset_right is not None and str(status_right).upper() != str(asset_right).upper():
+                        return
+                    if status_strike is not None and asset_strike is not None:
+                        try:
+                            if float(status_strike) != float(asset_strike):
+                                return
+                        except Exception:
+                            if str(status_strike) != str(asset_strike):
+                                return
             except Exception:
-                pass
+                return
 
         total = _download_status.get("total") or 0
         try:
@@ -4948,6 +4974,10 @@ def get_historical_eod_data(
     header_format: Optional[List[str]] = None
     windows = list(_chunk_windows())
 
+    # Track progress for this single-asset EOD download operation.
+    # Each outer window is one "piece" (even if a window needs to be split due to server errors).
+    set_download_status(asset, "USD", datastyle, "day", 0, max(1, len(windows)))
+
     # DEBUG-LOG: EOD data request (overall)
     logger.debug(
         "[THETA][DEBUG][EOD][REQUEST] asset=%s start=%s end=%s datastyle=%s chunks=%d",
@@ -4958,59 +4988,65 @@ def get_historical_eod_data(
         len(windows)
     )
 
-    for idx, (window_start, window_end) in enumerate(windows, start=1):
-        logger.debug(
-            "[THETA][DEBUG][EOD][REQUEST][CHUNK] asset=%s chunk=%d/%d start=%s end=%s",
-            asset,
-            idx,
-            len(windows),
-            window_start,
-            window_end,
-        )
-
-        try:
-            chunk_payloads = _collect_chunk_payloads(window_start, window_end)
-        except ThetaRequestError as exc:
-            logger.error(
-                "[THETA][ERROR][EOD][CHUNK] asset=%s chunk=%d/%d start=%s end=%s status=%s detail=%s",
-                asset,
-                idx,
-                len(windows),
-                window_start,
-                window_end,
-                exc.status_code,
-                exc.body,
-            )
-            raise
-        except ValueError as exc:
-            logger.error(
-                "[THETA][ERROR][EOD][CHUNK] asset=%s chunk=%d/%d start=%s end=%s error=%s",
-                asset,
-                idx,
-                len(windows),
-                window_start,
-                window_end,
-                exc,
-            )
-            raise
-
-        for json_resp in chunk_payloads:
-            if not json_resp:
-                continue
-
-            response_rows = json_resp.get("response") or []
-            if response_rows:
-                aggregated_rows.extend(response_rows)
-            if not header_format and json_resp.get("header", {}).get("format"):
-                header_format = json_resp["header"]["format"]
-
+    try:
+        for idx, (window_start, window_end) in enumerate(windows, start=1):
             logger.debug(
-                "[THETA][DEBUG][EOD][RESPONSE][CHUNK] asset=%s chunk=%d/%d rows=%d",
+                "[THETA][DEBUG][EOD][REQUEST][CHUNK] asset=%s chunk=%d/%d start=%s end=%s",
                 asset,
                 idx,
                 len(windows),
-                len(response_rows),
+                window_start,
+                window_end,
             )
+
+            try:
+                chunk_payloads = _collect_chunk_payloads(window_start, window_end)
+            except ThetaRequestError as exc:
+                logger.error(
+                    "[THETA][ERROR][EOD][CHUNK] asset=%s chunk=%d/%d start=%s end=%s status=%s detail=%s",
+                    asset,
+                    idx,
+                    len(windows),
+                    window_start,
+                    window_end,
+                    exc.status_code,
+                    exc.body,
+                )
+                raise
+            except ValueError as exc:
+                logger.error(
+                    "[THETA][ERROR][EOD][CHUNK] asset=%s chunk=%d/%d start=%s end=%s error=%s",
+                    asset,
+                    idx,
+                    len(windows),
+                    window_start,
+                    window_end,
+                    exc,
+                )
+                raise
+
+            for json_resp in chunk_payloads:
+                if not json_resp:
+                    continue
+
+                response_rows = json_resp.get("response") or []
+                if response_rows:
+                    aggregated_rows.extend(response_rows)
+                if not header_format and json_resp.get("header", {}).get("format"):
+                    header_format = json_resp["header"]["format"]
+
+                logger.debug(
+                    "[THETA][DEBUG][EOD][RESPONSE][CHUNK] asset=%s chunk=%d/%d rows=%d",
+                    asset,
+                    idx,
+                    len(windows),
+                    len(response_rows),
+                )
+
+            # Mark one outer window complete.
+            advance_download_status_progress(asset=asset, data_type=datastyle, timespan="day", step=1)
+    finally:
+        finalize_download_status()
 
     if not aggregated_rows or not header_format:
         logger.debug(
