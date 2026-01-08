@@ -5,7 +5,10 @@ These rules are mandatory whenever you work on ThetaData integrations.
 ## Multi-Agent Collaboration (CRITICAL)
 This repo is frequently edited by **multiple AI sessions**. To avoid lost work:
 
-- **Branch etiquette:** if a task mandates a specific version branch (e.g., `4.4.25`), treat it as the shared branch—stay on it and do not create new branches/PRs unless explicitly instructed. Otherwise, start new work branches from a stable base branch (e.g., `dev`/`main`/`master`) and avoid chaining feature/WIP branches.
+- **Branch etiquette (STRICT):** if you are on a version branch (e.g., `version/4.4.31`), treat it as the shared collaboration branch.
+  - **Do not create additional branches** (no `git switch -c`, no `git branch`, no `version/4.4.31-foo`, no `version/4.4.31/<topic>`), unless the user explicitly asks.
+  - If a PR is needed for review, **the PR head must be the existing version branch** (e.g., `version/4.4.31`), not a new feature branch.
+  - Do not switch branches unless explicitly instructed; if you suspect you're on the wrong branch, stop and ask.
 - **No “feature branch chaining”:** if you’re already on a feature/WIP or version branch (e.g., `feature/*`, `fix/*`, `wip/*`, `version/*`, `release/*`, or a version-named branch like `X.Y.Z`), keep working there; don’t create another feature branch from it unless explicitly instructed.
 - **Branch naming (LumiBot convention):** prefer version-scoped branches so multiple agents can collaborate without “feature branch naming drift”. Use the repo’s existing convention (e.g., `4.4.25` or `version/X.Y.Z`).
   - Default for active release work: the shared version branch (e.g., `4.4.25`).
