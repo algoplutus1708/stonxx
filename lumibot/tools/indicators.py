@@ -623,8 +623,12 @@ def plot_indicators(
                 col=1
             )
 
-        # Create graph
-        fig.write_html(plot_file_html, auto_open=show_indicators)
+        disable_ui = os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes") or bool(
+            os.environ.get("PYTEST_CURRENT_TEST")
+        )
+
+        # Create graph (auto_open disabled for CI/tests).
+        fig.write_html(plot_file_html, auto_open=show_indicators and not disable_ui)
 
         # Get the file name for the CSV file by removing the .html extension and adding .csv
         csv_file = plot_file_html.replace(".html", ".csv")
@@ -672,6 +676,10 @@ def plot_returns(
     if not show_plot:
         logger.info("show_plot is False, not creating the plot file or CSV.")
         return
+
+    disable_ui = os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes") or bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+    )
 
     logger.info("\nCreating trades plot and CSV...")
 
@@ -960,7 +968,7 @@ def plot_returns(
         ),
     )
 
-    # Create graph
+    # Create graph (auto_open disabled for CI/tests).
     fig.write_html(plot_file_html, auto_open=show_plot and not disable_ui)
 
 
@@ -1148,7 +1156,11 @@ def create_tearsheet(
         _write_placeholder_tearsheet(f"QuantStats error: {exc}")
         return
 
-    if show_tearsheet:
+    disable_ui = os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes") or bool(
+        os.environ.get("PYTEST_CURRENT_TEST")
+    )
+
+    if show_tearsheet and not disable_ui:
         url = "file://" + os.path.abspath(str(tearsheet_file))
         webbrowser.open(url)
 
