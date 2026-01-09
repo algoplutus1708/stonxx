@@ -108,6 +108,11 @@ class Tradier(Broker):
         # Override default market setting for Tradier to be NYSE, but still respect config/env if set
         self.market = (config.get("MARKET") if config else None) or os.environ.get("MARKET") or "NYSE"
 
+        # Telemetry counters (best-effort; used by runtime telemetry snapshots).
+        self._telemetry_polls_total = 0
+        self._telemetry_events_dispatched_total = 0
+        self._telemetry_orders_seen_max = 0
+
     def _safe_stream_dispatch(self, event, **kwargs):
         """Dispatch an event to the stream if it exists.
 
@@ -119,6 +124,10 @@ class Tradier(Broker):
         if stream is None:
             return
         try:
+            try:
+                self._telemetry_events_dispatched_total += 1
+            except Exception:
+                pass
             stream.dispatch(event, **kwargs)
         except Exception:
             return
@@ -838,6 +847,11 @@ class Tradier(Broker):
         # status in Tradier.
         # df_orders = self.tradier.orders.get_orders()
         raw_orders = self._pull_broker_all_orders()
+        try:
+            self._telemetry_polls_total += 1
+            self._telemetry_orders_seen_max = max(int(self._telemetry_orders_seen_max), len(raw_orders or []))
+        except Exception:
+            pass
         stored_orders = {x.identifier: x for x in self.get_all_orders()}
         for order_row in raw_orders:
             order = self._parse_broker_order_dict(order_row, strategy_name=self._strategy_name)

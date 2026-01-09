@@ -83,6 +83,7 @@ class Broker(ABC):
         self.name = name
         self._lock = RLock()
         self._stop_event = threading.Event()  # Add stop event for clean shutdown
+        self._runtime_telemetry = None
         self._unprocessed_orders = SafeList(self._lock)
         self._placeholder_orders = SafeList(self._lock)
         self._new_orders = SafeList(self._lock)
@@ -158,6 +159,64 @@ class Broker(ABC):
 
         # Trading calendar placeholder; StrategyExecutor will initialize.
         self._trading_days = None
+
+        self._start_runtime_telemetry()
+
+    def _telemetry_snapshot(self) -> dict:
+        """Lightweight, best-effort broker snapshot for runtime telemetry."""
+        snap: dict[str, object] = {}
+        try:
+            snap["orders_unprocessed"] = int(len(self._unprocessed_orders))
+            snap["orders_placeholder"] = int(len(self._placeholder_orders))
+            snap["orders_new"] = int(len(self._new_orders))
+            snap["orders_partial"] = int(len(self._partially_filled_orders))
+            snap["orders_filled"] = int(len(self._filled_orders))
+            snap["orders_canceled"] = int(len(self._canceled_orders))
+            snap["orders_error"] = int(len(self._error_orders))
+        except Exception:
+            pass
+
+        try:
+            snap["positions_tracked"] = int(len(self._filled_positions))
+        except Exception:
+            pass
+
+        try:
+            snap["trade_events_rows"] = int(len(self._trade_event_log_rows))
+        except Exception:
+            pass
+
+        for key in (
+            "_telemetry_polls_total",
+            "_telemetry_events_dispatched_total",
+            "_telemetry_orders_seen_max",
+        ):
+            try:
+                if hasattr(self, key):
+                    snap[key.removeprefix("_telemetry_")] = int(getattr(self, key))
+            except Exception:
+                continue
+
+        return snap
+
+    def _start_runtime_telemetry(self) -> None:
+        """Start always-on runtime memory telemetry (best-effort)."""
+        try:
+            from lumibot.tools.runtime_telemetry import RuntimeTelemetryConfig, RuntimeTelemetryEmitter
+
+            cfg = RuntimeTelemetryConfig.from_env(is_backtesting=bool(self.IS_BACKTESTING_BROKER))
+            if not cfg.enabled:
+                return
+
+            self._runtime_telemetry = RuntimeTelemetryEmitter(
+                broker=self,
+                stop_event=self._stop_event,
+                config=cfg,
+                logger=getattr(self, "logger", None),
+            )
+            self._runtime_telemetry.start()
+        except Exception:
+            return
 
     # --- Trading calendar initialization ---
     def initialize_market_calendars(self, trading_days_df):
@@ -355,6 +414,12 @@ class Broker(ABC):
             try:
                 self._orders_thread.join(timeout=1)
             except:
+                pass
+
+        if getattr(self, "_runtime_telemetry", None) is not None:
+            try:
+                self._runtime_telemetry.join(timeout=1)  # type: ignore[union-attr]
+            except Exception:
                 pass
 
     def __del__(self):

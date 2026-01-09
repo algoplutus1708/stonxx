@@ -8,6 +8,7 @@ Deploy marker: `d5c6b730` ("deploy 4.4.31")
 - SMART_LIMIT: live matrix apitests + runner scripts; expanded unit coverage for edge cases.
 - Investigations/docs: production endpoint breakdown notes and an expanded backtesting performance playbook.
 - ThetaData: per-asset download progress reporting for option-chain strike scans (exposed via `download_status`).
+- Runtime telemetry: lightweight memory/health JSON lines (`LUMIBOT_TELEMETRY ...`) for diagnosing OOMs in long-running live workers.
 
 ### Changed
 - Acceptance backtests now run in CI (no longer marked `apitest`); baselines were refreshed for LEAPS + MELI; CI caps were raised for long full-year strategies due to runner variability.
