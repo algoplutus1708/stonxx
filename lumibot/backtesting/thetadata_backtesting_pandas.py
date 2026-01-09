@@ -3515,6 +3515,61 @@ class ThetaDataBacktestingPandas(PandasData):
         current_date = self.get_datetime().date()
         constraints = getattr(self, "_chain_constraints", None) or {}
 
+        # PERF: intraday option strategies often ask for chains repeatedly (sometimes directly via
+        # Strategy.get_chains, not via OptionsHelper). If we allow ThetaData's default horizon
+        # (up to 2 years for equities) the chain builder will issue one strike-list request per
+        # expiration, which can be thousands of requests (especially for SPX/SPXW daily expirations).
+        #
+        # Apply a conservative default max-expiration bound for intraday backtests unless the
+        # strategy explicitly configured a different max_expiration_date via `_chain_constraints`.
+        try:
+            needs_default_max = not isinstance(constraints, dict) or constraints.get("max_expiration_date") is None
+        except Exception:
+            needs_default_max = True
+
+        if needs_default_max and getattr(self, "_timestep", None) != "day":
+            try:
+                symbol_upper = (getattr(asset, "symbol", "") or "").upper()
+                asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+                is_index_like = asset_type == "index" or symbol_upper in {
+                    "SPX",
+                    "SPXW",
+                    "NDX",
+                    "NDXP",
+                    "RUT",
+                    "RUTW",
+                    "VIX",
+                    "VIXW",
+                    "XSP",
+                    "DJX",
+                    "OEX",
+                    "XEO",
+                }
+                # Intraday backtests are especially sensitive to chain build fanout. Keep the
+                # default horizon bounded (vs Theta's multi-year default), but conservative enough
+                # not to break common 30-60DTE strategies. Strategies that truly need a different
+                # horizon should set `_chain_constraints["max_expiration_date"]`.
+                max_days_out = 45 if is_index_like else 180
+
+                base_date = current_date
+                try:
+                    min_dt = constraints.get("min_expiration_date") if isinstance(constraints, dict) else None
+                    if isinstance(min_dt, datetime):
+                        min_dt = min_dt.date()
+                    if isinstance(min_dt, date) and min_dt > base_date:
+                        base_date = min_dt
+                except Exception:
+                    base_date = current_date
+
+                max_expiration = base_date + timedelta(days=max_days_out)
+                if isinstance(constraints, dict):
+                    constraints = dict(constraints)
+                else:
+                    constraints = {}
+                constraints["max_expiration_date"] = max_expiration
+            except Exception:
+                pass
+
         # PERF: `get_chains_cached()` hits parquet (local/S3) and `Chains(...)` normalizes expiry keys.
         # Option-heavy strategies can call `get_chains()` hundreds of times per trading day, which
         # becomes the dominant CPU cost in year-long backtests. Cache per (symbol, date, constraints)

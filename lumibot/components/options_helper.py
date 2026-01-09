@@ -314,7 +314,17 @@ class OptionsHelper:
             if isinstance(record, dict)
         }
 
-        chains = self.strategy.get_chains(underlying_asset)
+        max_expiration_hint = None
+        try:
+            max_expiration_hint = self._default_chain_max_expiration_date(
+                underlying_asset=underlying_asset,
+                min_expiration_date=expiry,
+            )
+        except Exception:
+            max_expiration_hint = None
+
+        with self._chain_hint(expiry, max_expiration_hint):
+            chains = self.strategy.get_chains(underlying_asset)
         if not chains:
             self.strategy.log_message("Option chains unavailable; cannot locate a valid option.", color="yellow")
             return None
@@ -984,7 +994,12 @@ class OptionsHelper:
         candidate_strikes: List[float] = []
         chains = None
         try:
-            chains = self.strategy.get_chains(underlying_asset)
+            max_expiration_hint = self._default_chain_max_expiration_date(
+                underlying_asset=underlying_asset,
+                min_expiration_date=expiry,
+            )
+            with self._chain_hint(expiry, max_expiration_hint):
+                chains = self.strategy.get_chains(underlying_asset)
         except Exception:
             chains = None
 
@@ -1508,7 +1523,29 @@ class OptionsHelper:
         self.strategy.log_message(f"Order details: {details}", color="blue")
         return details
 
-    def _chain_hint(self, min_expiration_date):
+    def _default_chain_max_expiration_date(
+        self,
+        *,
+        underlying_asset: Optional[Asset],
+        min_expiration_date: date,
+    ) -> date:
+        """Return a conservative max-expiration hint to avoid chain-scan storms.
+
+        The ThetaData chain builder fetches strike lists per expiration. For index underlyings
+        (SPX/SPXW/etc) that can mean *daily* expirations, so a wide window can generate thousands
+        of strike-list requests during a single backtest day.
+        """
+
+        try:
+            symbol = getattr(underlying_asset, "symbol", None) if underlying_asset is not None else None
+        except Exception:
+            symbol = None
+
+        is_index_like = self._is_index_like_underlying(underlying_asset, symbol)
+        days_out = 45 if is_index_like else 180
+        return min_expiration_date + timedelta(days=days_out)
+
+    def _chain_hint(self, min_expiration_date: date, max_expiration_date: Optional[date] = None):
         """Temporarily set chain constraints on the underlying data source."""
         broker = getattr(self.strategy, "broker", None)
         data_source = getattr(broker, "data_source", None) if broker else None
@@ -1517,13 +1554,17 @@ class OptionsHelper:
             def __init__(self, ds, min_dt):
                 self.ds = ds
                 self.min_dt = min_dt
+                self.max_dt = max_expiration_date
                 self.prev = None
 
             def __enter__(self):
                 if not self.ds:
                     return
                 self.prev = getattr(self.ds, "_chain_constraints", None)
-                self.ds._chain_constraints = {"min_expiration_date": self.min_dt}
+                constraints = {"min_expiration_date": self.min_dt}
+                if self.max_dt is not None:
+                    constraints["max_expiration_date"] = self.max_dt
+                self.ds._chain_constraints = constraints
 
             def __exit__(self, exc_type, exc_val, exc_tb):
                 if not self.ds:
@@ -1844,7 +1885,16 @@ class OptionsHelper:
                 f"No expirations >= {dt} found in cached chains; requesting extended range...",
                 color="yellow",
             )
-            with self._chain_hint(dt):
+            max_expiration_hint = None
+            try:
+                max_expiration_hint = self._default_chain_max_expiration_date(
+                    underlying_asset=underlying_asset,
+                    min_expiration_date=dt,
+                )
+            except Exception:
+                max_expiration_hint = None
+
+            with self._chain_hint(dt, max_expiration_hint):
                 refreshed_chains = self.strategy.get_chains(underlying_asset)
             if refreshed_chains:
                 chains_map = refreshed_chains if isinstance(refreshed_chains, dict) else {}

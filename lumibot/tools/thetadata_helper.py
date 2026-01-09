@@ -6423,7 +6423,31 @@ def get_chains_cached(
     asset_type = str(getattr(asset, "asset_type", "") or "").lower()
     is_index = asset_type == "index"
 
-    if not hint_present:
+    min_expiration_date = constraints.get("min_expiration_date")
+    max_expiration_date = constraints.get("max_expiration_date")
+
+    def _coerce_date(value: Any) -> Optional[date]:
+        if value is None:
+            return None
+        if isinstance(value, date):
+            return value
+        if isinstance(value, datetime):
+            return value.date()
+        try:
+            return date.fromisoformat(str(value))
+        except Exception:
+            return None
+
+    min_expiration_date_coerced = _coerce_date(min_expiration_date)
+    max_expiration_date_coerced = _coerce_date(max_expiration_date)
+
+    # Even when callers pass chain constraints, index chains are stable enough (no splits, and Theta's
+    # expirations list is not truly point-in-time) that we should reuse cached chain files whenever
+    # they cover the requested horizon. This is critical for CI/prod parity: otherwise year-long
+    # index option backtests rebuild chains daily and hit the downloader even when S3 is warm.
+    should_scan_cache_files = (not hint_present) or is_index
+
+    if should_scan_cache_files:
         pattern = f"{asset.symbol}_*.parquet"
         potential_files = sorted(chain_folder.glob(pattern), reverse=True)
 
@@ -6479,6 +6503,10 @@ def get_chains_cached(
                     if not expiries:
                         continue
                     if max(expiries) < current_date:
+                        continue
+                    if min_expiration_date_coerced is not None and max(expiries) < min_expiration_date_coerced:
+                        continue
+                    if max_expiration_date_coerced is not None and max(expiries) < max_expiration_date_coerced:
                         continue
                 except Exception:
                     continue
