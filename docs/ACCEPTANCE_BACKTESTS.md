@@ -153,7 +153,7 @@ Each strategy section includes:
 - Correct Max DD = -1.43%
 - Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 34.6s
 - CI cap (seconds) <= 120
-- Baseline `run_id` = `LeapsCallDebitSpread_2026-01-05_09-34_qqykop`
+- Baseline `run_id` = `LeapsCallDebitSpread_2026-01-09_13-04_CVbj44`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | flags | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -163,7 +163,7 @@ Each strategy section includes:
 | `LeapsCallDebitSpread_2026-01-04_05-13_ZpmFin` | 4.4.24 | 2025-10-01 → 2025-10-14 | 10.8 | 2% | 58.04% | -1.14% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-04_11-20_vXE88y` | 4.4.24 | 2025-10-01 → 2025-10-14 | 5.4 | 0% | 11.81% | -1.16% | historical (superseded; baseline updated under v44 cache semantics) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-04_22-07_IhWXKY` | 4.4.25 | 2025-10-01 → 2025-10-14 | 33.3 | 1% | 18.0% | -1.43% | historical (superseded; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `LeapsCallDebitSpread_2026-01-05_09-34_qqykop` | 4.4.27 | 2025-10-01 → 2025-10-14 | 34.6 | 0% | 8.64% | -1.43% | prod-like (baseline; v44; queue-free; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `LeapsCallDebitSpread_2026-01-09_13-04_CVbj44` | 4.4.30 | 2025-10-01 → 2025-10-14 | 28.6 | 0% | 9.95% | -1.16% | prod-like (baseline; v44; queue-free) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-04_05-53_OtxpYi` | 4.4.24 | 2025-01-01 → 2025-11-30 | 10.7 | -74% | -77.61% | -84.04% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `LeapsCallDebitSpread_2026-01-04_11-22_rnMuYq` | 4.4.24 | 2025-01-01 → 2025-11-30 | 7.6 | -4% | -4.34% | -18.39% | prod-like (baseline) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
@@ -250,7 +250,7 @@ This strategy was previously **under investigation** for baseline mismatch; CI u
 - Correct Max DD = -99.32%
 - Observed `backtest_time_seconds` (macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8) = 122.6s
 - CI cap (seconds) <= 300
-- Baseline `run_id` = `MeliDeepDrawdownCalls_2026-01-05_09-42_bMjRNX`
+- Baseline `run_id` = `MeliDeepDrawdownCalls_2026-01-09_13-04_SZkY2g`
 
 | run_id | lumibot | window | wall_time_s | total_return | cagr | max_dd | status | machine |
 |---|---:|---|---:|---:|---:|---:|---|---|
@@ -260,7 +260,7 @@ This strategy was previously **under investigation** for baseline mismatch; CI u
 | `MeliDeepDrawdownCalls_2026-01-04_09-39_hyg1f1` | 4.4.24 | 2013-01-01 → 2025-12-17 | 18.1 | 82% | 5.12% | -98.2% | historical (superseded; pre daily-bar end-row fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `MeliDeepDrawdownCalls_2026-01-04_11-05_y7Ap6O` | 4.4.24 | 2013-01-01 → 2025-12-17 | 41.1 | -89% | -16.83% | -98.96% | historical (superseded; stale snapshot placeholder refetch caused missing option marks) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 | `MeliDeepDrawdownCalls_2026-01-05_02-18_dKzthV` | 4.4.25 | 2013-01-01 → 2025-12-17 | 111.3 | 104% | 6.16% | -98.17% | historical (superseded; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
-| `MeliDeepDrawdownCalls_2026-01-05_09-42_bMjRNX` | 4.4.27 | 2013-01-01 → 2025-12-17 | 122.6 | 125% | 7.02% | -99.32% | expected baseline (v44; queue-free; daily fill alignment fix) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
+| `MeliDeepDrawdownCalls_2026-01-09_13-04_SZkY2g` | 4.4.30 | 2013-01-01 → 2025-12-17 | 98.4 | 14% | 1.11% | -99.30% | expected baseline (v44; queue-free) | macOS=26.1; CPU=Apple M3 Max; RAM=48GB; Python=3.11.8 |
 
 See: `docs/investigations/ACCURACY_AUDIT_2026-01-02.md` for the divergence notes and first-diff audit plan.
 

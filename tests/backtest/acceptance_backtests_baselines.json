@@ -26,19 +26,19 @@
     },
     {
       "backtest_time_seconds": 34.633213000022806,
-      "baseline_run_id": "LeapsCallDebitSpread_2026-01-05_09-34_qqykop",
+      "baseline_run_id": "LeapsCallDebitSpread_2026-01-09_13-04_CVbj44",
       "data_source": "thetadata",
       "end_date": "2025-10-15",
       "lumibot_version": "4.4.27",
       "max_backtest_time_seconds": 120,
       "metrics_centipercent": {
-        "cagr": 864,
-        "max_drawdown": -143,
+        "cagr": 995,
+        "max_drawdown": -116,
         "total_return": 0
       },
       "metrics_raw": {
-        "cagr": "8.64%",
-        "max_drawdown": "-1.43%",
+        "cagr": "9.95%",
+        "max_drawdown": "-1.16%",
         "total_return": "0.00%"
       },
       "script_filename": "Leaps Buy Hold (Alpha Picks).py",
@@ -98,20 +98,20 @@
     },
     {
       "backtest_time_seconds": 122.6331987909507,
-      "baseline_run_id": "MeliDeepDrawdownCalls_2026-01-05_09-42_bMjRNX",
+      "baseline_run_id": "MeliDeepDrawdownCalls_2026-01-09_13-04_SZkY2g",
       "data_source": "thetadata",
       "end_date": "2025-12-18",
       "lumibot_version": "4.4.27",
       "max_backtest_time_seconds": 300,
       "metrics_centipercent": {
-        "cagr": 702,
-        "max_drawdown": -9932,
-        "total_return": 12500
+        "cagr": 111,
+        "max_drawdown": -9930,
+        "total_return": 1400
       },
       "metrics_raw": {
-        "cagr": "7.02%",
-        "max_drawdown": "-99.32%",
-        "total_return": "125.00%"
+        "cagr": "1.11%",
+        "max_drawdown": "-99.30%",
+        "total_return": "14.00%"
       },
       "script_filename": "Meli Deep Drawdown Calls.py",
       "settings_backtesting_end": "2025-12-17 23:59:00-05:00",
