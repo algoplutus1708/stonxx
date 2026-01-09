@@ -173,6 +173,7 @@ git log --oneline vX.Y.Z..HEAD
 
 To keep deployments traceable (and easy to diff):
 
+- **Follow the repo workflow** in `docs/DEPLOYMENT.md` (version branch → `deploy X.Y.Z` commit → changelog → tag → GitHub Release → next version branch).
 - **Tag the deploy commit** with the semantic version (annotated tag): `vX.Y.Z`
 - **Push the tag** to GitHub
 - **Create a GitHub Release** from that tag and paste the corresponding `CHANGELOG.md` entry

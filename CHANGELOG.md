@@ -1,5 +1,31 @@
 # Changelog
 
+## 4.4.31 - 2026-01-09
+
+Deploy marker: `d5c6b730` ("deploy 4.4.31")
+
+### Changed
+- Acceptance backtests now run in CI (no longer marked `apitest`) and CI caps were raised for the long full-year strategies to account for runner variability.
+- Backtests running under pytest no longer auto-open HTML artifacts (plots/tearsheets) in a browser.
+
+### Fixed
+- ThetaData: reduced option chain fanout (chain cache reuse under expiry hints; strike-list prefetch limited to head+tail expirations when unconstrained).
+- Backtesting progress: improved per-asset download progress tracking in `download_status` so UI diagnostics are clearer.
+
+### Removed
+- ⚠️ Removed ThetaData chain default-horizon env vars (`THETADATA_CHAIN_DEFAULT_MAX_DAYS_OUT*`). Chain default horizons are now fixed and covered by tests.
+
+## 4.4.30 - 2026-01-06
+
+Version bump marker: `76b31467` ("Docs/tests: normalize artifacts + bump version")
+
+### Added
+- Backtesting performance playbook and production/local parity notes.
+- `LUMIBOT_DISABLE_DOTENV` to disable recursive `.env` scanning in prod-like runs.
+
+### Fixed
+- ThetaData: filtered intraday parquet loads to reduce memory footprint; daily option MTM fixes.
+
 ## 4.4.29 - 2026-01-06
 
 Deploy marker: `b8c6a839` ("deploy 4.4.29")

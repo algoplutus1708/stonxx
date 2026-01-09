@@ -20,6 +20,7 @@ This folder contains **human-authored** documentation for the LumiBot trading an
 | `THETADATA_CACHE_VALIDATION.md` | How ThetaData caching works, cache invalidation, version bumping | When debugging stale data or cache issues |
 | `REMOTE_CACHE.md` | S3 remote cache architecture and configuration | When debugging cache sync or S3 issues |
 | `PRODLIKE_LOCAL_BACKTEST_RUNS.md` | How to run production-like backtests locally | When replicating prod behavior locally |
+| `DEPLOYMENT.md` | Release workflow (version branches, changelog, tags) | When deploying a new version |
 | `FUTURES_ROLL_POLICY.md` | Futures contract rolling logic and configuration | When working with futures strategies |
 | `DATABENTO_POLARS_OVERVIEW.md` | Databento integration and Polars dataframe usage | When working with Databento data source |
 
