@@ -53,15 +53,14 @@ def test_build_historical_chain_applies_default_max_days_out(monkeypatch):
     """
 
     fake_queue = _FakeQueueClient()
-    monkeypatch.setenv("THETADATA_CHAIN_DEFAULT_MAX_DAYS_OUT", "60")
-    monkeypatch.setenv("THETADATA_CHAIN_DEFAULT_MAX_DAYS_OUT_INDEX", "60")
 
     monkeypatch.setattr(
         "lumibot.tools.thetadata_queue_client.get_queue_client",
         lambda: fake_queue,
     )
 
-    expirations = ["2022-01-07", "2022-02-18", "2022-03-18", "2023-01-20"]
+    # Default horizon is bounded (2y for stocks). Far-future expirations should be excluded.
+    expirations = ["2022-01-07", "2022-02-18", "2022-03-18", "2023-01-20", "2026-01-20"]
 
     def fake_get_request(*, url: str, headers: dict, querystring: dict):
         assert querystring.get("format") == "json"
@@ -77,18 +76,16 @@ def test_build_historical_chain_applies_default_max_days_out(monkeypatch):
     call_expirations = set(chains["Chains"]["CALL"].keys())
     assert "2022-01-07" in call_expirations
     assert "2022-02-18" in call_expirations
-    # With max_days_out=60, max_hint_date = 2022-03-04, so 2022-03-18 must be excluded.
-    assert "2022-03-18" not in call_expirations
-    assert "2023-01-20" not in call_expirations
+    assert "2022-03-18" in call_expirations
+    assert "2023-01-20" in call_expirations
+    assert "2026-01-20" not in call_expirations
 
     submitted_exps = [exp for _sym, exp in fake_queue.submitted]
-    assert submitted_exps == ["2022-01-07", "2022-02-18"]
+    assert submitted_exps == ["2022-01-07", "2022-02-18", "2022-03-18", "2023-01-20"]
 
 
 def test_build_historical_chain_respects_explicit_max_hint(monkeypatch):
     fake_queue = _FakeQueueClient()
-    monkeypatch.setenv("THETADATA_CHAIN_DEFAULT_MAX_DAYS_OUT", "60")
-    monkeypatch.setenv("THETADATA_CHAIN_DEFAULT_MAX_DAYS_OUT_INDEX", "60")
     monkeypatch.setattr(
         "lumibot.tools.thetadata_queue_client.get_queue_client",
         lambda: fake_queue,
