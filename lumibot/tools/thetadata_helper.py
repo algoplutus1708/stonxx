@@ -5861,15 +5861,10 @@ def build_historical_chain(
     #
     # Default to a bounded max-expiration window unless the caller explicitly provides one.
     if max_hint_date is None:
-        try:
-            default_days_out = int(os.environ.get("THETADATA_CHAIN_DEFAULT_MAX_DAYS_OUT", "730"))
-        except Exception:
-            default_days_out = 730
-
-        try:
-            index_days_out = int(os.environ.get("THETADATA_CHAIN_DEFAULT_MAX_DAYS_OUT_INDEX", "180"))
-        except Exception:
-            index_days_out = 180
+        # Keep these as stable defaults (no env-var toggles): changing chain horizons is a
+        # high-impact behavior change that should be explicit in code + tests.
+        default_days_out = 730
+        index_days_out = 180
 
         symbol_upper = str(getattr(asset, "symbol", "") or "").upper()
         asset_type = str(getattr(asset, "asset_type", "") or "").lower()
@@ -5982,7 +5977,38 @@ def build_historical_chain(
 
         expiration_candidates.append((expiration_iso, strike_symbol))
 
-    total_strike_units = max(1, min(len(expiration_candidates), max_expirations))
+    # STRIKE PREFETCH OPTIMIZATION:
+    # Many strategies only need the expiration list from a chain (e.g. to choose a far-dated LEAPS
+    # expiry) and will only query strikes for 1-2 expirations. Fetching strikes for every
+    # expiration can generate hundreds of `option/list/strikes` requests and dominate runtime.
+    #
+    # When the caller didn't provide explicit chain constraints and the candidate list is large,
+    # pre-populate the chain with *all* expiration keys (empty strike lists), but only prefetch
+    # strikes for a small, representative subset (head + tail). This keeps common strategies fast
+    # while preserving the full expiration list.
+    user_constraints = chain_constraints or {}
+    user_hint_present = any(
+        user_constraints.get(key) is not None for key in ("min_expiration_date", "max_expiration_date")
+    )
+
+    expiration_candidates_for_strikes = expiration_candidates
+    if not user_hint_present and len(expiration_candidates) > 50:
+        for expiration_iso, _strike_symbol in expiration_candidates:
+            chains["CALL"].setdefault(expiration_iso, [])
+            chains["PUT"].setdefault(expiration_iso, [])
+
+        head = expiration_candidates[:14]
+        tail = expiration_candidates[-14:] if len(expiration_candidates) > 14 else []
+        seen: set[Tuple[str, str]] = set()
+        pruned: List[Tuple[str, str]] = []
+        for item in head + tail:
+            if item in seen:
+                continue
+            seen.add(item)
+            pruned.append(item)
+        expiration_candidates_for_strikes = pruned
+
+    total_strike_units = max(1, min(len(expiration_candidates_for_strikes), max_expirations))
     completed_strike_units = 0
     try:
         # This is a single download operation: building an option chain. Surface progress in
@@ -5999,7 +6025,7 @@ def build_historical_chain(
         )
 
         idx = 0
-        while idx < len(expiration_candidates):
+        while idx < len(expiration_candidates_for_strikes):
             if expirations_added >= max_expirations:
                 logger.debug("[ThetaData] Chain build hit max_expirations limit (%d)", max_expirations)
                 break
@@ -6011,7 +6037,7 @@ def build_historical_chain(
                 break
 
             remaining_needed = max_expirations - expirations_added
-            batch = expiration_candidates[idx: idx + min(batch_size, remaining_needed)]
+            batch = expiration_candidates_for_strikes[idx: idx + min(batch_size, remaining_needed)]
 
             requests: List[Tuple[str, str, str]] = []  # (request_id, expiration_iso, strike_symbol)
             for expiration_iso, strike_symbol in batch:
