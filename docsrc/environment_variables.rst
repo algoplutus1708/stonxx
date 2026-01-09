@@ -57,16 +57,6 @@ LUMIBOT_ACCEPTANCE_TRIPWIRE
 Backtest artifacts + UX flags
 -----------------------------
 
-LUMIBOT_DISABLE_UI
-^^^^^^^^^^^^^^^^^
-
-- Purpose: Disable *all* UI/browser auto-open behaviors during backtests (plots, indicators, tearsheet open).
-- Values: truthy enables (``1``, ``true``, ``yes``); unset/``0`` disables.
-- Default: disabled.
-- Notes:
-  - This does **not** prevent generating artifacts (e.g., tearsheet HTML/CSV); it only prevents auto-opening browser windows.
-  - Intended for CI, unit tests, and other non-interactive runs.
-
 SHOW_PLOT / SHOW_INDICATORS / SHOW_TEARSHEET
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

@@ -3,28 +3,27 @@ import inspect
 import pandas as pd
 
 
-def test_strategy_backtest_ui_defaults_are_true() -> None:
-    """Guardrail: end-user defaults must keep UI output enabled.
+def test_strategy_backtest_ui_defaults_are_none() -> None:
+    """Guardrail: Strategy.backtest must honor existing SHOW_* env vars by default.
 
-    Acceptance/CI backtests explicitly disable UI via env vars. That MUST NOT leak into normal
-    defaults — callers should still get plots/indicators/tearsheets by default.
+    `_Strategy.run_backtest()` already resolves `show_plot/show_indicators/show_tearsheet` from
+    `SHOW_PLOT/SHOW_INDICATORS/SHOW_TEARSHEET` when they are None. This is what acceptance backtests
+    rely on to prevent UI popups.
     """
     from lumibot.strategies.strategy import Strategy
 
     sig = inspect.signature(Strategy.backtest)
-    assert sig.parameters["show_plot"].default is True
-    assert sig.parameters["show_tearsheet"].default is True
-    assert sig.parameters["show_indicators"].default is True
+    assert sig.parameters["show_plot"].default is None
+    assert sig.parameters["show_tearsheet"].default is None
+    assert sig.parameters["show_indicators"].default is None
 
 
-def test_lumibot_disable_ui_prevents_browser_open(monkeypatch, tmp_path) -> None:
-    """Guardrail: acceptance backtests must not open browser windows."""
+def test_create_tearsheet_does_not_open_browser_when_show_tearsheet_false(monkeypatch, tmp_path) -> None:
+    """Guardrail: callers can disable tearsheet browser auto-open via `show_tearsheet=False`."""
     from lumibot.tools import indicators as indicators_mod
 
-    monkeypatch.setenv("LUMIBOT_DISABLE_UI", "true")
-
     def _should_not_open(_: str) -> None:
-        raise AssertionError("webbrowser.open() must not be called when LUMIBOT_DISABLE_UI=true")
+        raise AssertionError("webbrowser.open() must not be called when show_tearsheet=False")
 
     monkeypatch.setattr(indicators_mod.webbrowser, "open", _should_not_open)
 
@@ -47,7 +46,7 @@ def test_lumibot_disable_ui_prevents_browser_open(monkeypatch, tmp_path) -> None
         tearsheet_file=str(tmp_path / "tearsheet.html"),
         benchmark_df=benchmark_df,
         benchmark_asset="SPY",
-        show_tearsheet=True,
+        show_tearsheet=False,
         save_tearsheet=True,
         risk_free_rate=0.0,
     )
