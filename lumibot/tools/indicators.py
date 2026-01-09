@@ -623,8 +623,10 @@ def plot_indicators(
                 col=1
             )
 
+        disable_ui = os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
+
         # Create graph
-        fig.write_html(plot_file_html, auto_open=show_indicators)
+        fig.write_html(plot_file_html, auto_open=show_indicators and not disable_ui)
 
         # Get the file name for the CSV file by removing the .html extension and adding .csv
         csv_file = plot_file_html.replace(".html", ".csv")
@@ -668,8 +670,10 @@ def plot_returns(
     # chart_markers_df=None,
     # chart_lines_df=None,
 ):
+    disable_ui = os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
+
     # If show plot is False, then we don't want to open the plot in the browser
-    if not show_plot:
+    if not show_plot or disable_ui:
         logger.info("show_plot is False, not creating the plot file or CSV.")
         return
 
@@ -961,7 +965,7 @@ def plot_returns(
     )
 
     # Create graph
-    fig.write_html(plot_file_html, auto_open=show_plot)
+    fig.write_html(plot_file_html, auto_open=show_plot and not disable_ui)
 
 
 def _prepare_tearsheet_returns(strategy_df: pd.DataFrame, benchmark_df: pd.DataFrame):
@@ -1148,7 +1152,8 @@ def create_tearsheet(
         _write_placeholder_tearsheet(f"QuantStats error: {exc}")
         return
 
-    if show_tearsheet:
+    disable_ui = os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
+    if show_tearsheet and not disable_ui:
         url = "file://" + os.path.abspath(str(tearsheet_file))
         webbrowser.open(url)
 

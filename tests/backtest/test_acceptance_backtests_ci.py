@@ -30,10 +30,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-# Acceptance backtests intentionally enforce "no downloader usage" via the tripwire, but they
-# still depend on pre-warmed caches + stable baselines and are non-deterministic in CI.
-# Mark as `apitest` so default CI runs (which use `-m "not apitest"`) skip them by default.
-pytestmark = [pytest.mark.acceptance_backtest, pytest.mark.apitest]
+# Acceptance backtests intentionally enforce "no downloader usage" via the tripwire.
+# These are required correctness gates for ThetaData parity and should run in CI.
+pytestmark = [pytest.mark.acceptance_backtest]
 
 # Headline metrics are written at 0.01% resolution in `*_tearsheet.csv`.
 # We keep CI strict by default and only allow a 0.01% tolerance to avoid rare float->string

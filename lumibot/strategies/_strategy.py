@@ -1744,6 +1744,13 @@ class _Strategy:
         if show_indicators is None:
             show_indicators = SHOW_INDICATORS
 
+        # Acceptance backtests (and CI) must never pop open browser windows or charts.
+        # This is intentionally opt-in and MUST NOT change defaults for normal users.
+        if os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes"):
+            show_plot = False
+            show_tearsheet = False
+            show_indicators = False
+
         from lumibot.credentials import BACKTESTING_DATA_SOURCE as _DEFAULT_BACKTESTING_DATA_SOURCE
 
         # Determine whether an environment override exists. When BACKTESTING_DATA_SOURCE
