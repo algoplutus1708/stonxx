@@ -2955,6 +2955,75 @@ def test_build_historical_chain_parses_quote_payload(monkeypatch):
     assert result["Chains"]["PUT"]["2025-01-24"] == [120.0]
 
 
+def test_build_historical_chain_updates_download_status(monkeypatch):
+    asset = Asset("CVNA", asset_type="stock")
+    as_of_date = date(2024, 11, 7)
+
+    def fake_get_request(url, headers, querystring):
+        if url.endswith(thetadata_helper.OPTION_LIST_ENDPOINTS["expirations"]):
+            return {
+                "header": {"format": ["date"]},
+                "response": [[20241115], [20241205], [20250124]],
+            }
+        raise AssertionError(f"Unexpected URL {url}")
+
+    monkeypatch.setattr(thetadata_helper, "get_request", fake_get_request)
+
+    from lumibot.tools import thetadata_queue_client
+
+    class FakeQueueClient:
+        max_concurrent = 8
+
+        def __init__(self):
+            self._next_id = 1
+            self._results = {}
+
+        def check_or_submit(self, method, path, query_params, headers=None, body=None):
+            request_id = f"req-{self._next_id}"
+            self._next_id += 1
+            exp = query_params["expiration"]
+            payload = {
+                "header": {"format": ["strike"]},
+                "response": [[100000], [105000]] if exp == "2024-11-15" else [[110000]],
+            }
+            self._results[request_id] = (payload, 200)
+            return request_id, "pending", False
+
+        def wait_for_result(self, request_id, timeout=None, poll_interval=None):
+            return self._results[request_id]
+
+    monkeypatch.setattr(thetadata_queue_client, "get_queue_client", lambda *args, **kwargs: FakeQueueClient())
+
+    status_updates = []
+    progress_updates = []
+
+    def fake_set_download_status(asset_obj, quote_asset, data_type, timespan, current, total, timeout_s=None):
+        status_updates.append(
+            {
+                "asset": getattr(asset_obj, "to_minimal_dict", lambda: {"symbol": str(asset_obj)})(),
+                "data_type": data_type,
+                "timespan": timespan,
+                "current": current,
+                "total": total,
+            }
+        )
+
+    def fake_advance_download_status_progress(*, asset=None, data_type=None, timespan=None, step=1):
+        progress_updates.append({"data_type": data_type, "timespan": timespan, "step": step})
+
+    monkeypatch.setattr(thetadata_helper, "set_download_status", fake_set_download_status)
+    monkeypatch.setattr(thetadata_helper, "advance_download_status_progress", fake_advance_download_status_progress)
+    monkeypatch.setattr(thetadata_helper, "finalize_download_status", lambda: None)
+
+    result = thetadata_helper.build_historical_chain(asset, as_of_date)
+    assert result is not None
+
+    chain_updates = [u for u in status_updates if u["data_type"] == "option_chain" and u["timespan"] == "meta"]
+    assert chain_updates, "Expected build_historical_chain() to set download_status for option_chain scans"
+    assert chain_updates[0]["total"] >= 1
+    assert len([u for u in progress_updates if u["data_type"] == "option_chain" and u["timespan"] == "meta"]) >= 1
+
+
 def test_build_historical_chain_uses_v3_option_list_params(monkeypatch):
     asset = Asset("SPY", asset_type="stock")
     as_of_date = date(2024, 11, 15)

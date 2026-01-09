@@ -2577,89 +2577,108 @@ def get_price_data(
     # while also passing `dt` (the current simulation timestamp). For those calls we only need to
     # validate coverage through `dt`, not through the full-day `end` bound.
     if timespan != "day" and df_all is not None and not df_all.empty:
+        # Placeholder-only *option* intraday caches are valid negative caches (e.g., ThetaData 472/no quotes
+        # for a contract/day). They deliberately do not contain a "session open" row, so enforcing intraday
+        # min/max coverage would incorrectly mark them as missing and trigger repeated downloader requests.
+        #
+        # Acceptance/CI runs start from empty disks; without this skip, placeholder-only option caches become
+        # perpetual cache-misses even when S3 is warm.
         try:
-            idx = pd.to_datetime(df_all.index, utc=True, errors="coerce")
-            idx = idx[~pd.isna(idx)]
-            if len(idx):
-                min_ts = idx.min()
-                max_ts = idx.max()
-
-                start_utc = pd.to_datetime(requested_start, utc=True, errors="coerce")
-                end_utc = pd.to_datetime(requested_end, utc=True, errors="coerce")
-                if pd.notna(start_utc) and pd.notna(end_utc):
-                    # Clamp the "required" coverage end to `dt` when provided.
-                    end_check_utc = end_utc
-                    if dt is not None:
-                        try:
-                            dt_check = pd.to_datetime(dt, errors="coerce")
-                            if pd.notna(dt_check):
-                                if dt_check.tz is None:
-                                    dt_check = dt_check.tz_localize(LUMIBOT_DEFAULT_PYTZ)
-                                else:
-                                    dt_check = dt_check.tz_convert(LUMIBOT_DEFAULT_PYTZ)
-                                dt_check_utc = dt_check.tz_convert(pytz.UTC)
-                                if dt_check_utc >= start_utc:
-                                    end_check_utc = min(end_check_utc, dt_check_utc)
-                        except Exception:
-                            pass
-
-                    # If the requested end is exactly midnight, treat the calendar window as
-                    # end-exclusive so we don't incorrectly include the next trading day.
-                    calendar_end = requested_end
-                    try:
-                        if getattr(requested_end, "hour", None) == 0 and getattr(requested_end, "minute", None) == 0:
-                            calendar_end = requested_end - timedelta(seconds=1)
-                    except Exception:
-                        calendar_end = requested_end
-
-                    trading_dates = get_trading_dates(asset, requested_start, calendar_end)
-                    if trading_dates:
-                        try:
-                            from lumibot.tools.helpers import get_trading_days
-
-                            def _session_bounds_utc(day: date) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
-                                schedule = get_trading_days(
-                                    market="NYSE",
-                                    start_date=day,
-                                    end_date=day + timedelta(days=1),
-                                    tzinfo=LUMIBOT_DEFAULT_PYTZ,
-                                )
-                                if schedule is None or schedule.empty:
-                                    return None, None
-                                open_dt = schedule["market_open"].iloc[0]
-                                close_dt = schedule["market_close"].iloc[0]
-                                open_utc = pd.Timestamp(open_dt).tz_convert(pytz.UTC)
-                                close_utc = pd.Timestamp(close_dt).tz_convert(pytz.UTC)
-                                return open_utc, close_utc
-                        except Exception:
-                            _session_bounds_utc = None
-
-                        tolerance = timedelta(minutes=2)
-                        first_day = trading_dates[0]
-                        last_day = trading_dates[-1]
-
-                        # Start-of-window: if caller requests midnight, we only require the cache to
-                        # include the regular-session open (09:30 ET), not midnight/pre-market.
-                        required_start = start_utc
-                        if _session_bounds_utc is not None:
-                            open_utc, _ = _session_bounds_utc(first_day)
-                            if open_utc is not None:
-                                required_start = max(required_start, open_utc)
-                        if min_ts > required_start + tolerance:
-                            missing_dates = sorted(set(missing_dates or []) | {first_day})
-
-                        # End-of-window: require coverage through the earlier of (dt, end) bounded by
-                        # the regular-session close (16:00 ET) for that day.
-                        required_end = end_check_utc
-                        if _session_bounds_utc is not None:
-                            _, close_utc = _session_bounds_utc(last_day)
-                            if close_utc is not None:
-                                required_end = min(required_end, close_utc)
-                        if max_ts < required_end - tolerance:
-                            missing_dates = sorted(set(missing_dates or []) | {last_day})
+            is_option = str(getattr(asset, "asset_type", "") or "").lower() == "option"
+            placeholder_only_option = (
+                is_option
+                and "missing" in df_all.columns
+                and bool(df_all["missing"].fillna(False).astype(bool).all())
+            )
         except Exception:
-            # Coverage checks are best-effort and must never block callers.
+            placeholder_only_option = False
+        if placeholder_only_option:
+            # Keep `missing_dates` as-is (usually empty after `get_missing_dates()`).
             pass
+        else:
+            try:
+                idx = pd.to_datetime(df_all.index, utc=True, errors="coerce")
+                idx = idx[~pd.isna(idx)]
+                if len(idx):
+                    min_ts = idx.min()
+                    max_ts = idx.max()
+
+                    start_utc = pd.to_datetime(requested_start, utc=True, errors="coerce")
+                    end_utc = pd.to_datetime(requested_end, utc=True, errors="coerce")
+                    if pd.notna(start_utc) and pd.notna(end_utc):
+                        # Clamp the "required" coverage end to `dt` when provided.
+                        end_check_utc = end_utc
+                        if dt is not None:
+                            try:
+                                dt_check = pd.to_datetime(dt, errors="coerce")
+                                if pd.notna(dt_check):
+                                    if dt_check.tz is None:
+                                        dt_check = dt_check.tz_localize(LUMIBOT_DEFAULT_PYTZ)
+                                    else:
+                                        dt_check = dt_check.tz_convert(LUMIBOT_DEFAULT_PYTZ)
+                                    dt_check_utc = dt_check.tz_convert(pytz.UTC)
+                                    if dt_check_utc >= start_utc:
+                                        end_check_utc = min(end_check_utc, dt_check_utc)
+                            except Exception:
+                                pass
+
+                        # If the requested end is exactly midnight, treat the calendar window as
+                        # end-exclusive so we don't incorrectly include the next trading day.
+                        calendar_end = requested_end
+                        try:
+                            if getattr(requested_end, "hour", None) == 0 and getattr(requested_end, "minute", None) == 0:
+                                calendar_end = requested_end - timedelta(seconds=1)
+                        except Exception:
+                            calendar_end = requested_end
+
+                        trading_dates = get_trading_dates(asset, requested_start, calendar_end)
+                        if trading_dates:
+                            try:
+                                from lumibot.tools.helpers import get_trading_days
+
+                                def _session_bounds_utc(day: date) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+                                    schedule = get_trading_days(
+                                        market="NYSE",
+                                        start_date=day,
+                                        end_date=day + timedelta(days=1),
+                                        tzinfo=LUMIBOT_DEFAULT_PYTZ,
+                                    )
+                                    if schedule is None or schedule.empty:
+                                        return None, None
+                                    open_dt = schedule["market_open"].iloc[0]
+                                    close_dt = schedule["market_close"].iloc[0]
+                                    open_utc = pd.Timestamp(open_dt).tz_convert(pytz.UTC)
+                                    close_utc = pd.Timestamp(close_dt).tz_convert(pytz.UTC)
+                                    return open_utc, close_utc
+                            except Exception:
+                                _session_bounds_utc = None
+
+                            tolerance = timedelta(minutes=2)
+                            first_day = trading_dates[0]
+                            last_day = trading_dates[-1]
+
+                            # Start-of-window: if caller requests midnight, we only require the cache to
+                            # include the regular-session open (09:30 ET), not midnight/pre-market.
+                            required_start = start_utc
+                            if _session_bounds_utc is not None:
+                                open_utc, _ = _session_bounds_utc(first_day)
+                                if open_utc is not None:
+                                    required_start = max(required_start, open_utc)
+                            if min_ts > required_start + tolerance:
+                                missing_dates = sorted(set(missing_dates or []) | {first_day})
+
+                            # End-of-window: require coverage through the earlier of (dt, end) bounded by
+                            # the regular-session close (16:00 ET) for that day.
+                            required_end = end_check_utc
+                            if _session_bounds_utc is not None:
+                                _, close_utc = _session_bounds_utc(last_day)
+                                if close_utc is not None:
+                                    required_end = min(required_end, close_utc)
+                            if max_ts < required_end - tolerance:
+                                missing_dates = sorted(set(missing_dates or []) | {last_day})
+            except Exception:
+                # Coverage checks are best-effort and must never block callers.
+                pass
 
     cache_file = build_cache_filename(asset, timespan, datastyle)
     logger.debug(
@@ -3778,25 +3797,14 @@ def get_missing_dates(df_all, asset, start, end):
         0 if df_all is None else len(df_all)
     )
 
-    asset_type_value = str(getattr(asset, "asset_type", "")).lower()
-    symbol_upper = str(getattr(asset, "symbol", "") or "").upper()
-    index_symbols = {
-        "SPX", "SPXW",
-        "RUT", "RUTW",
-        "VIX", "VIXW",
-        "NDX", "NDXP",
-        "XSP", "DJX", "OEX", "XEO",
-    }
-    is_index_asset = asset_type_value == "index" or symbol_upper in index_symbols
-
     trading_dates = get_trading_dates(asset, start, end)
 
     logger.debug(
         "[THETA][DEBUG][CACHE][TRADING_DATES] asset=%s | "
-        "is_index_asset=%s | "
+        "asset_type=%s | "
         "trading_dates_count=%d first=%s last=%s",
         asset.symbol if hasattr(asset, 'symbol') else str(asset),
-        is_index_asset,
+        getattr(asset, "asset_type", None),
         len(trading_dates),
         trading_dates[0] if trading_dates else None,
         trading_dates[-1] if trading_dates else None
@@ -4031,6 +4039,29 @@ def load_cache(cache_file, *, start=None, end=None, preserve_full_history: bool 
                     end_bound.isoformat() if hasattr(end_bound, "isoformat") else end_bound,
                     len(df),
                 )
+                # If the filtered slice is empty, we can still need to detect placeholder-only
+                # caches (e.g., option minute quote caches for contracts with no quotes/trades).
+                #
+                # When the placeholder marker timestamp falls outside the requested window,
+                # a pure slice read returns 0 rows and the caller interprets that as "cache missing",
+                # repeatedly submitting downloader work every run.
+                #
+                # To keep CI runs queue-free once S3 is warm, fall back to reading the full file
+                # for *small option cache files* so placeholder-only detection can short-circuit.
+                if df is not None and len(df) == 0:
+                    try:
+                        is_option_cache = cache_file.name.lower().startswith("option_")
+                        size_bytes = cache_file.stat().st_size
+                    except Exception:
+                        is_option_cache = False
+                        size_bytes = None
+                    if is_option_cache and size_bytes is not None and size_bytes <= 2 * 1024 * 1024:
+                        logger.debug(
+                            "[THETA][DEBUG][CACHE][LOAD_FILTER_EMPTY_FALLBACK] cache_file=%s size_bytes=%d",
+                            cache_file.name,
+                            size_bytes,
+                        )
+                        df = None
         except Exception:
             df = None
 
@@ -5744,6 +5775,30 @@ def build_historical_chain(
 
     headers = {"Accept": "application/json"}
 
+    class _OptionChainStatusAsset:
+        def __init__(
+            self,
+            underlying_symbol: str,
+            *,
+            expiration: Optional[str] = None,
+            strike_symbol: Optional[str] = None,
+            as_of: Optional[date] = None,
+        ):
+            self._underlying_symbol = str(underlying_symbol or "")
+            self._expiration = expiration
+            self._strike_symbol = strike_symbol
+            self._as_of = as_of
+
+        def to_minimal_dict(self) -> Dict[str, Any]:
+            payload: Dict[str, Any] = {"type": "option_chain", "symbol": self._underlying_symbol}
+            if self._expiration is not None:
+                payload["exp"] = self._expiration
+            if self._strike_symbol is not None and self._strike_symbol != self._underlying_symbol:
+                payload["strike_symbol"] = self._strike_symbol
+            if self._as_of is not None:
+                payload["as_of"] = self._as_of.isoformat()
+            return payload
+
     def _fetch_expiration_values(symbol: str) -> List[str]:
         expirations_resp = get_request(
             url=f"{_current_base_url()}{OPTION_LIST_ENDPOINTS['expirations']}",
@@ -5927,108 +5982,158 @@ def build_historical_chain(
 
         expiration_candidates.append((expiration_iso, strike_symbol))
 
-    idx = 0
-    while idx < len(expiration_candidates):
-        if expirations_added >= max_expirations:
-            logger.debug("[ThetaData] Chain build hit max_expirations limit (%d)", max_expirations)
-            break
-        if consecutive_strike_misses >= max_consecutive_misses:
-            logger.debug(
-                "[ThetaData] %d consecutive expirations with no strikes; stopping scan.",
-                max_consecutive_misses,
-            )
-            break
+    total_strike_units = max(1, min(len(expiration_candidates), max_expirations))
+    completed_strike_units = 0
+    try:
+        # This is a single download operation: building an option chain. Surface progress in
+        # terms of completed strike-list requests so the UI doesn't show download_status="{}"
+        # during long strike scans (notably SPX/SPXW).
+        set_download_status(
+            _OptionChainStatusAsset(asset.symbol, as_of=as_of_date),
+            quote_asset=None,
+            data_type="option_chain",
+            timespan="meta",
+            current=0,
+            total=total_strike_units,
+            timeout_s=strikes_timeout,
+        )
 
-        remaining_needed = max_expirations - expirations_added
-        batch = expiration_candidates[idx: idx + min(batch_size, remaining_needed)]
-
-        requests: List[Tuple[str, str, str]] = []  # (request_id, expiration_iso, strike_symbol)
-        for expiration_iso, strike_symbol in batch:
-            request_id, _status, _was_pending = queue_client.check_or_submit(
-                method="GET",
-                path=strikes_path,
-                query_params={
-                    "symbol": strike_symbol,
-                    "expiration": expiration_iso,
-                    "format": "json",
-                },
-                headers=headers,
-            )
-            requests.append((request_id, expiration_iso, strike_symbol))
-
-        for request_id, expiration_iso, strike_symbol in requests:
-            strike_resp = None
-            try:
-                result, status_code = queue_client.wait_for_result(
-                    request_id=request_id,
-                    timeout=strikes_timeout,
-                )
-                if status_code == 472:
-                    strike_resp = None
-                else:
-                    strike_resp = _normalize_queue_payload(result)
-            except TimeoutError:
-                logger.warning(
-                    "[ThetaData] Timeout waiting for strike list (symbol=%s exp=%s request_id=%s timeout=%.1fs)",
-                    strike_symbol,
-                    expiration_iso,
-                    request_id,
-                    strikes_timeout,
-                )
-                strike_resp = None
-            except Exception:
+        idx = 0
+        while idx < len(expiration_candidates):
+            if expirations_added >= max_expirations:
+                logger.debug("[ThetaData] Chain build hit max_expirations limit (%d)", max_expirations)
+                break
+            if consecutive_strike_misses >= max_consecutive_misses:
                 logger.debug(
-                    "[ThetaData] Error fetching strike list (symbol=%s exp=%s request_id=%s)",
-                    strike_symbol,
-                    expiration_iso,
-                    request_id,
-                    exc_info=True,
+                    "[ThetaData] %d consecutive expirations with no strikes; stopping scan.",
+                    max_consecutive_misses,
                 )
+                break
+
+            remaining_needed = max_expirations - expirations_added
+            batch = expiration_candidates[idx: idx + min(batch_size, remaining_needed)]
+
+            requests: List[Tuple[str, str, str]] = []  # (request_id, expiration_iso, strike_symbol)
+            for expiration_iso, strike_symbol in batch:
+                set_download_status(
+                    _OptionChainStatusAsset(
+                        asset.symbol,
+                        expiration=expiration_iso,
+                        strike_symbol=strike_symbol,
+                        as_of=as_of_date,
+                    ),
+                    quote_asset=None,
+                    data_type="option_chain",
+                    timespan="meta",
+                    current=completed_strike_units,
+                    total=total_strike_units,
+                    timeout_s=strikes_timeout,
+                )
+                request_id, _status, _was_pending = queue_client.check_or_submit(
+                    method="GET",
+                    path=strikes_path,
+                    query_params={
+                        "symbol": strike_symbol,
+                        "expiration": expiration_iso,
+                        "format": "json",
+                    },
+                    headers=headers,
+                )
+                requests.append((request_id, expiration_iso, strike_symbol))
+
+            for request_id, expiration_iso, strike_symbol in requests:
                 strike_resp = None
-
-            # Handle strike fetch failures - increment miss counter and potentially stop scanning.
-            if not strike_resp or not strike_resp.get("response"):
-                logger.debug("No strikes for %s exp %s; skipping.", strike_symbol, expiration_iso)
-                consecutive_strike_misses += 1
-                if consecutive_strike_misses >= max_consecutive_misses:
-                    break
-                continue
-
-            strike_df = pd.DataFrame(strike_resp["response"], columns=strike_resp["header"]["format"])
-            if strike_df.empty:
-                consecutive_strike_misses += 1
-                if consecutive_strike_misses >= max_consecutive_misses:
-                    break
-                continue
-
-            strike_col = _detect_column(strike_df, ("strike",))
-            if not strike_col:
-                consecutive_strike_misses += 1
-                if consecutive_strike_misses >= max_consecutive_misses:
-                    break
-                continue
-
-            strike_values = sorted(
-                {
-                    strike
-                    for strike in (
-                        _normalize_strike_value(value) for value in strike_df[strike_col].tolist()
+                try:
+                    # Keep context aligned to the request we're currently waiting on.
+                    set_download_status(
+                        _OptionChainStatusAsset(
+                            asset.symbol,
+                            expiration=expiration_iso,
+                            strike_symbol=strike_symbol,
+                            as_of=as_of_date,
+                        ),
+                        quote_asset=None,
+                        data_type="option_chain",
+                        timespan="meta",
+                        current=completed_strike_units,
+                        total=total_strike_units,
+                        timeout_s=strikes_timeout,
                     )
-                    if strike
-                }
-            )
-            if not strike_values:
-                consecutive_strike_misses += 1
-                if consecutive_strike_misses >= max_consecutive_misses:
-                    break
-                continue
+                    result, status_code = queue_client.wait_for_result(
+                        request_id=request_id,
+                        timeout=strikes_timeout,
+                    )
+                    if status_code == 472:
+                        strike_resp = None
+                    else:
+                        strike_resp = _normalize_queue_payload(result)
+                except TimeoutError:
+                    logger.warning(
+                        "[ThetaData] Timeout waiting for strike list (symbol=%s exp=%s request_id=%s timeout=%.1fs)",
+                        strike_symbol,
+                        expiration_iso,
+                        request_id,
+                        strikes_timeout,
+                    )
+                    strike_resp = None
+                except Exception:
+                    logger.debug(
+                        "[ThetaData] Error fetching strike list (symbol=%s exp=%s request_id=%s)",
+                        strike_symbol,
+                        expiration_iso,
+                        request_id,
+                        exc_info=True,
+                    )
+                    strike_resp = None
+                finally:
+                    completed_strike_units = min(completed_strike_units + 1, total_strike_units)
+                    advance_download_status_progress(data_type="option_chain", timespan="meta", step=1)
 
-            chains["CALL"][expiration_iso] = strike_values
-            chains["PUT"][expiration_iso] = list(strike_values)
-            expirations_added += 1
-            consecutive_strike_misses = 0
+                # Handle strike fetch failures - increment miss counter and potentially stop scanning.
+                if not strike_resp or not strike_resp.get("response"):
+                    logger.debug("No strikes for %s exp %s; skipping.", strike_symbol, expiration_iso)
+                    consecutive_strike_misses += 1
+                    if consecutive_strike_misses >= max_consecutive_misses:
+                        break
+                    continue
 
-        idx += len(batch)
+                strike_df = pd.DataFrame(strike_resp["response"], columns=strike_resp["header"]["format"])
+                if strike_df.empty:
+                    consecutive_strike_misses += 1
+                    if consecutive_strike_misses >= max_consecutive_misses:
+                        break
+                    continue
+
+                strike_col = _detect_column(strike_df, ("strike",))
+                if not strike_col:
+                    consecutive_strike_misses += 1
+                    if consecutive_strike_misses >= max_consecutive_misses:
+                        break
+                    continue
+
+                strike_values = sorted(
+                    {
+                        strike
+                        for strike in (
+                            _normalize_strike_value(value) for value in strike_df[strike_col].tolist()
+                        )
+                        if strike
+                    }
+                )
+                if not strike_values:
+                    consecutive_strike_misses += 1
+                    if consecutive_strike_misses >= max_consecutive_misses:
+                        break
+                    continue
+
+                chains["CALL"][expiration_iso] = strike_values
+                chains["PUT"][expiration_iso] = list(strike_values)
+                expirations_added += 1
+                consecutive_strike_misses = 0
+
+            idx += len(batch)
+    finally:
+        finalize_download_status()
 
     logger.debug(
         "Built ThetaData historical chain for %s on %s (expirations=%d)",
