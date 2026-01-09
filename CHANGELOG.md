@@ -4,16 +4,27 @@
 
 Deploy marker: `d5c6b730` ("deploy 4.4.31")
 
+### Added
+- SMART_LIMIT: live matrix apitests + runner scripts; expanded unit coverage for edge cases.
+- Investigations/docs: production endpoint breakdown notes and an expanded backtesting performance playbook.
+- ThetaData: per-asset download progress reporting for option-chain strike scans (exposed via `download_status`).
+
 ### Changed
-- Acceptance backtests now run in CI (no longer marked `apitest`) and CI caps were raised for the long full-year strategies to account for runner variability.
-- Backtests running under pytest no longer auto-open HTML artifacts (plots/tearsheets) in a browser.
+- Acceptance backtests now run in CI (no longer marked `apitest`); baselines were refreshed for LEAPS + MELI; CI caps were raised for long full-year strategies due to runner variability.
+- CI policy: use pytest markers (not env vars) for opt-in/slow tests; some slow ThetaData backtest tests were made opt-in, then re-enabled once bounded.
+- Backtests under pytest no longer auto-open HTML artifacts (plots/indicators/tearsheets) in a browser.
+- Strategy collaboration workflow: clarified “shared version branch” conventions.
 
 ### Fixed
-- ThetaData: reduced option chain fanout (chain cache reuse under expiry hints; strike-list prefetch limited to head+tail expirations when unconstrained).
-- Backtesting progress: improved per-asset download progress tracking in `download_status` so UI diagnostics are clearer.
+- ThetaData: reduced option-chain fanout and improved warm-cache parity (reuse chain cache under constraints; prefetch strikes only for head+tail expirations when unconstrained; bounded intraday chain defaults).
+- ThetaData: improved intraday cache coverage and corrected daily option MTM behavior.
+- Polygon: reduced split-cache rate limit thrash.
+- SMART_LIMIT: hardened behavior for quote/stream failures.
+- Backtesting progress: improved per-asset `download_status` for clearer “what is downloading” diagnostics.
 
 ### Removed
 - ⚠️ Removed ThetaData chain default-horizon env vars (`THETADATA_CHAIN_DEFAULT_MAX_DAYS_OUT*`). Chain default horizons are now fixed and covered by tests.
+- Removed the short-lived `LUMIBOT_DISABLE_UI` env var (use `SHOW_PLOT/SHOW_INDICATORS/SHOW_TEARSHEET` + pytest non-interactive behavior instead).
 
 ## 4.4.30 - 2026-01-06
 
