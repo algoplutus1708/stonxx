@@ -2568,29 +2568,95 @@ def get_price_data(
     )
 
     # Intraday coverage check: for non-day timespans, `get_missing_dates()` only reasons about full
-    # trading days (by date), not whether the cached frame actually reaches the requested end-of-window.
+    # trading days (by date), not whether the cached frame actually reaches the requested window.
+    #
     # This can produce "partially warm" caches (e.g., only through 15:00 ET) that are treated as hits,
     # causing stale tails and inconsistent interval parity (minute vs 5minute/15minute/hour).
+    #
+    # Important nuance: most backtesting callers pass `start/end` as full-day bounds (midnight→midnight)
+    # while also passing `dt` (the current simulation timestamp). For those calls we only need to
+    # validate coverage through `dt`, not through the full-day `end` bound.
     if timespan != "day" and df_all is not None and not df_all.empty:
         try:
             idx = pd.to_datetime(df_all.index, utc=True, errors="coerce")
             idx = idx[~pd.isna(idx)]
             if len(idx):
-                max_ts = idx.max()
                 min_ts = idx.min()
+                max_ts = idx.max()
 
                 start_utc = pd.to_datetime(requested_start, utc=True, errors="coerce")
                 end_utc = pd.to_datetime(requested_end, utc=True, errors="coerce")
                 if pd.notna(start_utc) and pd.notna(end_utc):
-                    tolerance = timedelta(minutes=2)
-                    start_day = start_utc.date()
-                    end_day = end_utc.date()
-                    trading_days = set(get_trading_dates(asset, requested_start, requested_end))
+                    # Clamp the "required" coverage end to `dt` when provided.
+                    end_check_utc = end_utc
+                    if dt is not None:
+                        try:
+                            dt_check = pd.to_datetime(dt, errors="coerce")
+                            if pd.notna(dt_check):
+                                if dt_check.tz is None:
+                                    dt_check = dt_check.tz_localize(LUMIBOT_DEFAULT_PYTZ)
+                                else:
+                                    dt_check = dt_check.tz_convert(LUMIBOT_DEFAULT_PYTZ)
+                                dt_check_utc = dt_check.tz_convert(pytz.UTC)
+                                if dt_check_utc >= start_utc:
+                                    end_check_utc = min(end_check_utc, dt_check_utc)
+                        except Exception:
+                            pass
 
-                    if start_day in trading_days and min_ts > start_utc + tolerance:
-                        missing_dates = sorted(set(missing_dates or []) | {start_day})
-                    if end_day in trading_days and max_ts < end_utc - tolerance:
-                        missing_dates = sorted(set(missing_dates or []) | {end_day})
+                    # If the requested end is exactly midnight, treat the calendar window as
+                    # end-exclusive so we don't incorrectly include the next trading day.
+                    calendar_end = requested_end
+                    try:
+                        if getattr(requested_end, "hour", None) == 0 and getattr(requested_end, "minute", None) == 0:
+                            calendar_end = requested_end - timedelta(seconds=1)
+                    except Exception:
+                        calendar_end = requested_end
+
+                    trading_dates = get_trading_dates(asset, requested_start, calendar_end)
+                    if trading_dates:
+                        try:
+                            from lumibot.tools.helpers import get_trading_days
+
+                            def _session_bounds_utc(day: date) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+                                schedule = get_trading_days(
+                                    market="NYSE",
+                                    start_date=day,
+                                    end_date=day + timedelta(days=1),
+                                    tzinfo=LUMIBOT_DEFAULT_PYTZ,
+                                )
+                                if schedule is None or schedule.empty:
+                                    return None, None
+                                open_dt = schedule["market_open"].iloc[0]
+                                close_dt = schedule["market_close"].iloc[0]
+                                open_utc = pd.Timestamp(open_dt).tz_convert(pytz.UTC)
+                                close_utc = pd.Timestamp(close_dt).tz_convert(pytz.UTC)
+                                return open_utc, close_utc
+                        except Exception:
+                            _session_bounds_utc = None
+
+                        tolerance = timedelta(minutes=2)
+                        first_day = trading_dates[0]
+                        last_day = trading_dates[-1]
+
+                        # Start-of-window: if caller requests midnight, we only require the cache to
+                        # include the regular-session open (09:30 ET), not midnight/pre-market.
+                        required_start = start_utc
+                        if _session_bounds_utc is not None:
+                            open_utc, _ = _session_bounds_utc(first_day)
+                            if open_utc is not None:
+                                required_start = max(required_start, open_utc)
+                        if min_ts > required_start + tolerance:
+                            missing_dates = sorted(set(missing_dates or []) | {first_day})
+
+                        # End-of-window: require coverage through the earlier of (dt, end) bounded by
+                        # the regular-session close (16:00 ET) for that day.
+                        required_end = end_check_utc
+                        if _session_bounds_utc is not None:
+                            _, close_utc = _session_bounds_utc(last_day)
+                            if close_utc is not None:
+                                required_end = min(required_end, close_utc)
+                        if max_ts < required_end - tolerance:
+                            missing_dates = sorted(set(missing_dates or []) | {last_day})
         except Exception:
             # Coverage checks are best-effort and must never block callers.
             pass
