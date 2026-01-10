@@ -71,3 +71,18 @@ These runs use `scripts/run_backtest_prodlike.py` with:
   - SPX: `option/history/quote`
   - Alpha Picks: `option/list/strikes` (+ quote/eod)
 
+## Fanout reduction smoke test (post-change)
+
+After updating `OptionsHelper.find_strike_for_delta()` to use a Black–Scholes delta-inversion estimate + bounded probing (fallback to the legacy binary walk):
+
+- Strategy: SPX Short Straddle
+- Window: `2025-04-21 → 2025-04-22` (2 days; validation smoke test)
+- Cache version: `bench_spx_2d_2025-04-21_2025-04-22_20260109_201620`
+- Wall time: `348s`
+- Queue submits: `68`
+- Endpoint breakdown:
+  - `v3/option/list/strikes`: `33`
+  - `v3/option/history/quote`: `29`
+  - `v3/index/history/price`: `3`
+  - `v3/index/history/ohlc`: `2`
+  - `v3/option/list/expirations`: `1`
