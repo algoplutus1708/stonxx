@@ -3,6 +3,7 @@ import json
 import os
 import time
 import threading
+from collections import deque
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -83,6 +84,7 @@ class Broker(ABC):
         self.name = name
         self._lock = RLock()
         self._stop_event = threading.Event()  # Add stop event for clean shutdown
+        self._runtime_telemetry = None
         self._unprocessed_orders = SafeList(self._lock)
         self._placeholder_orders = SafeList(self._lock)
         self._new_orders = SafeList(self._lock)
@@ -97,7 +99,12 @@ class Broker(ABC):
         # (option-heavy intraday backtests can generate 100k+ events). Store rows in a Python list
         # and materialize a DataFrame lazily when needed.
         self._trade_event_log_enabled = True
-        self._trade_event_log_rows = []
+        # In live mode we must avoid unbounded growth in long-running workers (Render/ECS).
+        # Backtests keep full history for analysis.
+        self._trade_event_log_max_rows = None if self.IS_BACKTESTING_BROKER else 5000
+        self._trade_event_log_rows = (
+            deque(maxlen=self._trade_event_log_max_rows) if self._trade_event_log_max_rows else []
+        )
         self._trade_event_log_df_cache = pd.DataFrame()
         self._hold_trade_events = False
         self._held_trades = []
@@ -158,6 +165,64 @@ class Broker(ABC):
 
         # Trading calendar placeholder; StrategyExecutor will initialize.
         self._trading_days = None
+
+        self._start_runtime_telemetry()
+
+    def _telemetry_snapshot(self) -> dict:
+        """Lightweight, best-effort broker snapshot for runtime telemetry."""
+        snap: dict[str, object] = {}
+        try:
+            snap["orders_unprocessed"] = int(len(self._unprocessed_orders))
+            snap["orders_placeholder"] = int(len(self._placeholder_orders))
+            snap["orders_new"] = int(len(self._new_orders))
+            snap["orders_partial"] = int(len(self._partially_filled_orders))
+            snap["orders_filled"] = int(len(self._filled_orders))
+            snap["orders_canceled"] = int(len(self._canceled_orders))
+            snap["orders_error"] = int(len(self._error_orders))
+        except Exception:
+            pass
+
+        try:
+            snap["positions_tracked"] = int(len(self._filled_positions))
+        except Exception:
+            pass
+
+        try:
+            snap["trade_events_rows"] = int(len(self._trade_event_log_rows))
+        except Exception:
+            pass
+
+        for key in (
+            "_telemetry_polls_total",
+            "_telemetry_events_dispatched_total",
+            "_telemetry_orders_seen_max",
+        ):
+            try:
+                if hasattr(self, key):
+                    snap[key.removeprefix("_telemetry_")] = int(getattr(self, key))
+            except Exception:
+                continue
+
+        return snap
+
+    def _start_runtime_telemetry(self) -> None:
+        """Start always-on runtime memory telemetry (best-effort)."""
+        try:
+            from lumibot.tools.runtime_telemetry import RuntimeTelemetryConfig, RuntimeTelemetryEmitter
+
+            cfg = RuntimeTelemetryConfig.from_env(is_backtesting=bool(self.IS_BACKTESTING_BROKER))
+            if not cfg.enabled:
+                return
+
+            self._runtime_telemetry = RuntimeTelemetryEmitter(
+                broker=self,
+                stop_event=self._stop_event,
+                config=cfg,
+                logger=getattr(self, "logger", None),
+            )
+            self._runtime_telemetry.start()
+        except Exception:
+            return
 
     # --- Trading calendar initialization ---
     def initialize_market_calendars(self, trading_days_df):
@@ -355,6 +420,12 @@ class Broker(ABC):
             try:
                 self._orders_thread.join(timeout=1)
             except:
+                pass
+
+        if getattr(self, "_runtime_telemetry", None) is not None:
+            try:
+                self._runtime_telemetry.join(timeout=1)  # type: ignore[union-attr]
+            except Exception:
                 pass
 
     def __del__(self):
@@ -1740,7 +1811,8 @@ class Broker(ABC):
         cache = getattr(self, "_trade_event_log_df_cache", None)
         if cache is None:
             rows = getattr(self, "_trade_event_log_rows", [])
-            cache = pd.DataFrame(rows) if rows else pd.DataFrame()
+            # `rows` may be a deque in live mode.
+            cache = pd.DataFrame(list(rows)) if rows else pd.DataFrame()
             self._trade_event_log_df_cache = cache
         return cache
 
@@ -1754,6 +1826,11 @@ class Broker(ABC):
             return
         self._trade_event_log_enabled = True
         self._trade_event_log_df_cache = value
+        # Preserve bounded live behavior even if a caller sets the DF explicitly.
+        if getattr(self, "_trade_event_log_max_rows", None):
+            self._trade_event_log_rows = deque(maxlen=self._trade_event_log_max_rows)
+        else:
+            self._trade_event_log_rows = []
 
     def process_held_trades(self):
         """Processes any held trade notifications."""
@@ -1929,6 +2006,12 @@ class Broker(ABC):
             self._trade_event_log_rows.append(new_row)
             # Invalidate cached DataFrame representation.
             self._trade_event_log_df_cache = None
+
+        # Ensure cleanup runs even when a strategy rarely submits orders.
+        try:
+            self._trigger_periodic_cleanup()
+        except Exception:
+            pass
 
         return
 

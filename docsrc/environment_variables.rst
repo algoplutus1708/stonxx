@@ -583,3 +583,32 @@ LUMIWEALTH_API_KEY
 
 - Purpose: LumiWealth platform API key (for enterprise features).
 - Values: Obtain from LumiWealth (**do not hardcode**).
+
+Runtime telemetry (memory/health)
+--------------------------------
+
+LUMIBOT_TELEMETRY
+^^^^^^^^^^^^^^^^^
+
+- Purpose: Enable/disable runtime telemetry emission (single-line JSON to stdout prefixed with ``LUMIBOT_TELEMETRY``).
+- Values: truthy enables (``1``, ``true``, ``yes``); falsy disables (``0``, ``false``).
+- Default: enabled for live runs; disabled for backtests and pytest.
+
+LUMIBOT_TELEMETRY_INTERVAL_SECONDS
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Base telemetry cadence.
+- Values: seconds (float).
+- Default: ``300``.
+
+LUMIBOT_TELEMETRY_DEEP
+^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Enable deep snapshot mode for diagnosing unknown memory sources.
+- Values: truthy enables; falsy disables.
+- Default: disabled.
+
+Notes:
+
+- Burst mode (more frequent telemetry logs) turns on automatically above ~80% of container memory.
+- Deep snapshots trigger above ~90% with a ~1 hour cooldown (these thresholds are fixed defaults today).

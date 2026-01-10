@@ -1081,8 +1081,11 @@ class Order:
             return False
         elif self.status.lower() in [status.lower(), STATUS_ALIAS_MAP.get(status.lower(), "")]:
             return True
-        # open/new status is equivalent
-        elif {self.status.lower(), status.lower()}.issubset({"open", "new"}):
+        # Treat active "acknowledged" statuses as equivalent across brokers.
+        # WHY: Some brokers (notably Tradier) can report an active order as "submitted" for extended
+        # periods or flip between "open" and "submitted". Treating these as distinct can cause polling
+        # streams to emit repeated NEW events in long-running workers.
+        elif {self.status.lower(), status.lower()}.issubset({"open", "new", "submitted"}):
             return True
         else:
             return False
@@ -1100,7 +1103,7 @@ class Order:
         elif status2.lower() in STATUS_ALIAS_MAP.get(status1.lower(), []):
             # Bidirectional alias check
             return True
-        elif {status1.lower(), status2.lower()}.issubset({"open", "new"}):
+        elif {status1.lower(), status2.lower()}.issubset({"open", "new", "submitted"}):
             return True
         else:
             return False

@@ -1,9 +1,11 @@
 import logging
 import math
 import warnings
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from statistics import NormalDist
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from lumibot.entities import Asset, Order
@@ -1047,18 +1049,143 @@ class OptionsHelper:
             color="blue",
         )
 
-        # Delta is monotonic in strike:
-        # - Calls: delta decreases as strike increases.
-        # - Puts: delta increases (toward 0) as strike increases.
+        # PERF: In intraday option backtests, strategies often re-request the same strike-for-delta
+        # multiple times per trading day. Cache per (underlying, date, expiry, side, delta, underlying_price)
+        # so we don't redo the delta search.
+        cache_date: Optional[date] = None
+        try:
+            now = self.strategy.get_datetime()
+            if isinstance(now, datetime):
+                cache_date = now.date()
+            elif isinstance(now, date):
+                cache_date = now
+        except Exception:
+            cache_date = None
+
+        strike_cache = getattr(self, "_strike_for_delta_cache", None)
+        if not isinstance(strike_cache, dict):
+            strike_cache = {}
+            setattr(self, "_strike_for_delta_cache", strike_cache)
+
+        cache_key = None
+        if cache_date is not None:
+            cache_key = (
+                getattr(underlying_asset, "symbol", str(underlying_asset)),
+                cache_date,
+                expiry,
+                option_type,
+                round(float(target_delta), 4),
+                round(float(underlying_price), 2),
+            )
+            cached_strike = strike_cache.get(cache_key)
+            if cached_strike is not None and cached_strike in candidate_strikes:
+                return float(cached_strike)
+
         is_call = option_type == "CALL"
 
         best_strike: Optional[float] = None
         best_delta: Optional[float] = None
 
+        # ------------------------------------------------------------------
+        # PERF: The existing binary search is O(log N) but still triggers 8-20
+        # expensive delta computations per call (each can require an option quote-history
+        # download). Use a Black–Scholes delta inversion *estimate* to jump near the target
+        # strike and probe a small neighborhood, falling back to binary search only when
+        # the estimate fails.
+        # ------------------------------------------------------------------
+        strike_estimate: Optional[float] = None
+        try:
+            call_delta = float(target_delta) if is_call else float(target_delta) + 1.0
+            if 0.01 < call_delta < 0.99:
+                as_of = cache_date or date.today()
+                days_to_expiry = (expiry - as_of).days
+                t_years = max(1.0 / 365.0, float(days_to_expiry) / 365.0)
+
+                try:
+                    is_index_like = self._is_index_like_underlying(underlying_asset, getattr(underlying_asset, "symbol", None))
+                except Exception:
+                    is_index_like = False
+                sigma = 0.25 if is_index_like else 0.35
+
+                nd = NormalDist()
+                d1 = nd.inv_cdf(call_delta)
+                sig_sqrt_t = sigma * math.sqrt(t_years)
+                if sig_sqrt_t > 0:
+                    ln_s_over_k = (d1 * sig_sqrt_t) - (0.5 * sigma * sigma * t_years)
+                    strike_estimate = float(underlying_price) / math.exp(ln_s_over_k)
+        except Exception:
+            strike_estimate = None
+
+        visited: set[int] = set()
+
+        def _try_strike(idx: int) -> Optional[Tuple[float, float]]:
+            if idx < 0 or idx >= len(candidate_strikes) or idx in visited:
+                return None
+            visited.add(idx)
+            strike = candidate_strikes[idx]
+            self.strategy.log_message(
+                f"🔍 Trying strike {strike:g} (range: {strike_min:.2f}-{strike_max:.2f})",
+                color="blue",
+            )
+            delta = self.get_delta_for_strike(underlying_asset, underlying_price, strike, expiry, right)
+            if delta is None:
+                return None
+            return float(strike), float(delta)
+
+        if strike_estimate is not None and candidate_strikes:
+            self.strategy.log_message(
+                f"🔍 BS estimate: strike≈{strike_estimate:.2f} (target_delta={target_delta})",
+                color="blue",
+            )
+
+            insert_at = bisect_left(candidate_strikes, strike_estimate)
+            start_idx = min(max(insert_at, 0), len(candidate_strikes) - 1)
+            if start_idx > 0:
+                before = candidate_strikes[start_idx - 1]
+                after = candidate_strikes[start_idx]
+                if abs(before - strike_estimate) <= abs(after - strike_estimate):
+                    start_idx = start_idx - 1
+
+            max_offsets = 6
+            for offset in range(0, max_offsets + 1):
+                for idx in (start_idx - offset, start_idx + offset):
+                    result = _try_strike(idx)
+                    if result is None:
+                        continue
+                    strike, mid_delta = result
+
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "[OptionsHelper] strike probe symbol=%s right=%s expiry=%s strike=%s delta=%s target=%s",
+                            getattr(underlying_asset, "symbol", None),
+                            option_type,
+                            expiry,
+                            strike,
+                            mid_delta,
+                            target_delta,
+                        )
+
+                    if best_delta is None or abs(mid_delta - target_delta) < abs(best_delta - target_delta):
+                        best_delta = mid_delta
+                        best_strike = strike
+
+                    if abs(mid_delta - target_delta) < 0.001:
+                        self.strategy.log_message(
+                            f"🎯 Exact match found at strike {strike:g} with delta {mid_delta:.4f}",
+                            color="green",
+                        )
+                        if cache_key is not None:
+                            strike_cache[cache_key] = strike
+                        return float(strike)
+
+                # Early exit if we are already very close.
+                if best_delta is not None and abs(best_delta - target_delta) < 0.02:
+                    break
+
+        # Fallback: original binary-search walk (kept for robustness).
         lo = 0
         hi = len(candidate_strikes) - 1
         max_iters = int(math.ceil(math.log2(len(candidate_strikes) + 1))) + 8
-        visited: set[int] = set()
 
         for _ in range(max_iters):
             if lo > hi:
@@ -1123,16 +1250,18 @@ class OptionsHelper:
                     f"🎯 Exact match found at strike {strike:g} with delta {mid_delta:.4f}",
                     color="green",
                 )
+                if cache_key is not None:
+                    strike_cache[cache_key] = float(strike)
                 return float(strike)
 
+            # Preserve the legacy binary-walk direction logic to minimize behavior drift; the
+            # best_strike accumulator above ensures we still return the closest delta.
             if is_call:
-                # Call delta decreases with strike.
                 if mid_delta > target_delta:
                     lo = mid + 1
                 else:
                     hi = mid - 1
             else:
-                # Put delta increases with strike.
                 if mid_delta < target_delta:
                     lo = mid + 1
                 else:
@@ -1146,6 +1275,8 @@ class OptionsHelper:
             f"✅ RESULT: Closest strike {best_strike:g} with delta {best_delta:.4f} (target was {target_delta})",
             color="green",
         )
+        if cache_key is not None:
+            strike_cache[cache_key] = float(best_strike)
         if underlying_price > 50 and best_strike < 10:
             self.strategy.log_message(
                 f"⚠️  WARNING: Strike {best_strike:g} seems too low for underlying price ${underlying_price}. "

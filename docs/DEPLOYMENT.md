@@ -30,23 +30,34 @@
 1) **Verify tests**
    - Ensure required CI checks are green (unit + backtest + acceptance gates as applicable).
 
-2) **Bump version (deploy marker commit)**
+2) **Bump version (deploy-marker commit)**
    - Update `setup.py` `version="X.Y.Z"`.
    - Commit with message: `deploy X.Y.Z`.
+   - This is the commit the release tag should point at.
 
-3) **Update changelog**
+3) **Human deploy step (PyPI / production)**
+   - A human runs the actual deployment/publish step (e.g., build + publish to PyPI, and any internal rollout).
+   - AI agents **must not** attempt to deploy.
+
+4) **Update changelog (FULL RANGE, not just “recent work”)**
    - Add/refresh the `CHANGELOG.md` entry for `X.Y.Z`.
    - Include: `Deploy marker: <commit>` referencing the `deploy X.Y.Z` commit hash.
+   - The entry must include **all significant commits** since the previous `setup.py` version bump:
+     - Find the previous bump commit:
+       - `git log -p -- setup.py`
+     - Build the changelog from the full range:
+       - `git log --oneline <previous-bump-commit>..<deploy-marker-commit>`
+   - If the version branch was already merged into `dev` before the changelog is complete, add the changelog fix as a follow-up PR to `dev`.
 
-4) **Tag the deploy commit**
+5) **Tag the deploy commit**
    - Create an annotated tag `vX.Y.Z` pointing at the `deploy X.Y.Z` commit.
    - Push the tag to GitHub.
 
-5) **Create a GitHub Release**
+6) **Create a GitHub Release**
    - Create a GitHub Release from tag `vX.Y.Z`.
    - Paste the corresponding `CHANGELOG.md` entry.
 
-6) **Start the next version branch**
+7) **Start the next version branch**
    - Create `version/X.Y.(Z+1)` from `dev` (or from the just-deployed commit once it’s on `dev`).
    - Do not bump `setup.py` again until the next deployment.
 
@@ -56,4 +67,3 @@
 
 - Avoid destructive git operations (`git checkout`, `git reset --hard`, `git stash`).
 - Keep release bookkeeping changes small and explicit (version bump + changelog + tag/release).
-

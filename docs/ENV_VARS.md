@@ -188,3 +188,30 @@ These env vars are used by the ThetaData chain cache/builder in `lumibot/tools/t
 - Values: **never commit**.
 
 For cache key layout and validation workflow, see `docs/remote_cache.md`.
+
+## Runtime telemetry (memory/health)
+
+LumiBot can emit lightweight, vendor-neutral telemetry lines to stdout so you can debug OOMs in any environment
+(Render, ECS, local Docker, etc.). Telemetry is **best-effort**: failures are swallowed and must never crash trading.
+
+Each emission is a single JSON line prefixed with `LUMIBOT_TELEMETRY`.
+
+### `LUMIBOT_TELEMETRY`
+- Purpose: Enable/disable runtime telemetry emission.
+- Values: truthy enables (`1`, `true`, `yes`); falsy disables (`0`, `false`).
+- Default: enabled for live runs; disabled for backtests and pytest.
+
+### `LUMIBOT_TELEMETRY_INTERVAL_SECONDS`
+- Purpose: Base telemetry cadence.
+- Values: seconds (float).
+- Default: `300`.
+
+### `LUMIBOT_TELEMETRY_DEEP`
+- Purpose: Enable deep snapshot mode for diagnosing unknown memory sources.
+- Values: truthy enables (`1`, `true`, `yes`); falsy disables.
+- Default: disabled.
+- Notes: Deep mode uses `tracemalloc` and only emits snapshots when memory is near OOM.
+
+Notes:
+- Burst mode (more frequent logs) turns on automatically above ~80% of container memory.
+- Deep snapshots trigger above ~90% with a ~1 hour cooldown (these thresholds are fixed defaults today).

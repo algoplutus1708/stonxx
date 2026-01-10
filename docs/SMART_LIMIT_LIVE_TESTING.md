@@ -25,6 +25,8 @@ These are “fast confidence” tests (stocks + single-leg options + 4-leg optio
 
 ```bash
 /Users/robertgrzesik/bin/safe-timeout 2400s python3 -m pytest -q -m "apitest and not smartlimit_matrix" \
+  tests/test_alpaca_broker_smoke_apitest.py \
+  tests/test_tradier_broker_smoke_apitest.py \
   tests/test_smart_limit_live_alpaca.py \
   tests/test_smart_limit_live_tradier.py
 ```
@@ -48,4 +50,3 @@ These are heavier tests that add:
 
 Benchmarks are in `scripts/` and write CSVs to `logs/`. These are used for price-improvement statistics and are not
 treated as strict pass/fail (paper fills can be unrealistic).
-
