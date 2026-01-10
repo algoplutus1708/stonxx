@@ -160,7 +160,10 @@ class RuntimeTelemetryConfig:
     def from_env(*, is_backtesting: bool) -> "RuntimeTelemetryConfig":
         raw = os.environ.get("LUMIBOT_TELEMETRY")
         if raw is None:
-            enabled = (not is_backtesting) and ("PYTEST_CURRENT_TEST" not in os.environ)
+            # Default: enabled for live runs, but must stay off under test runners to avoid background
+            # threads/log noise during unit tests.
+            in_pytest = ("PYTEST_CURRENT_TEST" in os.environ) or ("pytest" in sys.modules)
+            enabled = (not is_backtesting) and (not in_pytest)
         else:
             enabled = _truthy_env(raw)
 
@@ -340,4 +343,3 @@ class RuntimeTelemetryEmitter:
             except Exception:
                 interval = self._config.base_interval_s
             self._stop_event.wait(timeout=max(1.0, float(interval)))
-
