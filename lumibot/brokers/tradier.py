@@ -740,11 +740,30 @@ class Tradier(Broker):
         list[dict]
             A list of dictionaries representing the cleaned order records.
         """
-        # The rounding needs to be cell by cell because OCO orders make the dataframe values inconsistent
-        # and the column types will be set to 'object'
-        rounded_df = df.apply(lambda col: col.map(lambda x: round(x, 2) if isinstance(x, float) else x))
-        cleaned_df = rounded_df.replace({pd.NA: None, pd.NaT: None, float('nan'): None})
-        return cleaned_df.to_dict("records")
+        # NOTE: This code path runs in a long-lived polling loop. Avoid full-DataFrame copies (apply/replace),
+        # which can multiply peak memory when Tradier returns many rows.
+        try:
+            records = df.to_dict("records")
+        except Exception:
+            return []
+
+        cleaned: list[dict] = []
+        for rec in records:
+            if not isinstance(rec, dict):
+                continue
+            out: dict = {}
+            for k, v in rec.items():
+                try:
+                    if isinstance(v, float):
+                        v = round(v, 2)
+                    # Handle pandas missing sentinels (NA/NaT/nan) without materializing full copies.
+                    if v is pd.NA or v is pd.NaT or (isinstance(v, float) and pd.isna(v)) or pd.isna(v):
+                        v = None
+                except Exception:
+                    pass
+                out[k] = v
+            cleaned.append(out)
+        return cleaned
 
     def _lumi_side2tradier(self, order: Order) -> str:
         # Make a copy of the side because we will modify it
@@ -865,20 +884,13 @@ class Tradier(Broker):
                     # If it is the brokers first iteration then fully process the order because it is likely
                     # that the order was filled/canceled/etc before the strategy started.
                     if self._first_iteration:
-                        if order.status == Order.OrderStatus.FILLED:
+                        # IMPORTANT: Avoid ingesting large historical order lists on startup.
+                        # Tradier can return many closed orders; tracking them all in-memory can OOM long-running
+                        # workers. On the first poll, we only need to reconcile currently-active orders.
+                        if order.is_active() or order.status in {Order.OrderStatus.NEW}:
                             self._process_new_order(order)
-                            self._process_filled_order(order, order.avg_fill_price, order.quantity)
-                        elif order.status == Order.OrderStatus.CANCELED:
-                            self._process_new_order(order)
-                            self._process_canceled_order(order)
-                        elif order.status == Order.OrderStatus.PARTIALLY_FILLED:
-                            self._process_new_order(order)
-                            self._process_partially_filled_order(order, order.avg_fill_price, order.quantity)
-                        elif order.status == Order.OrderStatus.NEW:
-                            self._process_new_order(order)
-                        elif order.status == Order.OrderStatus.ERROR:
-                            self._process_new_order(order)
-                            self._process_error_order(order, order.error_message)
+                        else:
+                            continue
                     else:
                         # Add to order in lumibot.
                         self._process_new_order(order)
@@ -973,6 +985,9 @@ class Tradier(Broker):
                 # overnight.
                 if order.is_active():
                     self._safe_stream_dispatch(self.CANCELED_ORDER, order=order)
+
+        if self._first_iteration:
+            self._first_iteration = False
 
     def _get_broker_id_from_raw_orders(self, raw_orders):
         ids = []
