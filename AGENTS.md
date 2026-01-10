@@ -88,6 +88,9 @@ Failure to follow these rules will break everyone's workflows—double-check env
 - **Testing policy:** do not add env vars just to toggle/skip tests. If a test is slow/flaky/non-deterministic in CI,
   mark it with existing pytest markers like `pytest.mark.apitest` and/or `pytest.mark.downloader` (CI already runs
   with `-m "not apitest and not downloader"`).
+- **Broker change policy:** when changing broker behavior (Tradier/Alpaca especially), add/extend:
+  - deterministic unit/regression tests, and
+  - `pytest.mark.apitest` smoke coverage against the real paper APIs when feasible (see `docs/SMART_LIMIT_LIVE_TESTING.md`).
 - Only introduce a new env var when it is genuinely required for deployment/runtime configuration (secrets, endpoints,
   toggles needed for ops/rollout), and keep it narrowly scoped.
 - If you add or change an environment variable, update:
