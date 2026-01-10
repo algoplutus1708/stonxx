@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
@@ -33,11 +33,13 @@ class InteractiveBrokersRESTBacktesting(PandasData):
         pandas_data=None,
         *,
         exchange: Optional[str] = None,
+        history_source: Optional[str] = None,
         **kwargs,
     ):
         super().__init__(datetime_start=datetime_start, datetime_end=datetime_end, pandas_data=pandas_data, **kwargs)
         self._timestep = self.MIN_TIMESTEP
         self.exchange = exchange
+        self.history_source = history_source
 
         unique_id = uuid.uuid4().hex[:8]
         strategy_name = kwargs.get("name", "Backtest")
@@ -77,6 +79,7 @@ class InteractiveBrokersRESTBacktesting(PandasData):
             end_dt=end_dt,
             exchange=exchange,
             include_after_hours=include_after_hours,
+            source=self.history_source,
         )
 
         if df is None or df.empty:
@@ -103,23 +106,31 @@ class InteractiveBrokersRESTBacktesting(PandasData):
         exchange=None,
         include_after_hours=True,
     ):
-        if isinstance(asset, str):
-            asset = Asset(symbol=asset)
+        asset_separated = asset
+        quote_asset = quote
+        if isinstance(asset_separated, tuple):
+            asset_separated, quote_asset = asset_separated
+
+        if isinstance(asset_separated, str):
+            asset_separated = Asset(symbol=asset_separated)
         if timestep is None:
             timestep = self.get_timestep()
 
         end_dt = self.get_datetime()
-        start_dt, _ = self.get_start_datetime_and_ts_unit(length, timestep, start_dt=end_dt)
+        # IBKR crypto/futures trade outside equity calendars; do not add the default 5-day padding.
+        start_dt, _ = self.get_start_datetime_and_ts_unit(length, timestep, start_dt=end_dt, start_buffer=timedelta(0))
         self._update_pandas_data(
-            asset,
-            quote,
+            asset_separated,
+            quote_asset,
             timestep,
             start_dt=start_dt,
             end_dt=end_dt,
             exchange=exchange or self.exchange,
             include_after_hours=include_after_hours,
         )
-        return super()._pull_source_symbol_bars(asset, length, timestep, timeshift, quote, exchange, include_after_hours)
+        return super()._pull_source_symbol_bars(
+            asset_separated, length, timestep, timeshift, quote_asset, exchange, include_after_hours
+        )
 
     def get_historical_prices_between_dates(
         self,
@@ -131,14 +142,19 @@ class InteractiveBrokersRESTBacktesting(PandasData):
         start_date=None,
         end_date=None,
     ):
-        if isinstance(asset, str):
-            asset = Asset(symbol=asset)
+        asset_separated = asset
+        quote_asset = quote
+        if isinstance(asset_separated, tuple):
+            asset_separated, quote_asset = asset_separated
+
+        if isinstance(asset_separated, str):
+            asset_separated = Asset(symbol=asset_separated)
         if start_date is None or end_date is None:
             return None
 
         self._update_pandas_data(
-            asset,
-            quote,
+            asset_separated,
+            quote_asset,
             timestep,
             start_dt=start_date,
             end_dt=end_date,
@@ -147,8 +163,8 @@ class InteractiveBrokersRESTBacktesting(PandasData):
         )
 
         response = super()._pull_source_symbol_bars_between_dates(
-            asset, timestep, quote, exchange, include_after_hours, start_date, end_date
+            asset_separated, timestep, quote_asset, exchange, include_after_hours, start_date, end_date
         )
         if response is None:
             return None
-        return self._parse_source_symbol_bars(response, asset, quote=quote)
+        return self._parse_source_symbol_bars(response, asset_separated, quote=quote_asset)

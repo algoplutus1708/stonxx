@@ -21,6 +21,8 @@ CACHE_SUBFOLDER = "ibkr"
 
 # IBKR Client Portal Gateway caps historical responses at ~1000 datapoints per call.
 IBKR_HISTORY_MAX_POINTS = 1000
+IBKR_DEFAULT_CRYPTO_VENUE = "ZEROHASH"
+IBKR_DEFAULT_HISTORY_SOURCE = "Trades"
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,7 @@ def get_price_data(
     end_dt: datetime,
     exchange: Optional[str] = None,
     include_after_hours: bool = True,
+    source: Optional[str] = None,
 ) -> pd.DataFrame:
     """Fetch IBKR historical bars (via the Data Downloader) and cache to parquet.
 
@@ -67,11 +70,28 @@ def get_price_data(
     start_local = start_utc.astimezone(LUMIBOT_DEFAULT_PYTZ)
     end_local = end_utc.astimezone(LUMIBOT_DEFAULT_PYTZ)
 
-    cache_file = _cache_file_for(asset=asset, quote=quote, timestep=timestep, exchange=exchange)
+    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    effective_exchange = exchange
+    if asset_type in {"future", "cont_future"} and not effective_exchange:
+        effective_exchange = (os.environ.get("IBKR_FUTURES_EXCHANGE") or "CME").strip().upper()
+    if asset_type == "crypto" and not effective_exchange:
+        effective_exchange = (os.environ.get("IBKR_CRYPTO_VENUE") or IBKR_DEFAULT_CRYPTO_VENUE).strip().upper()
+
+    history_source = _normalize_history_source(source)
+    cache_file = _cache_file_for(
+        asset=asset,
+        quote=quote,
+        timestep=timestep,
+        exchange=effective_exchange,
+        source=history_source,
+    )
     cache_manager = get_backtest_cache()
 
     try:
-        cache_manager.ensure_local_file(cache_file, payload=_remote_payload(asset, quote, timestep, exchange))
+        cache_manager.ensure_local_file(
+            cache_file,
+            payload=_remote_payload(asset, quote, timestep, effective_exchange, history_source),
+        )
     except Exception:
         pass
 
@@ -99,8 +119,9 @@ def get_price_data(
             timestep=timestep,
             start_dt=fetch_start,
             end_dt=fetch_end,
-            exchange=exchange,
+            exchange=effective_exchange,
             include_after_hours=include_after_hours,
+            source=history_source,
         )
         if fetched is not None and not fetched.empty:
             merged = _merge_frames(df_cache, fetched)
@@ -127,15 +148,13 @@ def _fetch_history_between_dates(
     end_dt: datetime,
     exchange: Optional[str],
     include_after_hours: bool,
+    source: str,
 ) -> pd.DataFrame:
     conid = _resolve_conid(asset=asset, quote=quote, exchange=exchange)
-    bar, bar_seconds = _timestep_to_ibkr_bar(timestep)
+    bar, bar_seconds, _cache_timestep = _timestep_to_ibkr_bar(timestep)
     period = _max_period_for_bar(bar)
     asset_type = str(getattr(asset, "asset_type", "") or "").lower()
-    continuous = bool(
-        asset_type == "cont_future"
-        or (asset_type == "future" and getattr(asset, "expiration", None) is None)
-    )
+    continuous = bool(asset_type == "cont_future")
 
     cursor_end = _to_utc(end_dt)
     start_dt = _to_utc(start_dt)
@@ -151,18 +170,35 @@ def _fetch_history_between_dates(
             exchange=exchange,
             include_after_hours=include_after_hours,
             continuous=continuous,
+            source=source,
         )
 
         # IBKR typically returns {"data":[...]} (empty list means no data).
         data = payload.get("data") if isinstance(payload, dict) else None
         if not data:
             # True no-data: write placeholders so we don't hammer IBKR for the same range.
-            _record_missing_window(asset=asset, quote=quote, timestep=timestep, exchange=exchange, start_dt=start_dt, end_dt=cursor_end)
+            _record_missing_window(
+                asset=asset,
+                quote=quote,
+                timestep=timestep,
+                exchange=exchange,
+                source=source,
+                start_dt=start_dt,
+                end_dt=cursor_end,
+            )
             return pd.DataFrame()
 
         df = _history_payload_to_frame(data)
         if df.empty:
-            _record_missing_window(asset=asset, quote=quote, timestep=timestep, exchange=exchange, start_dt=start_dt, end_dt=cursor_end)
+            _record_missing_window(
+                asset=asset,
+                quote=quote,
+                timestep=timestep,
+                exchange=exchange,
+                source=source,
+                start_dt=start_dt,
+                end_dt=cursor_end,
+            )
             return pd.DataFrame()
 
         chunks.append(df)
@@ -185,7 +221,13 @@ def _fetch_history_between_dates(
 
     merged = pd.concat(chunks, axis=0).sort_index()
     merged = merged[~merged.index.duplicated(keep="last")]
-    merged = merged.loc[(merged.index >= start_dt) & (merged.index <= end_dt)]
+    # IMPORTANT: Do not clamp to the requested window here.
+    #
+    # IBKR can return the "latest available" bars even when the requested window is in the
+    # future (or otherwise outside the available range). We still want to persist those bars
+    # to the cache to warm future requests and avoid repeatedly hammering the downloader.
+    #
+    # The caller (`get_price_data`) performs the final slice for the requested time range.
     return merged
 
 
@@ -198,6 +240,7 @@ def _ibkr_history_request(
     exchange: Optional[str],
     include_after_hours: bool,
     continuous: bool,
+    source: str,
 ) -> Dict[str, Any]:
     base_url = _downloader_base_url()
     url = f"{base_url}/ibkr/iserver/marketdata/history"
@@ -206,6 +249,7 @@ def _ibkr_history_request(
         "period": period,
         "bar": bar,
         "outsideRth": "true" if include_after_hours else "false",
+        "source": source,
         "startTime": start_time.strftime("%Y%m%d-%H:%M:%S"),
     }
     if continuous:
@@ -240,6 +284,9 @@ def _history_payload_to_frame(data: Any) -> pd.DataFrame:
     df = df.sort_index()
     df.index = df.index.tz_convert(LUMIBOT_DEFAULT_PYTZ)
     df["missing"] = False
+    if "open" in df.columns:
+        df["bid"] = df["open"]
+        df["ask"] = df["open"]
     return df
 
 
@@ -261,14 +308,15 @@ def _record_missing_window(
     quote: Optional[Asset],
     timestep: str,
     exchange: Optional[str],
+    source: str,
     start_dt: datetime,
     end_dt: datetime,
 ) -> None:
     # Add a bracketing placeholder window (two rows) to cache.
-    cache_file = _cache_file_for(asset=asset, quote=quote, timestep=timestep, exchange=exchange)
+    cache_file = _cache_file_for(asset=asset, quote=quote, timestep=timestep, exchange=exchange, source=source)
     cache_manager = get_backtest_cache()
     try:
-        cache_manager.ensure_local_file(cache_file, payload=_remote_payload(asset, quote, timestep, exchange))
+        cache_manager.ensure_local_file(cache_file, payload=_remote_payload(asset, quote, timestep, exchange, source))
     except Exception:
         pass
 
@@ -322,6 +370,11 @@ def _resolve_conid(*, asset: Asset, quote: Optional[Asset], exchange: Optional[s
 def _lookup_conid_remote(*, asset: Asset, quote: Optional[Asset], exchange: Optional[str]) -> int:
     asset_type = str(getattr(asset, "asset_type", "") or "").lower()
     if asset_type in {"future", "cont_future"}:
+        if getattr(asset, "expiration", None) is None and asset_type != "cont_future":
+            raise ValueError(
+                "IBKR futures require an explicit expiration on Asset(asset_type='future'). "
+                "Use asset_type='cont_future' for continuous futures."
+            )
         return _lookup_conid_future(asset=asset, exchange=exchange)
     if asset_type in {"crypto"}:
         return _lookup_conid_crypto(asset=asset, quote=quote)
@@ -341,13 +394,23 @@ def _lookup_conid_crypto(*, asset: Asset, quote: Optional[Asset]) -> int:
     # Best-effort: IBKR crypto availability depends on region; conid mappings differ by venue.
     base_url = _downloader_base_url()
     url = f"{base_url}/ibkr/iserver/secdef/search"
-    payload = queue_request(url=url, querystring={"symbol": asset.symbol}, headers=None, timeout=None)
+    venue = (os.environ.get("IBKR_CRYPTO_VENUE") or IBKR_DEFAULT_CRYPTO_VENUE).strip().upper()
+    payload = queue_request(
+        url=url,
+        querystring={"symbol": asset.symbol, "secType": "CRYPTO"},
+        headers=None,
+        timeout=None,
+    )
     if not isinstance(payload, list):
         raise RuntimeError(f"Unexpected IBKR secdef/search response for crypto: {payload}")
     for entry in payload:
         sections = entry.get("sections") or []
         for section in sections:
             if str(section.get("secType") or "").upper() == "CRYPTO":
+                if venue:
+                    exch = str(section.get("exchange") or "").upper()
+                    if venue not in exch:
+                        continue
                 conid = entry.get("conid")
                 if conid is not None:
                     return int(conid)
@@ -398,16 +461,25 @@ def _lookup_conid_future(*, asset: Asset, exchange: Optional[str]) -> int:
     return int(chosen["conid"])
 
 
-def _cache_file_for(*, asset: Asset, quote: Optional[Asset], timestep: str, exchange: Optional[str]) -> Path:
+def _cache_file_for(
+    *,
+    asset: Asset,
+    quote: Optional[Asset],
+    timestep: str,
+    exchange: Optional[str],
+    source: str,
+) -> Path:
     provider_root = Path(LUMIBOT_CACHE_FOLDER) / CACHE_SUBFOLDER
     asset_folder = _asset_folder(asset)
-    timestep_component = _timestep_component(timestep)
+    _bar, _bar_seconds, timestep_component = _timestep_to_ibkr_bar(timestep)
     exch = (exchange or "").strip().upper() or "AUTO"
     symbol = _safe_component(getattr(asset, "symbol", "") or "symbol")
     quote_symbol = _safe_component(getattr(quote, "symbol", "") or "USD") if quote else "USD"
     expiration = getattr(asset, "expiration", None)
     exp_component = expiration.strftime("%Y%m%d") if expiration else ""
-    filename = f"{asset_folder}_{symbol}_{quote_symbol}_{timestep_component}_{exch}{'_' + exp_component if exp_component else ''}.parquet"
+    source_component = _safe_component(source)
+    suffix = f"_{exp_component}" if exp_component else ""
+    filename = f"{asset_folder}_{symbol}_{quote_symbol}_{timestep_component}_{exch}_{source_component}{suffix}.parquet"
     return provider_root / asset_folder / timestep_component / "bars" / filename
 
 
@@ -429,37 +501,51 @@ def _safe_component(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in value.upper())
 
 
-def _timestep_to_ibkr_bar(timestep: str) -> Tuple[str, int]:
+def _timestep_to_ibkr_bar(timestep: str) -> Tuple[str, int, str]:
     raw = (timestep or "minute").strip().lower()
     raw = raw.replace(" ", "")
     raw = raw.replace("minutes", "minute").replace("hours", "hour").replace("days", "day")
 
     if raw in {"minute", "1minute", "m", "1m"}:
-        return "1min", 60
+        return "1min", 60, "minute"
     if raw.endswith("minute"):
         qty = raw.removesuffix("minute") or "1"
         minutes = int(qty)
-        return f"{minutes}min", minutes * 60
+        return f"{minutes}min", minutes * 60, f"{minutes}minute"
 
     if raw in {"hour", "1hour", "h", "1h"}:
-        return "1h", 60 * 60
+        return "1h", 60 * 60, "hour"
     if raw.endswith("hour"):
         qty = raw.removesuffix("hour") or "1"
         hours = int(qty)
-        return f"{hours}h", hours * 60 * 60
+        return f"{hours}h", hours * 60 * 60, f"{hours}hour"
 
     if raw in {"day", "1day", "d", "1d"}:
-        return "1d", 24 * 60 * 60
+        return "1d", 24 * 60 * 60, "day"
     if raw.endswith("day"):
         qty = raw.removesuffix("day") or "1"
         days = int(qty)
-        return f"{days}d", days * 24 * 60 * 60
+        return f"{days}d", days * 24 * 60 * 60, f"{days}day"
 
     if raw.endswith("min"):
         minutes = int(raw.removesuffix("min") or "1")
-        return f"{minutes}min", minutes * 60
+        return f"{minutes}min", minutes * 60, f"{minutes}minute"
 
     raise ValueError(f"Unsupported IBKR timestep: {timestep}")
+
+
+def _normalize_history_source(source: Optional[str]) -> str:
+    raw = (source or os.environ.get("IBKR_HISTORY_SOURCE") or IBKR_DEFAULT_HISTORY_SOURCE).strip()
+    if not raw:
+        return IBKR_DEFAULT_HISTORY_SOURCE
+    normalized = raw.strip().lower().replace("-", "_")
+    if normalized in {"trades", "trade"}:
+        return "Trades"
+    if normalized in {"midpoint", "mid"}:
+        return "Midpoint"
+    if normalized in {"bid_ask", "bidask"}:
+        return "Bid_Ask"
+    raise ValueError(f"Unsupported IBKR history source '{source}'. Expected Trades, Midpoint, or Bid_Ask.")
 
 
 def _max_period_for_bar(bar: str) -> str:
@@ -514,7 +600,13 @@ def _write_cache_frame(path: Path, df: pd.DataFrame) -> None:
         pass
 
 
-def _remote_payload(asset: Asset, quote: Optional[Asset], timestep: str, exchange: Optional[str]) -> Dict[str, object]:
+def _remote_payload(
+    asset: Asset,
+    quote: Optional[Asset],
+    timestep: str,
+    exchange: Optional[str],
+    source: str,
+) -> Dict[str, object]:
     return {
         "provider": "ibkr",
         "symbol": getattr(asset, "symbol", None),
@@ -522,6 +614,7 @@ def _remote_payload(asset: Asset, quote: Optional[Asset], timestep: str, exchang
         "quote": getattr(quote, "symbol", None) if quote else None,
         "timestep": timestep,
         "exchange": exchange,
+        "source": source,
         "expiration": getattr(asset, "expiration", None).isoformat() if getattr(asset, "expiration", None) else None,
     }
 
@@ -535,6 +628,8 @@ def _conid_key(asset: Asset, quote: Optional[Asset], exchange: Optional[str]) ->
     symbol = str(getattr(asset, "symbol", "") or "")
     quote_symbol = str(getattr(quote, "symbol", "") or "") if quote else ""
     exch = (exchange or "").strip().upper()
+    if asset_type == "crypto" and not exch:
+        exch = (os.environ.get("IBKR_CRYPTO_VENUE") or IBKR_DEFAULT_CRYPTO_VENUE).strip().upper()
     expiration = ""
     if getattr(asset, "expiration", None) is not None:
         try:

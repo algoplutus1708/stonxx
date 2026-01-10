@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
 import pandas as pd
@@ -101,7 +101,8 @@ class RoutedBacktestingPandas(ThetaDataBacktestingPandas):
 
         end_dt = start_dt if isinstance(start_dt, datetime) else self.get_datetime()
         ts = timestep or self.get_timestep()
-        start_datetime, ts_unit = self.get_start_datetime_and_ts_unit(length, ts, start_dt=end_dt)
+        # IBKR crypto/futures trade outside equity calendars; do not add the default 5-day padding.
+        start_datetime, ts_unit = self.get_start_datetime_and_ts_unit(length, ts, start_dt=end_dt, start_buffer=timedelta(0))
 
         canonical_key, legacy_key = self._build_dataset_keys(asset_separated, quote_asset, ts_unit)
         existing = self._data_store.get(canonical_key)
@@ -139,4 +140,3 @@ class RoutedBacktestingPandas(ThetaDataBacktestingPandas):
         self._data_store[canonical_key] = data
         if legacy_key not in self._data_store:
             self._data_store[legacy_key] = data
-
