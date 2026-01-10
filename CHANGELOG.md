@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.4.32 - 2026-01-10
+
+### Added
+- Runtime telemetry: lightweight memory/health JSON lines (`LUMIBOT_TELEMETRY ...`) for diagnosing OOMs in long-running live workers.
+
+### Fixed
+- Live (Tradier): treat `submitted/open/new` as equivalent to reduce repeated NEW events under polling; bound live trade-event history to avoid unbounded memory growth in long-running workers.
+
 ## 4.4.31 - 2026-01-09
 
 Deploy marker: `d5c6b730` ("deploy 4.4.31")
@@ -8,7 +16,6 @@ Deploy marker: `d5c6b730` ("deploy 4.4.31")
 - SMART_LIMIT: live matrix apitests + runner scripts; expanded unit coverage for edge cases.
 - Investigations/docs: production endpoint breakdown notes and an expanded backtesting performance playbook.
 - ThetaData: per-asset download progress reporting for option-chain strike scans (exposed via `download_status`).
-- Runtime telemetry: lightweight memory/health JSON lines (`LUMIBOT_TELEMETRY ...`) for diagnosing OOMs in long-running live workers.
 
 ### Changed
 - Acceptance backtests now run in CI (no longer marked `apitest`); baselines were refreshed for LEAPS + MELI; CI caps were raised for long full-year strategies due to runner variability.
@@ -22,7 +29,6 @@ Deploy marker: `d5c6b730` ("deploy 4.4.31")
 - Polygon: reduced split-cache rate limit thrash.
 - SMART_LIMIT: hardened behavior for quote/stream failures.
 - Backtesting progress: improved per-asset `download_status` for clearer “what is downloading” diagnostics.
-- Live (Tradier): treat `submitted/open/new` as equivalent to reduce repeated NEW events under polling; bound live trade-event history to avoid unbounded memory growth in long-running workers.
 
 ### Removed
 - ⚠️ Removed ThetaData chain default-horizon env vars (`THETADATA_CHAIN_DEFAULT_MAX_DAYS_OUT*`). Chain default horizons are now fixed and covered by tests.
