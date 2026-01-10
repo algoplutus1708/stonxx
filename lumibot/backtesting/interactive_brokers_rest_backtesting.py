@@ -49,12 +49,54 @@ class InteractiveBrokersRESTBacktesting(PandasData):
 
         # Set data_source to self since this class acts as its own DataSource.
         self.data_source = self
+        # Track which (asset, quote, timestep) series have been fully loaded for the backtest window.
+        # Without this, PandasData's default behavior can end up seeding only a couple of bars
+        # (e.g., `length=2` in strategy code) and then portfolio mark-to-market gets "stuck"
+        # forward-filling the last available price for the rest of the run.
+        self._fully_loaded_series: set[tuple] = set()
 
     def _build_dataset_keys(self, asset: Asset, quote: Optional[Asset], ts_unit: str) -> tuple[tuple, tuple]:
         quote_asset = quote if quote is not None else Asset("USD", "forex")
         canonical_key = (asset, quote_asset, ts_unit)
         legacy_key = (asset, quote_asset)
         return canonical_key, legacy_key
+
+    def get_last_price(self, asset, quote=None, exchange=None):
+        """Prefer minute bars for IBKR mark-to-market even if daily bars are also cached.
+
+        IBKR backtests can end up caching BOTH minute and daily bars (e.g., for analysis/tearsheet).
+        The PandasData legacy key `(asset, quote)` collides across timesteps; if daily overwrites it,
+        portfolio valuation can get "stuck" on a single daily close. Avoid that by explicitly
+        resolving the minute canonical key first.
+        """
+        base_asset = asset
+        quote_asset = quote
+        if isinstance(base_asset, tuple):
+            base_asset, quote_asset = base_asset
+        quote_asset = quote_asset if quote_asset is not None else Asset("USD", "forex")
+
+        minute_key = (base_asset, quote_asset, "minute")
+        if minute_key not in self._fully_loaded_series:
+            try:
+                self._update_pandas_data(
+                    base_asset,
+                    quote_asset,
+                    "minute",
+                    start_dt=self.datetime_start,
+                    end_dt=self.datetime_end,
+                    exchange=self.exchange,
+                    include_after_hours=True,
+                )
+            except Exception:
+                pass
+            self._fully_loaded_series.add(minute_key)
+        data = self._data_store.get(minute_key)
+        if data is not None:
+            try:
+                return data.get_last_price(self.get_datetime())
+            except Exception:
+                pass
+        return super().get_last_price(asset, quote=quote, exchange=exchange)
 
     def _update_pandas_data(
         self,
@@ -92,8 +134,20 @@ class InteractiveBrokersRESTBacktesting(PandasData):
             merged = df
 
         data = Data(asset, merged, timestep=timestep, quote=quote)
+        # CRITICAL: Pandas backtesting expects each Data object to have `iter_index`/datalines
+        # built so prices advance as the backtest clock advances. Normally this is done via
+        # PandasData.load_data() -> Data.repair_times_and_fill(...), but IBKR loads data lazily.
+        #
+        # Use the merged index as the iteration index (it should already be 1-minute bars).
+        try:
+            if isinstance(merged.index, pd.DatetimeIndex) and len(merged.index) > 0:
+                data.repair_times_and_fill(merged.index)
+        except Exception:
+            # Fallback: if repair fails, leave data as-is (callers will treat as missing).
+            pass
         self._data_store[canonical_key] = data
-        if legacy_key not in self._data_store:
+        # Only write the legacy key for minute data to avoid collisions with daily bars.
+        if timestep == "minute":
             self._data_store[legacy_key] = data
 
     def _pull_source_symbol_bars(

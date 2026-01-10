@@ -26,16 +26,22 @@ class _IbkrCryptoBuyAndHold(Strategy):
         self._entered = False
 
     def on_trading_iteration(self):
-        if self.first_iteration and not self._entered:
+        if not self._entered:
             base = Asset("BTC", asset_type=Asset.AssetType.CRYPTO)
             quote = Asset("USD", asset_type=Asset.AssetType.FOREX)
             # Ensure the data source has bars loaded (avoids "market order remained open" situations).
             bars = self.get_historical_prices(base, length=2, timestep="minute", quote=quote)
             if bars is None or getattr(bars, "df", None) is None or bars.df.empty:
                 return
+            last_price = float(bars.df["close"].iloc[-1])
+            if not last_price or last_price <= 0:
+                return
+            qty = Decimal(str((self.cash * 0.95) / last_price)).quantize(Decimal("0.0001"))
+            if qty <= 0:
+                return
             order = self.create_order(
                 base,
-                Decimal("0.01"),
+                qty,
                 Order.OrderSide.BUY,
                 order_type=Order.OrderType.MARKET,
                 quote=quote,
@@ -58,12 +64,18 @@ class _IbkrCryptoRoundTrip(Strategy):
         bars = self.get_historical_prices(base, length=2, timestep="minute", quote=quote)
         if bars is None or getattr(bars, "df", None) is None or bars.df.empty:
             return
+        last_price = float(bars.df["close"].iloc[-1])
+        if not last_price or last_price <= 0:
+            return
 
         now = self.get_datetime()
         if self._entered_at is None:
+            qty = Decimal(str((self.cash * 0.95) / last_price)).quantize(Decimal("0.0001"))
+            if qty <= 0:
+                return
             order = self.create_order(
                 base,
-                Decimal("0.01"),
+                qty,
                 Order.OrderSide.BUY,
                 order_type=Order.OrderType.MARKET,
                 quote=quote,
@@ -73,9 +85,13 @@ class _IbkrCryptoRoundTrip(Strategy):
             return
 
         if now >= (self._entered_at + timedelta(minutes=60)):
+            position = self.get_position(base, quote=quote)
+            qty = Decimal(str(getattr(position, "quantity", 0) or 0))
+            if qty <= 0:
+                return
             order = self.create_order(
                 base,
-                Decimal("0.01"),
+                qty,
                 Order.OrderSide.SELL,
                 order_type=Order.OrderType.MARKET,
                 quote=quote,
@@ -156,12 +172,21 @@ def _derive_known_good_window_from_cached_bars(
     if end_ts.tz is None:
         end_ts = end_ts.tz_localize("America/New_York")
     window_end = end_ts.to_pydatetime()
-    window_start = (end_ts - pd.Timedelta(days=window_days)).to_pydatetime()
+    # IMPORTANT: Keep the backtest window fully inside the cached data to avoid long
+    # "no data" spans (which can make the strategy look broken even when it isn't).
+    start_ts = df.index.min()
+    assert isinstance(start_ts, pd.Timestamp)
+    if start_ts.tz is None:
+        start_ts = start_ts.tz_localize("America/New_York")
+
+    desired_start = end_ts - pd.Timedelta(days=window_days)
+    window_start = max(desired_start, start_ts).to_pydatetime()
     return window_start, window_end
 
 
 def test_ibkr_crypto_backtest_produces_tearsheet_and_trade_artifacts(monkeypatch, tmp_path):
     _require_local_ibkr_downloader()
+    monkeypatch.setenv("MARKET", "24/7")
 
     # Keep artifacts and cache isolated and easy to inspect.
     log_dir = tmp_path / "logs"
@@ -176,6 +201,9 @@ def test_ibkr_crypto_backtest_produces_tearsheet_and_trade_artifacts(monkeypatch
     )
 
     logfile = (log_dir / "ibkr_crypto_backtest.log").as_posix()
+    stats_file = (log_dir / "ibkr_crypto_stats.csv").as_posix()
+    settings_file = (log_dir / "ibkr_crypto_settings.json").as_posix()
+    tearsheet_file = (log_dir / "ibkr_crypto_tearsheet.html").as_posix()
 
     _IbkrCryptoBuyAndHold.run_backtest(
         datasource_class=InteractiveBrokersRESTBacktesting,
@@ -193,15 +221,30 @@ def test_ibkr_crypto_backtest_produces_tearsheet_and_trade_artifacts(monkeypatch
         benchmark_asset=Asset("BTC", asset_type=Asset.AssetType.CRYPTO),
         quote_asset=Asset("USD", asset_type=Asset.AssetType.FOREX),
         logfile=logfile,
+        stats_file=stats_file,
+        settings_file=settings_file,
+        tearsheet_file=tearsheet_file,
     )
 
+    assert Path(tearsheet_file).exists(), f"Missing {tearsheet_file}"
+    assert Path(stats_file).exists(), f"Missing {stats_file}"
     assert list(log_dir.glob("*_trade_events.csv")), f"No trade_events.csv found in {log_dir}"
-    assert list(log_dir.glob("*_tearsheet.html")), f"No tearsheet.html found in {log_dir}"
-    assert list(log_dir.glob("*_tearsheet.csv")), f"No tearsheet.csv found in {log_dir}"
+
+    trades = list(log_dir.glob("*_trades.csv"))
+    assert trades, f"No trades.csv found in {log_dir}"
+    trades_df = pd.read_csv(trades[0])
+    assert "status" in trades_df.columns
+    assert (trades_df["status"].astype(str).str.lower() == "fill").any(), f"No filled trades in {trades[0]}"
+
+    stats_df = pd.read_csv(stats_file)
+    assert "portfolio_value" in stats_df.columns
+    # Portfolio value should move with BTC price during the window (not stay stuck on a single mark).
+    assert stats_df["portfolio_value"].nunique() > 10, f"Portfolio value did not move as expected; see {stats_file}"
 
 
 def test_ibkr_crypto_backtest_roundtrip_produces_tearsheet_and_trades(monkeypatch, tmp_path):
     _require_local_ibkr_downloader()
+    monkeypatch.setenv("MARKET", "24/7")
 
     # Keep artifacts and cache isolated and easy to inspect.
     log_dir = tmp_path / "logs"
@@ -239,6 +282,7 @@ def test_ibkr_crypto_backtest_roundtrip_produces_tearsheet_and_trades(monkeypatc
 
 def test_ibkr_crypto_warm_backtest_does_not_touch_downloader(monkeypatch, tmp_path):
     _require_local_ibkr_downloader()
+    monkeypatch.setenv("MARKET", "24/7")
 
     import lumibot.tools.ibkr_helper as ibkr_helper
 
