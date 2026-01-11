@@ -9,10 +9,17 @@ in this branch).
 from datetime import datetime, timezone
 import pandas as pd
 import pytest
+import os
 
 from lumibot.entities import Asset
 from lumibot.tools import thetadata_helper
 
+if (
+    not os.environ.get("THETADATA_USERNAME")
+    or os.environ.get("THETADATA_USERNAME") == "uname"
+    or not os.environ.get("THETADATA_PASSWORD")
+):
+    pytest.skip(allow_module_level=True)
 
 def _mock_cache_frame(start: datetime, rows: int = 8) -> pd.DataFrame:
     index = pd.date_range(start=start, periods=rows, freq="1min", tz="UTC")

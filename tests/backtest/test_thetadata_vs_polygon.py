@@ -284,9 +284,11 @@ def stock_runs():
 
 @pytest.mark.skipif(
     not os.environ.get("POLYGON_API_KEY")
+    or os.environ.get("POLYGON_API_KEY") == '<your key here>'
     or not os.environ.get("THETADATA_USERNAME")
-    or not os.environ.get("THETADATA_PASSWORD"),
-    reason="Requires Polygon + ThetaData credentials",
+    or not os.environ.get("THETADATA_PASSWORD")
+    or os.environ.get("THETADATA_USERNAME") == 'uname',
+    reason="Requires both Polygon and ThetaData credentials"
 )
 class TestThetaDataVsPolygonComparison:
     """Comparison tests between ThetaData and Polygon."""

@@ -49,7 +49,7 @@ def theta_credentials():
 class TestThetaDataStocks:
     """Test stock data accuracy."""
 
-    def test_first_10_minutes_timestamps_and_prices(self):
+    def test_first_10_minutes_timestamps_and_prices(self, theta_credentials):
         """
         CRITICAL: Verify the +1 minute timestamp bug is fixed.
         Test first 10 minutes to ensure market open spike is at 9:30, not 9:31.
@@ -101,7 +101,7 @@ class TestThetaDataStocks:
         print(f"\n✓ Timestamp verification PASSED")
         print(f"  - Market open spike at {max_volume_bar.name}: {max_volume_bar['volume']:,.0f} volume")
 
-    def test_noon_period_accuracy(self):
+    def test_noon_period_accuracy(self, theta_credentials):
         """Test pricing accuracy at noon (different market conditions)."""
         import os
         POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
@@ -163,7 +163,7 @@ class TestThetaDataStocks:
 
         print(f"\n✓ Noon period accuracy PASSED")
 
-    def test_multiple_symbols(self):
+    def test_multiple_symbols(self, theta_credentials):
         """Test 2-3 symbols with different price ranges."""
         username = os.environ.get("THETADATA_USERNAME")
         password = os.environ.get("THETADATA_PASSWORD")
@@ -219,7 +219,7 @@ class TestThetaDataStocks:
 class TestThetaDataMethods:
     """Test key methods work correctly."""
 
-    def test_get_quote(self):
+    def test_get_quote(self, theta_credentials):
         """Test get_quote() returns correct data."""
         username = os.environ.get("THETADATA_USERNAME")
         password = os.environ.get("THETADATA_PASSWORD")
@@ -248,7 +248,7 @@ class TestThetaDataMethods:
 
         print(f"\n✓ get_quote() PASSED")
 
-    def test_get_chains(self):
+    def test_get_chains(self, theta_credentials):
         """Test get_chains() returns option chains."""
         username = os.environ.get("THETADATA_USERNAME")
         password = os.environ.get("THETADATA_PASSWORD")
@@ -296,7 +296,7 @@ class TestThetaDataMethods:
 class TestThetaDataOptions:
     """Test options pricing."""
 
-    def test_atm_call_and_put(self):
+    def test_atm_call_and_put(self, theta_credentials):
         """Test ATM call and put pricing."""
         username = os.environ.get("THETADATA_USERNAME")
         password = os.environ.get("THETADATA_PASSWORD")
@@ -372,7 +372,7 @@ class TestThetaDataOptions:
 class TestThetaDataIndexes:
     """Test index data."""
 
-    def test_spx_pricing(self):
+    def test_spx_pricing(self, theta_credentials):
         """Test SPX index pricing."""
         username = os.environ.get("THETADATA_USERNAME")
         password = os.environ.get("THETADATA_PASSWORD")
@@ -402,7 +402,7 @@ class TestThetaDataIndexes:
 class TestThetaDataExtendedHours:
     """Test pre-market and after-hours data."""
 
-    def test_premarket_data(self):
+    def test_premarket_data(self, theta_credentials):
         """Test pre-market data (9:00-9:30)."""
         username = os.environ.get("THETADATA_USERNAME")
         password = os.environ.get("THETADATA_PASSWORD")
@@ -445,7 +445,7 @@ class TestThetaDataExtendedHours:
 class TestThetaDataQuoteContinuity:
     """Test that quote data is continuous across multiple days for options."""
 
-    def test_multi_day_option_quote_coverage(self):
+    def test_multi_day_option_quote_coverage(self, theta_credentials):
         """
         CRITICAL: Verify option day bars include EOD NBBO columns across a multi-day window.
         This is a key guard against MTM "sawtooth" behavior in day-cadence option strategies.

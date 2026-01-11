@@ -25,8 +25,10 @@ load_dotenv()
 
 
 @pytest.mark.skipif(
-    not os.environ.get("THETADATA_USERNAME") or not os.environ.get("THETADATA_PASSWORD"),
-    reason="Requires ThetaData credentials",
+    not os.environ.get("THETADATA_USERNAME")
+    or not os.environ.get("THETADATA_PASSWORD")
+    or os.environ.get("THETADATA_USERNAME") == 'uname',
+    reason="Requires ThetaData credentials"
 )
 class TestIndexDataVerification:
     """Comprehensive index data verification tests."""
