@@ -987,19 +987,6 @@ class OptionsHelper:
 
         option_price, _, _ = self._get_option_mark_from_quote(option, snapshot=True)
         if option_price is None:
-            # PERF: In backtesting, falling back to get_last_price() for option strike probing can
-            # trigger full-session quote-history downloads (09:30→16:00) per strike. For strike
-            # selection we prefer "no data" over an expensive fallback; the caller can try a
-            # nearby strike instead.
-            broker = getattr(self.strategy, "broker", None)
-            # Only treat these flags as "on" when they're explicitly True. This avoids subtle
-            # truthiness bugs (e.g., when the broker/strategy is a Mock in unit tests).
-            is_backtesting = (getattr(broker, "IS_BACKTESTING_BROKER", False) is True) or (
-                getattr(self.strategy, "is_backtesting", False) is True
-            )
-            if is_backtesting:
-                self._per_bar_delta_cache[delta_cache_key] = None
-                return None
             try:
                 option_price = _coerce_price(self.strategy.get_last_price(option))
             except Exception:
