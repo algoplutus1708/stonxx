@@ -348,6 +348,8 @@ def get_symbol_returns(symbol, start=datetime(1900, 1, 1), end=datetime.now()):
 
     # Filter the DataFrame based on date range
     returns_df = returns_df.loc[(returns_df.index.date >= start.date()) & (returns_df.index.date <= end.date())]
+    if returns_df.empty:
+        return returns_df
 
     # Calculate percentage change and dividend yield
     returns_df.loc[:, "pct_change"] = returns_df["Close"].pct_change()
@@ -1073,12 +1075,6 @@ def create_tearsheet(
 
     logger.info("\nCreating tearsheet...")
 
-    df_final = _prepare_tearsheet_returns(strategy_df, benchmark_df)
-
-    if df_final is None:
-        logger.warning("No data to create tearsheet, skipping")
-        return
-
     def _write_placeholder_tearsheet(reason: str) -> None:
         """Write a small HTML file explaining why QuantStats was skipped/failed."""
         try:
@@ -1099,6 +1095,13 @@ def create_tearsheet(
                 f.write(placeholder)
         except Exception as exc:  # pragma: no cover
             logger.warning("Failed to write placeholder tearsheet to %s: %s", tearsheet_file, exc)
+
+    df_final = _prepare_tearsheet_returns(strategy_df, benchmark_df)
+
+    if df_final is None:
+        logger.warning("No data to create tearsheet; writing placeholder and skipping QuantStats.")
+        _write_placeholder_tearsheet("Insufficient data to compute strategy/benchmark return series for this window.")
+        return
 
     # Uncomment for debugging
     # _df1.to_csv(f"df1.csv")

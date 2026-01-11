@@ -587,6 +587,16 @@ IBKR backtesting uses the shared Data Downloader and is cached locally (and opti
   export BACKTESTING_DATA_SOURCE='{"default":"thetadata","stock":"thetadata","option":"thetadata","index":"thetadata","future":"ibkr","crypto":"ibkr"}'
   ```
 
+#### Crypto daily bars (important semantics)
+
+IBKR's `bar=1d` history for crypto is not a clean midnight-to-midnight 24/7 day series, and its timestamps can lag the
+simulation clock used by daily-cadence strategies. To keep daily backtests stable (no “stale end of data” refresh loops),
+LumiBot derives **crypto daily bars** from intraday history and aligns them to midnight day buckets in `LUMIBOT_DEFAULT_PYTZ`
+(default: `America/New_York`).
+
+**Note:** IBKR crypto history is often effectively **24/5** (weekends can be missing). For daily backtests, LumiBot
+forward-fills short gaps (≤ 3 days) from the prior close so the daily clock can advance without “missing BTC day” churn.
+
 ### Backtest output artifacts (HTML/CSV)
 ```bash
 SHOW_PLOT=True        # trades.html + trades.csv

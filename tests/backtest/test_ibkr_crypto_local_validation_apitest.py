@@ -254,6 +254,9 @@ def test_ibkr_crypto_backtest_roundtrip_produces_tearsheet_and_trades(monkeypatc
     )
 
     logfile = (log_dir / "ibkr_crypto_backtest_roundtrip.log").as_posix()
+    stats_file = (log_dir / "ibkr_crypto_roundtrip_stats.csv").as_posix()
+    settings_file = (log_dir / "ibkr_crypto_roundtrip_settings.json").as_posix()
+    tearsheet_file = (log_dir / "ibkr_crypto_roundtrip_tearsheet.html").as_posix()
     _IbkrCryptoRoundTrip.run_backtest(
         datasource_class=InteractiveBrokersRESTBacktesting,
         backtesting_start=window_start,
@@ -270,10 +273,13 @@ def test_ibkr_crypto_backtest_roundtrip_produces_tearsheet_and_trades(monkeypatc
         benchmark_asset=Asset("BTC", asset_type=Asset.AssetType.CRYPTO),
         quote_asset=Asset("USD", asset_type=Asset.AssetType.FOREX),
         logfile=logfile,
+        stats_file=stats_file,
+        settings_file=settings_file,
+        tearsheet_file=tearsheet_file,
     )
 
     assert list(log_dir.glob("*_trade_events.csv")), f"No trade_events.csv found in {log_dir}"
-    assert list(log_dir.glob("*_tearsheet.html")), f"No tearsheet.html found in {log_dir}"
+    assert Path(tearsheet_file).exists(), f"Missing {tearsheet_file}"
 
 
 def test_ibkr_crypto_warm_backtest_does_not_touch_downloader(monkeypatch, tmp_path):

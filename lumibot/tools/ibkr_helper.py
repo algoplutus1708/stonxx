@@ -13,6 +13,7 @@ import pandas as pd
 from lumibot.constants import LUMIBOT_CACHE_FOLDER, LUMIBOT_DEFAULT_PYTZ
 from lumibot.entities import Asset
 from lumibot.tools.backtest_cache import get_backtest_cache
+from lumibot.tools.parquet_series_cache import ParquetSeriesCache
 from lumibot.tools.thetadata_queue_client import queue_request
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,27 @@ def get_price_data(
         effective_exchange = (os.environ.get("IBKR_CRYPTO_VENUE") or IBKR_DEFAULT_CRYPTO_VENUE).strip().upper()
 
     history_source = _normalize_history_source(source)
+
+    # IMPORTANT (IBKR crypto daily semantics):
+    # IBKR's `bar=1d` history is not a clean midnight-to-midnight 24/7 day series for crypto.
+    # Daily-cadence strategies in LumiBot typically advance the simulation clock at midnight in
+    # the strategy timezone. If we treat IBKR daily bars as authoritative, the series often
+    # "ends" at a non-midnight timestamp and can lag by days, which triggers Data.checker()
+    # stale-end errors and repeated refreshes (extremely slow; looks like "missing BTC data").
+    #
+    # Fix: for crypto only, derive daily bars from intraday history and align them to midnight
+    # buckets in `LUMIBOT_DEFAULT_PYTZ`.
+    if asset_type == "crypto" and _timestep_component(timestep) == "day":
+        return _get_crypto_daily_bars(
+            asset=asset,
+            quote=quote,
+            start_dt=start_utc,
+            end_dt=end_utc,
+            exchange=effective_exchange,
+            include_after_hours=include_after_hours,
+            source=history_source,
+        )
+
     cache_file = _cache_file_for(
         asset=asset,
         quote=quote,
@@ -111,30 +133,63 @@ def get_price_data(
     )
 
     if needs_fetch:
-        fetch_start = start_utc if coverage_start is None else min(start_utc, coverage_start.astimezone(timezone.utc))
-        fetch_end = end_utc if coverage_end is None else max(end_utc, coverage_end.astimezone(timezone.utc))
-        fetched = _fetch_history_between_dates(
-            asset=asset,
-            quote=quote,
-            timestep=timestep,
-            start_dt=fetch_start,
-            end_dt=fetch_end,
-            exchange=effective_exchange,
-            include_after_hours=include_after_hours,
-            source=history_source,
-        )
-        if fetched is not None and not fetched.empty:
-            merged = _merge_frames(df_cache, fetched)
-            _write_cache_frame(cache_file, merged)
-            df_cache = merged
+        segments: list[tuple[datetime, datetime]] = []
+        if coverage_start is None or coverage_end is None:
+            segments.append((start_utc, end_utc))
+        else:
+            # If the requested window has no overlap with the cached window, do NOT try to "bridge"
+            # the gap. Fetch exactly the requested window and merge it into the cache as a disjoint
+            # segment. Bridging can turn a 1-hour request into months of downloads.
+            if end_local < coverage_start or start_local > coverage_end:
+                segments.append((start_utc, end_utc))
+            else:
+                if start_local < coverage_start:
+                    segments.append((start_utc, coverage_start.astimezone(timezone.utc)))
+                if end_local > coverage_end:
+                    segments.append((coverage_end.astimezone(timezone.utc), end_utc))
+
+        for seg_start, seg_end in segments:
+            if seg_start >= seg_end:
+                continue
+            try:
+                fetched = _fetch_history_between_dates(
+                    asset=asset,
+                    quote=quote,
+                    timestep=timestep,
+                    start_dt=seg_start,
+                    end_dt=seg_end,
+                    exchange=effective_exchange,
+                    include_after_hours=include_after_hours,
+                    source=history_source,
+                )
+            except Exception as exc:
+                # Avoid crashing the entire backtest on entitlement/session issues. Return an empty
+                # frame so strategies can continue with a loud error in logs.
+                logger.error(
+                    "IBKR history fetch failed for %s/%s timestep=%s exchange=%s source=%s: %s",
+                    getattr(asset, "symbol", None),
+                    getattr(quote, "symbol", None) if quote else None,
+                    timestep,
+                    effective_exchange,
+                    history_source,
+                    exc,
+                )
+                fetched = pd.DataFrame()
+            if fetched is not None and not fetched.empty:
+                merged = _merge_frames(df_cache, fetched)
+                _write_cache_frame(cache_file, merged)
+                df_cache = merged
 
     if df_cache.empty:
         return df_cache
 
-    # Best-effort: derive actionable bid/ask quotes for crypto minute bars so quote-based fills
+    # Best-effort: derive actionable bid/ask quotes for crypto *minute* bars so quote-based fills
     # behave realistically (buy at ask, sell at bid). IBKR history does not return separate
     # bid/ask fields, so we reconstruct them from Bid_Ask + Midpoint when needed.
-    if asset_type == "crypto":
+    #
+    # IMPORTANT (performance): do not do this for daily series (and avoid doing it for large
+    # multi-month windows unless required) because it multiplies request volume.
+    if asset_type == "crypto" and _timestep_component(timestep) == "minute":
         df_aug, changed = _maybe_augment_crypto_bid_ask(
             df_cache=df_cache,
             asset=asset,
@@ -213,22 +268,47 @@ def _get_cached_bars_for_source(
     )
 
     if needs_fetch:
-        fetch_start = start_utc if coverage_start is None else min(start_utc, coverage_start.astimezone(timezone.utc))
-        fetch_end = end_utc if coverage_end is None else max(end_utc, coverage_end.astimezone(timezone.utc))
-        fetched = _fetch_history_between_dates(
-            asset=asset,
-            quote=quote,
-            timestep=timestep,
-            start_dt=fetch_start,
-            end_dt=fetch_end,
-            exchange=exchange,
-            include_after_hours=include_after_hours,
-            source=history_source,
-        )
-        if fetched is not None and not fetched.empty:
-            merged = _merge_frames(df_cache, fetched)
-            _write_cache_frame(cache_file, merged)
-            df_cache = merged
+        segments: list[tuple[datetime, datetime]] = []
+        if coverage_start is None or coverage_end is None:
+            segments.append((start_utc, end_utc))
+        else:
+            if end_local < coverage_start or start_local > coverage_end:
+                segments.append((start_utc, end_utc))
+            else:
+                if start_local < coverage_start:
+                    segments.append((start_utc, coverage_start.astimezone(timezone.utc)))
+                if end_local > coverage_end:
+                    segments.append((coverage_end.astimezone(timezone.utc), end_utc))
+
+        for seg_start, seg_end in segments:
+            if seg_start >= seg_end:
+                continue
+            try:
+                fetched = _fetch_history_between_dates(
+                    asset=asset,
+                    quote=quote,
+                    timestep=timestep,
+                    start_dt=seg_start,
+                    end_dt=seg_end,
+                    exchange=exchange,
+                    include_after_hours=include_after_hours,
+                    source=history_source,
+                )
+            except Exception as exc:
+                logger.error(
+                    "IBKR history fetch failed for %s/%s timestep=%s exchange=%s source=%s: %s",
+                    getattr(asset, "symbol", None),
+                    getattr(quote, "symbol", None) if quote else None,
+                    timestep,
+                    exchange,
+                    history_source,
+                    exc,
+                )
+                fetched = pd.DataFrame()
+            if fetched is not None and not fetched.empty:
+                merged = _merge_frames(df_cache, fetched)
+                _write_cache_frame(cache_file, merged)
+                df_cache = merged
 
     if df_cache.empty:
         return df_cache
@@ -375,12 +455,19 @@ def _fetch_history_between_dates(
         if earliest <= start_dt:
             break
 
-        # Move cursor backwards, overlapping by one bar to avoid gaps from inclusive bounds.
-        cursor_end = earliest - pd.Timedelta(seconds=bar_seconds)
+        # Move cursor backwards.
+        #
+        # IBKR history bounds are effectively inclusive, and we de-dupe on merge anyway, so it is
+        # safer to continue from `earliest` instead of subtracting a whole bar (which can skip the
+        # requested start boundary for coarse bars like 1h/1d).
+        next_cursor_end = earliest
+        if next_cursor_end >= cursor_end:
+            next_cursor_end = earliest - pd.Timedelta(seconds=bar_seconds)
+        cursor_end = next_cursor_end
 
-        # If IBKR returns less than the max points, we likely reached the start of available history.
-        if len(df) < IBKR_HISTORY_MAX_POINTS:
-            break
+        # Do not assume `len(df) < 1000` implies we're at the start of history.
+        # IBKR can return fewer bars due to gaps/vendor behavior; breaking early can leave large
+        # holes (and can trigger stale-end refresh loops in daily backtests).
 
     if not chunks:
         return pd.DataFrame()
@@ -575,6 +662,179 @@ def _record_missing_window(
     _write_cache_frame(cache_file, merged)
 
 
+def _crypto_day_bounds(start_local: datetime, end_local: datetime) -> tuple[datetime, datetime]:
+    """Return inclusive midnight-to-midnight day bucket bounds in `LUMIBOT_DEFAULT_PYTZ`.
+
+    LumiBot treats BACKTESTING_END as exclusive. If the requested end timestamp is exactly
+    midnight, exclude that day from the derived daily series.
+    """
+    start_day = start_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_day = end_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    if end_local == end_day:
+        end_day = end_day - pd.Timedelta(days=1)
+    if end_day < start_day:
+        end_day = start_day
+    return start_day, end_day
+
+
+def _derive_daily_from_intraday(
+    intraday: pd.DataFrame,
+    *,
+    start_day: datetime,
+    end_day: datetime,
+) -> pd.DataFrame:
+    """Derive daily OHLCV bars from an intraday OHLCV dataframe (crypto: 24/7 days)."""
+    idx = pd.date_range(start=start_day, end=end_day, freq="D", tz=LUMIBOT_DEFAULT_PYTZ)
+    if intraday is None or intraday.empty:
+        out = pd.DataFrame(index=idx, columns=["open", "high", "low", "close", "volume", "missing"])
+        out["missing"] = True
+        return out
+
+    df = intraday.copy()
+    df.index = pd.to_datetime(df.index, utc=True, errors="coerce").tz_convert(LUMIBOT_DEFAULT_PYTZ)
+    df = df[~df.index.isna()].sort_index()
+    if df.empty:
+        out = pd.DataFrame(index=idx, columns=["open", "high", "low", "close", "volume", "missing"])
+        out["missing"] = True
+        return out
+
+    day_key = df.index.normalize()
+    grouped = df.groupby(day_key)
+    daily = pd.DataFrame(
+        {
+            "open": grouped["open"].first(),
+            "high": grouped["high"].max(),
+            "low": grouped["low"].min(),
+            "close": grouped["close"].last(),
+            "volume": grouped["volume"].sum(min_count=1) if "volume" in df.columns else pd.NA,
+        }
+    )
+    daily_idx = pd.DatetimeIndex(daily.index)
+    if daily_idx.tz is None:
+        daily.index = daily_idx.tz_localize(LUMIBOT_DEFAULT_PYTZ)
+    else:
+        daily.index = daily_idx.tz_convert(LUMIBOT_DEFAULT_PYTZ)
+    daily = daily.sort_index()
+    daily["missing"] = False
+
+    daily = daily.reindex(idx)
+    close = pd.to_numeric(daily.get("close"), errors="coerce")
+    daily["missing"] = daily["missing"].fillna(True) | close.isna()
+
+    # IBKR crypto history is often effectively 24/5: weekend days may be absent even though
+    # strategies are frequently configured as 24/7. To keep daily-cadence backtests stable
+    # (no refresh loops / "missing BTC day"), forward-fill short gaps (<= 3 days) using the
+    # prior close. This mirrors the existing Data.checker() tolerance window.
+    if close is not None and not close.empty:
+        filled_close = close.ffill(limit=3)
+        filled_mask = close.isna() & filled_close.notna()
+        if filled_mask.any():
+            daily.loc[filled_mask, "close"] = filled_close[filled_mask]
+            for col in ("open", "high", "low"):
+                if col in daily.columns:
+                    daily.loc[filled_mask, col] = pd.to_numeric(daily.loc[filled_mask, col], errors="coerce").fillna(
+                        daily.loc[filled_mask, "close"]
+                    )
+            if "volume" in daily.columns:
+                daily.loc[filled_mask, "volume"] = pd.to_numeric(daily.loc[filled_mask, "volume"], errors="coerce").fillna(0)
+            daily.loc[filled_mask, "missing"] = False
+    return daily
+
+
+def _get_crypto_daily_bars(
+    *,
+    asset: Asset,
+    quote: Optional[Asset],
+    start_dt: datetime,
+    end_dt: datetime,
+    exchange: Optional[str],
+    include_after_hours: bool,
+    source: str,
+) -> pd.DataFrame:
+    """Return crypto daily bars aligned to midnight days in `LUMIBOT_DEFAULT_PYTZ`."""
+    start_local = _to_utc(start_dt).astimezone(LUMIBOT_DEFAULT_PYTZ)
+    end_local = _to_utc(end_dt).astimezone(LUMIBOT_DEFAULT_PYTZ)
+    start_day, end_day = _crypto_day_bounds(start_local, end_local)
+
+    exch = (exchange or os.environ.get("IBKR_CRYPTO_VENUE") or IBKR_DEFAULT_CRYPTO_VENUE).strip().upper()
+    # IMPORTANT: keep derived daily bars in a separate cache namespace so we don't mix them with
+    # legacy `bar=1d` results (which have different semantics and timestamps).
+    derived_source = f"{source}_DERIVED_DAILY"
+    cache_file = _cache_file_for(asset=asset, quote=quote, timestep="day", exchange=exch, source=derived_source)
+    cache = ParquetSeriesCache(cache_file, remote_payload=_remote_payload(asset, quote, "day", exch, derived_source))
+    cache.hydrate_remote()
+    df_cache = cache.read()
+
+    if not df_cache.empty:
+        coverage_start = df_cache.index.min()
+        coverage_end = df_cache.index.max()
+    else:
+        coverage_start = None
+        coverage_end = None
+
+    needs_fetch = (
+        coverage_start is None
+        or coverage_end is None
+        or start_day < coverage_start
+        or end_day > coverage_end
+    )
+
+    if needs_fetch:
+        fetch_start = start_day if coverage_start is None else min(start_day, coverage_start)
+        fetch_end = (end_day + pd.Timedelta(days=1)) if coverage_end is None else max(end_day + pd.Timedelta(days=1), coverage_end)
+
+        hourly = _get_cached_bars_for_source(
+            asset=asset,
+            quote=quote,
+            timestep="hour",
+            start_dt=fetch_start,
+            end_dt=fetch_end,
+            exchange=exch,
+            include_after_hours=include_after_hours,
+            source=source,
+        )
+        daily = _derive_daily_from_intraday(hourly, start_day=fetch_start, end_day=(fetch_end - pd.Timedelta(days=1)))
+
+        missing_days = daily.index[daily["missing"].fillna(True)]
+        for day in missing_days:
+            day_start = day
+            day_end = day + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+            minute = _get_cached_bars_for_source(
+                asset=asset,
+                quote=quote,
+                timestep="minute",
+                start_dt=day_start,
+                end_dt=day_end,
+                exchange=exch,
+                include_after_hours=True,
+                source=source,
+            )
+            if minute is None or minute.empty:
+                continue
+            filled = _derive_daily_from_intraday(minute, start_day=day_start, end_day=day_start)
+            if not filled.empty and not bool(filled["missing"].iloc[0]):
+                daily.loc[day_start, ["open", "high", "low", "close", "volume"]] = filled.iloc[0][
+                    ["open", "high", "low", "close", "volume"]
+                ]
+                daily.loc[day_start, "missing"] = False
+
+        merged = ParquetSeriesCache.merge(df_cache, daily)
+        cache.write(merged, remote_payload=_remote_payload(asset, quote, "day", exch, derived_source))
+        df_cache = merged
+
+    if df_cache.empty:
+        return df_cache
+
+    frame = df_cache.loc[(df_cache.index >= start_day) & (df_cache.index <= end_day)].copy()
+    if "missing" in frame.columns:
+        frame = frame[~frame["missing"].fillna(False)]
+        frame = frame.drop(columns=["missing"], errors="ignore")
+    if "close" in frame.columns:
+        frame["bid"] = pd.to_numeric(frame.get("bid", frame["close"]), errors="coerce").fillna(frame["close"])
+        frame["ask"] = pd.to_numeric(frame.get("ask", frame["close"]), errors="coerce").fillna(frame["close"])
+    return frame
+
+
 def _resolve_conid(*, asset: Asset, quote: Optional[Asset], exchange: Optional[str]) -> int:
     cache_file = Path(LUMIBOT_CACHE_FOLDER) / CACHE_SUBFOLDER / "conids.json"
     cache_manager = get_backtest_cache()
@@ -634,6 +894,7 @@ def _lookup_conid_crypto(*, asset: Asset, quote: Optional[Asset]) -> int:
     base_url = _downloader_base_url()
     url = f"{base_url}/ibkr/iserver/secdef/search"
     venue = (os.environ.get("IBKR_CRYPTO_VENUE") or IBKR_DEFAULT_CRYPTO_VENUE).strip().upper()
+    desired_quote = str(getattr(quote, "symbol", "") or "").strip().upper() if quote is not None else ""
     payload = queue_request(
         url=url,
         querystring={"symbol": asset.symbol, "secType": "CRYPTO"},
@@ -643,6 +904,7 @@ def _lookup_conid_crypto(*, asset: Asset, quote: Optional[Asset]) -> int:
     if not isinstance(payload, list):
         raise RuntimeError(f"Unexpected IBKR secdef/search response for crypto: {payload}")
     for entry in payload:
+        entry_currency = str(entry.get("currency") or "").strip().upper()
         sections = entry.get("sections") or []
         for section in sections:
             if str(section.get("secType") or "").upper() == "CRYPTO":
@@ -650,15 +912,22 @@ def _lookup_conid_crypto(*, asset: Asset, quote: Optional[Asset]) -> int:
                     exch = str(section.get("exchange") or "").upper()
                     if venue not in exch:
                         continue
+                section_currency = str(section.get("currency") or "").strip().upper()
+                resolved_currency = section_currency or entry_currency
+                if desired_quote and resolved_currency and desired_quote != resolved_currency:
+                    continue
                 conid = entry.get("conid")
                 if conid is not None:
                     return int(conid)
     # Fallback: accept the first conid.
-    if payload:
+    if payload and not desired_quote:
         conid = payload[0].get("conid")
         if conid is not None:
             return int(conid)
-    raise RuntimeError(f"Unable to resolve IBKR crypto conid for {asset.symbol}/{getattr(quote,'symbol',None)}")
+    raise RuntimeError(
+        f"Unable to resolve IBKR crypto conid for {asset.symbol}/{getattr(quote,'symbol',None)} "
+        f"(venue={venue or 'AUTO'})."
+    )
 
 
 def _lookup_conid_future(*, asset: Asset, exchange: Optional[str]) -> int:

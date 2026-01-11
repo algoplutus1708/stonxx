@@ -62,18 +62,44 @@ class InteractiveBrokersRESTBacktesting(PandasData):
         return canonical_key, legacy_key
 
     def get_last_price(self, asset, quote=None, exchange=None):
-        """Prefer minute bars for IBKR mark-to-market even if daily bars are also cached.
+        """Return the best available last price for mark-to-market during IBKR backtests.
 
-        IBKR backtests can end up caching BOTH minute and daily bars (e.g., for analysis/tearsheet).
-        The PandasData legacy key `(asset, quote)` collides across timesteps; if daily overwrites it,
-        portfolio valuation can get "stuck" on a single daily close. Avoid that by explicitly
-        resolving the minute canonical key first.
+        For IBKR crypto daily backtests, prefetching the full-minute series for the entire backtest
+        window is prohibitively slow (and unnecessary). Prefer the daily series for crypto when
+        available, which is derived from intraday history and aligned to LumiBot's day cadence.
+
+        For non-crypto, keep the existing minute-first behavior to preserve prior semantics.
         """
         base_asset = asset
         quote_asset = quote
         if isinstance(base_asset, tuple):
             base_asset, quote_asset = base_asset
         quote_asset = quote_asset if quote_asset is not None else Asset("USD", "forex")
+
+        asset_type = str(getattr(base_asset, "asset_type", "") or "").lower()
+        now = self.get_datetime()
+        if asset_type == "crypto" and now.hour == 0 and now.minute == 0 and now.second == 0 and now.microsecond == 0:
+            day_key = (base_asset, quote_asset, "day")
+            if day_key not in self._fully_loaded_series:
+                try:
+                    self._update_pandas_data(
+                        base_asset,
+                        quote_asset,
+                        "day",
+                        start_dt=self.datetime_start - timedelta(days=7),
+                        end_dt=self.datetime_end,
+                        exchange=self.exchange,
+                        include_after_hours=True,
+                    )
+                except Exception:
+                    pass
+                self._fully_loaded_series.add(day_key)
+            day_data = self._data_store.get(day_key)
+            if day_data is not None:
+                try:
+                    return day_data.get_last_price(self.get_datetime())
+                except Exception:
+                    pass
 
         minute_key = (base_asset, quote_asset, "minute")
         if minute_key not in self._fully_loaded_series:
@@ -173,15 +199,35 @@ class InteractiveBrokersRESTBacktesting(PandasData):
         end_dt = self.get_datetime()
         # IBKR crypto/futures trade outside equity calendars; do not add the default 5-day padding.
         start_dt, _ = self.get_start_datetime_and_ts_unit(length, timestep, start_dt=end_dt, start_buffer=timedelta(0))
-        self._update_pandas_data(
-            asset_separated,
-            quote_asset,
-            timestep,
-            start_dt=start_dt,
-            end_dt=end_dt,
-            exchange=exchange or self.exchange,
-            include_after_hours=include_after_hours,
-        )
+        asset_type = str(getattr(asset_separated, "asset_type", "") or "").lower()
+        ts_unit = str(timestep or "").strip().lower()
+        if asset_type == "crypto" and ts_unit == "day":
+            # Prefetch daily series for the full backtest window on first access so we do not
+            # hammer the downloader once per simulated day.
+            key = (asset_separated, quote_asset if quote_asset is not None else Asset("USD", "forex"), "day")
+            if key not in self._fully_loaded_series:
+                prefetch_start = min(start_dt, self.datetime_start - timedelta(days=max(7, int(length) + 5)))
+                prefetch_end = self.datetime_end
+                self._update_pandas_data(
+                    asset_separated,
+                    quote_asset,
+                    "day",
+                    start_dt=prefetch_start,
+                    end_dt=prefetch_end,
+                    exchange=exchange or self.exchange,
+                    include_after_hours=True,
+                )
+                self._fully_loaded_series.add(key)
+        else:
+            self._update_pandas_data(
+                asset_separated,
+                quote_asset,
+                timestep,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                exchange=exchange or self.exchange,
+                include_after_hours=include_after_hours,
+            )
         return super()._pull_source_symbol_bars(
             asset_separated, length, timestep, timeshift, quote_asset, exchange, include_after_hours
         )

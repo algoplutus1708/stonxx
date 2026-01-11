@@ -1370,6 +1370,42 @@ class _Strategy:
 
                 self._benchmark_returns_df = df
 
+            # IBKR crypto backtests: compute benchmark from the backtest data source (not Yahoo).
+            # Yahoo symbols for crypto (e.g., "BTC") are inconsistent and can result in empty series,
+            # which breaks tearsheet generation. Using the backtest data ensures consistency and
+            # keeps the run fully offline from external market data sites.
+            elif str(getattr(self.broker.data_source, "SOURCE", "") or "").upper() == "INTERACTIVEBROKERSREST":
+                benchmark_asset = self._benchmark_asset
+                if isinstance(benchmark_asset, str):
+                    parts = [p.strip() for p in benchmark_asset.split("/") if p.strip()]
+                    if len(parts) == 2:
+                        benchmark_asset = (Asset(symbol=parts[0], asset_type="crypto"), Asset(symbol=parts[1], asset_type="forex"))
+                    else:
+                        benchmark_asset = Asset(symbol=benchmark_asset, asset_type="crypto")
+
+                timestep = "minute"
+                if "D" in str(self._sleeptime):
+                    timestep = "day"
+
+                bars = self.broker.data_source.get_historical_prices_between_dates(
+                    benchmark_asset,
+                    timestep,
+                    start_date=self._backtesting_start,
+                    end_date=backtesting_end_adjusted,
+                    quote=self._quote_asset,
+                )
+                if bars is None or getattr(bars, "df", None) is None:
+                    self.logger.error(f"Couldn't get benchmark bars from IBKR data source: {benchmark_asset}")
+                    return
+                df = bars.df
+                if df is None or df.empty or "close" not in df.columns:
+                    self.logger.error(f"IBKR benchmark bars empty/invalid: {benchmark_asset}")
+                    return
+                df = df.copy()
+                df["return"] = df["close"].pct_change(fill_method=None)
+                df["symbol_cumprod"] = (1 + df["return"]).cumprod()
+                self._benchmark_returns_df = df
+
             if type(self.broker.data_source) == AlpacaBacktesting:
                 benchmark_asset = self._benchmark_asset
 
@@ -1468,9 +1504,6 @@ class _Strategy:
                             "OPTION_DATA_SOURCE",
                             type(self.broker.option_source).__name__,
                         )
-                    base_url = os.environ.get("DATADOWNLOADER_BASE_URL")
-                    if base_url:
-                        strategy_parameters.setdefault("DATADOWNLOADER_BASE_URL", base_url)
             except Exception:
                 # Never fail tearsheet generation due to metadata/diagnostics.
                 pass
