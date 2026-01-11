@@ -623,14 +623,22 @@ class StrategyExecutor(Thread):
         if self.broker.IS_BACKTESTING_BROKER:
             return
 
-        orders = self.broker.get_tracked_orders(self.strategy.name)
+        # SMART_LIMIT should only operate on active orders. Scanning the full tracked-order
+        # history (which can include large closed/filled histories) in a tight background loop
+        # can cause significant allocation churn and high RSS in long-lived workers.
+        #
+        # Prefer the broker's fast-path active order list when available.
+        get_active = getattr(self.broker, "get_active_tracked_orders", None)
+        if callable(get_active):
+            orders = get_active(strategy=self.strategy.name)
+        else:
+            orders = [o for o in self.broker.get_tracked_orders(self.strategy.name) if o.is_active()]
+
         if not orders:
             return
 
         now = time.monotonic()
         for order in orders:
-            if not order.is_active():
-                continue
             smart_limit = getattr(order, "smart_limit", None)
             if smart_limit is None or order.order_type != Order.OrderType.SMART_LIMIT:
                 continue
