@@ -131,12 +131,178 @@ def get_price_data(
     if df_cache.empty:
         return df_cache
 
+    # Best-effort: derive actionable bid/ask quotes for crypto minute bars so quote-based fills
+    # behave realistically (buy at ask, sell at bid). IBKR history does not return separate
+    # bid/ask fields, so we reconstruct them from Bid_Ask + Midpoint when needed.
+    if asset_type == "crypto":
+        df_aug, changed = _maybe_augment_crypto_bid_ask(
+            df_cache=df_cache,
+            asset=asset,
+            quote=quote,
+            timestep=timestep,
+            start_dt=start_utc,
+            end_dt=end_utc,
+            exchange=effective_exchange,
+            include_after_hours=include_after_hours,
+        )
+        if changed:
+            _write_cache_frame(cache_file, df_aug)
+            df_cache = df_aug
+
     # Remove placeholder rows from the returned frame (but keep them in cache).
     frame = df_cache.loc[(df_cache.index >= start_local) & (df_cache.index <= end_local)].copy()
     if "missing" in frame.columns:
         frame = frame[~frame["missing"].fillna(False)]
         frame = frame.drop(columns=["missing"], errors="ignore")
     return frame
+
+
+def _frame_has_actionable_bid_ask(df: pd.DataFrame) -> bool:
+    if df is None or df.empty:
+        return False
+    if "bid" not in df.columns or "ask" not in df.columns:
+        return False
+    bid = pd.to_numeric(df["bid"], errors="coerce")
+    ask = pd.to_numeric(df["ask"], errors="coerce")
+    spread = ask - bid
+    return bool((spread > 0).any())
+
+
+def _get_cached_bars_for_source(
+    *,
+    asset: Asset,
+    quote: Optional[Asset],
+    timestep: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    exchange: Optional[str],
+    include_after_hours: bool,
+    source: str,
+) -> pd.DataFrame:
+    start_utc = _to_utc(start_dt)
+    end_utc = _to_utc(end_dt)
+    if start_utc > end_utc:
+        start_utc, end_utc = end_utc, start_utc
+    start_local = start_utc.astimezone(LUMIBOT_DEFAULT_PYTZ)
+    end_local = end_utc.astimezone(LUMIBOT_DEFAULT_PYTZ)
+
+    history_source = _normalize_history_source(source)
+    cache_file = _cache_file_for(asset=asset, quote=quote, timestep=timestep, exchange=exchange, source=history_source)
+    cache_manager = get_backtest_cache()
+    try:
+        cache_manager.ensure_local_file(
+            cache_file,
+            payload=_remote_payload(asset, quote, timestep, exchange, history_source),
+        )
+    except Exception:
+        pass
+
+    df_cache = _read_cache_frame(cache_file)
+    if not df_cache.empty:
+        coverage_start = df_cache.index.min()
+        coverage_end = df_cache.index.max()
+    else:
+        coverage_start = None
+        coverage_end = None
+
+    needs_fetch = (
+        coverage_start is None
+        or coverage_end is None
+        or start_local < coverage_start
+        or end_local > coverage_end
+    )
+
+    if needs_fetch:
+        fetch_start = start_utc if coverage_start is None else min(start_utc, coverage_start.astimezone(timezone.utc))
+        fetch_end = end_utc if coverage_end is None else max(end_utc, coverage_end.astimezone(timezone.utc))
+        fetched = _fetch_history_between_dates(
+            asset=asset,
+            quote=quote,
+            timestep=timestep,
+            start_dt=fetch_start,
+            end_dt=fetch_end,
+            exchange=exchange,
+            include_after_hours=include_after_hours,
+            source=history_source,
+        )
+        if fetched is not None and not fetched.empty:
+            merged = _merge_frames(df_cache, fetched)
+            _write_cache_frame(cache_file, merged)
+            df_cache = merged
+
+    if df_cache.empty:
+        return df_cache
+
+    frame = df_cache.loc[(df_cache.index >= start_local) & (df_cache.index <= end_local)].copy()
+    if "missing" in frame.columns:
+        frame = frame[~frame["missing"].fillna(False)]
+        frame = frame.drop(columns=["missing"], errors="ignore")
+    return frame
+
+
+def _maybe_augment_crypto_bid_ask(
+    *,
+    df_cache: pd.DataFrame,
+    asset: Asset,
+    quote: Optional[Asset],
+    timestep: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    exchange: Optional[str],
+    include_after_hours: bool,
+) -> tuple[pd.DataFrame, bool]:
+    if df_cache is None or df_cache.empty:
+        return df_cache, False
+    if _frame_has_actionable_bid_ask(df_cache):
+        return df_cache, False
+
+    try:
+        bid_ask = _get_cached_bars_for_source(
+            asset=asset,
+            quote=quote,
+            timestep=timestep,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            exchange=exchange,
+            include_after_hours=include_after_hours,
+            source="Bid_Ask",
+        )
+        midpoint = _get_cached_bars_for_source(
+            asset=asset,
+            quote=quote,
+            timestep=timestep,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            exchange=exchange,
+            include_after_hours=include_after_hours,
+            source="Midpoint",
+        )
+    except Exception:
+        return df_cache, False
+
+    derived = _derive_bid_ask_from_bid_ask_and_midpoint(bid_ask, midpoint)
+    if derived is None or derived.empty:
+        return df_cache, False
+
+    updated = df_cache.copy()
+    updated.loc[derived.index, "bid"] = derived["bid"]
+    updated.loc[derived.index, "ask"] = derived["ask"]
+
+    # Any residual NaNs fall back to the trade/mark close.
+    if "close" in updated.columns:
+        updated["bid"] = pd.to_numeric(updated.get("bid"), errors="coerce").where(
+            ~pd.to_numeric(updated.get("bid"), errors="coerce").isna(),
+            pd.to_numeric(updated.get("close"), errors="coerce"),
+        )
+        updated["ask"] = pd.to_numeric(updated.get("ask"), errors="coerce").where(
+            ~pd.to_numeric(updated.get("ask"), errors="coerce").isna(),
+            pd.to_numeric(updated.get("close"), errors="coerce"),
+        )
+
+    if not _frame_has_actionable_bid_ask(updated):
+        return df_cache, False
+
+    return updated, True
 
 
 def _fetch_history_between_dates(
@@ -284,10 +450,83 @@ def _history_payload_to_frame(data: Any) -> pd.DataFrame:
     df = df.sort_index()
     df.index = df.index.tz_convert(LUMIBOT_DEFAULT_PYTZ)
     df["missing"] = False
-    if "open" in df.columns:
-        df["bid"] = df["open"]
-        df["ask"] = df["open"]
+    # Default quote fields: treat bid/ask as the last-trade/mark series until we can derive a
+    # real bid/ask spread. This ensures the quote-fill model remains functional even when
+    # IBKR does not provide true NBBO history.
+    if "close" in df.columns:
+        df["bid"] = df["close"]
+        df["ask"] = df["close"]
     return df
+
+
+def _derive_bid_ask_from_bid_ask_and_midpoint(
+    bid_ask: pd.DataFrame,
+    midpoint: pd.DataFrame,
+) -> pd.DataFrame:
+    """Derive per-bar bid/ask quotes using IBKR Bid_Ask + Midpoint history.
+
+    IBKR's Client Portal history endpoint returns OHLC bars for different "sources":
+    - Trades: prints-based bars
+    - Midpoint: midpoint bars
+    - Bid_Ask: IBKR-style BID_ASK bars (historically: open/low use bid, close/high use ask)
+
+    The payload does NOT include separate bid/ask fields. For backtesting fills, we want a
+    stable bid/ask at each bar timestamp. The best-effort reconstruction is:
+    - ask_close = Bid_Ask.close
+    - mid_close = Midpoint.close
+    - bid_close = 2 * mid_close - ask_close
+
+    The result is clamped defensively to avoid negative/inverted spreads.
+    """
+    if bid_ask is None or bid_ask.empty or midpoint is None or midpoint.empty:
+        return pd.DataFrame()
+    if "close" not in bid_ask.columns or "close" not in midpoint.columns:
+        return pd.DataFrame()
+
+    joined = (
+        pd.concat(
+            [
+                bid_ask[["close"]].rename(columns={"close": "ask_close"}),
+                midpoint[["close"]].rename(columns={"close": "mid_close"}),
+            ],
+            axis=1,
+            join="inner",
+        )
+        .dropna()
+        .copy()
+    )
+    if joined.empty:
+        return pd.DataFrame()
+
+    ask = pd.to_numeric(joined["ask_close"], errors="coerce")
+    mid = pd.to_numeric(joined["mid_close"], errors="coerce")
+    bid = 2 * mid - ask
+
+    out = pd.DataFrame(index=joined.index)
+    out["bid"] = bid
+    out["ask"] = ask
+
+    invalid = (
+        out["bid"].isna()
+        | out["ask"].isna()
+        | (out["bid"] <= 0)
+        | (out["ask"] <= 0)
+        | (out["bid"] > out["ask"])
+    )
+    if invalid.any():
+        mid_valid = mid > 0
+        use_mid = invalid & mid_valid
+        out.loc[use_mid, "bid"] = mid[use_mid]
+        out.loc[use_mid, "ask"] = mid[use_mid]
+
+        # If midpoint itself is invalid (<=0), leave as NaN so callers can fall back to
+        # the trade/mark close instead of propagating negative prices into fills.
+        use_nan = invalid & ~mid_valid
+        if use_nan.any():
+            out.loc[use_nan, "bid"] = float("nan")
+            out.loc[use_nan, "ask"] = float("nan")
+
+    return out
 
 
 def _merge_frames(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:

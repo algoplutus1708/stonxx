@@ -8,8 +8,12 @@ import pytest
 import requests
 
 from lumibot.credentials import POLYGON_API_KEY
+from lumibot.backtesting import PolygonDataBacktesting
+from lumibot.backtesting.interactive_brokers_rest_backtesting import InteractiveBrokersRESTBacktesting
 from lumibot.entities import Asset
 from lumibot.tools import polygon_helper
+from lumibot.entities.order import Order
+from lumibot.strategies.strategy import Strategy
 
 
 pytestmark = pytest.mark.apitest
@@ -142,3 +146,140 @@ def test_ibkr_crypto_minute_close_series_matches_polygon_reasonably(monkeypatch,
     corr = joined["ibkr"].corr(joined["polygon"])
     assert corr is not None
     assert corr >= 0.98
+
+
+class _ParityBuyHold(Strategy):
+    def initialize(self, parameters=None):
+        self.sleeptime = "1M"
+        self.include_cash_positions = True
+        self._entered = False
+
+    def on_trading_iteration(self):
+        if self._entered:
+            return
+        base = self.parameters["base"]
+        quote = self.parameters["quote"]
+
+        bars = self.get_historical_prices(base, length=2, timestep="minute", quote=quote)
+        if bars is None or getattr(bars, "df", None) is None or bars.df.empty:
+            return
+        last_price = float(bars.df["close"].iloc[-1])
+        if not last_price or last_price <= 0:
+            return
+
+        qty = float(self.cash * 0.95) / last_price
+        if qty <= 0:
+            return
+
+        order = self.create_order(
+            base,
+            qty,
+            Order.OrderSide.BUY,
+            order_type=Order.OrderType.MARKET,
+            quote=quote,
+        )
+        self.submit_order(order)
+        self._entered = True
+
+
+@pytest.mark.parametrize("symbol", ["BTC", "ETH"])
+def test_ibkr_crypto_buyhold_return_is_close_to_polygon(monkeypatch, tmp_path, symbol: str):
+    _require_local_ibkr_downloader()
+
+    polygon_key = (os.environ.get("POLYGON_API_KEY") or POLYGON_API_KEY or "").strip()
+    if not polygon_key:
+        pytest.skip("Missing POLYGON_API_KEY for parity apitest")
+
+    import lumibot.tools.ibkr_helper as ibkr_helper
+
+    ibkr_helper.LUMIBOT_CACHE_FOLDER = tmp_path.as_posix()  # type: ignore[attr-defined]
+    monkeypatch.setattr(polygon_helper, "LUMIBOT_CACHE_FOLDER", tmp_path.as_posix())
+    monkeypatch.setenv("IBKR_CRYPTO_VENUE", "ZEROHASH")
+    monkeypatch.setenv("MARKET", "24/7")
+
+    base = Asset(symbol, asset_type=Asset.AssetType.CRYPTO)
+    quote = Asset("USD", asset_type=Asset.AssetType.FOREX)
+
+    now = datetime.now(timezone.utc)
+    # Seed and derive a window that overlaps known IBKR data.
+    ibkr_helper.get_price_data(
+        asset=base,
+        quote=quote,
+        timestep="minute",
+        start_dt=now - timedelta(minutes=720),
+        end_dt=now,
+        exchange=None,
+        include_after_hours=True,
+    )
+
+    parquet_files = list(tmp_path.rglob("*.parquet"))
+    bars = [p for p in parquet_files if "ibkr" in p.parts and "bars" in p.parts]
+    if not bars:
+        pytest.skip("Unable to seed IBKR bars cache; cannot derive parity window")
+    df_cached = pd.read_parquet(bars[0])
+    if not isinstance(df_cached.index, pd.DatetimeIndex) or df_cached.empty:
+        pytest.skip("IBKR cache parquet invalid/empty")
+
+    end_ts = df_cached.index.max()
+    start_ts = df_cached.index.min()
+    if end_ts.tz is None:
+        end_ts = end_ts.tz_localize("America/New_York")
+    if start_ts.tz is None:
+        start_ts = start_ts.tz_localize("America/New_York")
+    # Keep it short for stability/cost while still enough to trade and compute stats.
+    desired_start = end_ts - pd.Timedelta(hours=4)
+    window_start = max(desired_start, start_ts).to_pydatetime()
+    window_end = end_ts.to_pydatetime()
+
+    ibkr_stats = (tmp_path / f"ibkr_{symbol}_stats.csv").as_posix()
+    poly_stats = (tmp_path / f"poly_{symbol}_stats.csv").as_posix()
+
+    _ParityBuyHold.backtest(
+        datasource_class=InteractiveBrokersRESTBacktesting,
+        backtesting_start=window_start,
+        backtesting_end=window_end,
+        market="24/7",
+        analyze_backtest=True,
+        show_plot=False,
+        show_tearsheet=False,
+        save_tearsheet=False,
+        quiet_logs=True,
+        name=f"IBKR_{symbol}_BUYHOLD",
+        budget=100_000.0,
+        quote_asset=quote,
+        benchmark_asset=base,
+        stats_file=ibkr_stats,
+        parameters={"base": base, "quote": quote},
+    )
+
+    _ParityBuyHold.backtest(
+        datasource_class=PolygonDataBacktesting,
+        backtesting_start=window_start,
+        backtesting_end=window_end,
+        market="24/7",
+        analyze_backtest=True,
+        show_plot=False,
+        show_tearsheet=False,
+        save_tearsheet=False,
+        quiet_logs=True,
+        name=f"POLY_{symbol}_BUYHOLD",
+        budget=100_000.0,
+        quote_asset=quote,
+        benchmark_asset=base,
+        stats_file=poly_stats,
+        polygon_api_key=polygon_key,
+        parameters={"base": base, "quote": quote},
+    )
+
+    df_ibkr_stats = pd.read_csv(ibkr_stats)
+    df_poly_stats = pd.read_csv(poly_stats)
+
+    for df_stats, path in ((df_ibkr_stats, ibkr_stats), (df_poly_stats, poly_stats)):
+        assert "portfolio_value" in df_stats.columns, f"Missing portfolio_value in {path}"
+        assert len(df_stats) >= 50, f"Too few rows in {path}"
+
+    ibkr_return = (df_ibkr_stats["portfolio_value"].iloc[-1] / df_ibkr_stats["portfolio_value"].iloc[0]) - 1
+    poly_return = (df_poly_stats["portfolio_value"].iloc[-1] / df_poly_stats["portfolio_value"].iloc[0]) - 1
+
+    # Not identical (different feeds + different quote-fill semantics), but should be directionally close.
+    assert abs(ibkr_return - poly_return) <= 0.02, f"Return mismatch too large: ibkr={ibkr_return:.4%} poly={poly_return:.4%}"

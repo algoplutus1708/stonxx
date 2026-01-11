@@ -85,7 +85,7 @@ class _IbkrCryptoRoundTrip(Strategy):
             return
 
         if now >= (self._entered_at + timedelta(minutes=60)):
-            position = self.get_position(base, quote=quote)
+            position = self.get_position(self.crypto_assets_to_tuple(base, quote))
             qty = Decimal(str(getattr(position, "quantity", 0) or 0))
             if qty <= 0:
                 return
@@ -301,11 +301,13 @@ def test_ibkr_crypto_warm_backtest_does_not_touch_downloader(monkeypatch, tmp_pa
     quote = Asset("USD", asset_type=Asset.AssetType.FOREX)
 
     # Warm the full requested window so the subsequent backtest shouldn't need downloader calls.
+    # IMPORTANT: the strategy uses `length=2` at the very start of the window; warm the cache with
+    # a small lookback so the first iteration doesn't need to fetch "one bar earlier".
     warmed = ibkr_helper.get_price_data(
         asset=base,
         quote=quote,
         timestep="minute",
-        start_dt=window_start,
+        start_dt=window_start - timedelta(minutes=5),
         end_dt=window_end,
         exchange=None,
         include_after_hours=True,

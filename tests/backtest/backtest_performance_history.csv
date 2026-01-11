@@ -6764,3 +6764,16 @@ timestamp,test_name,data_source,trading_days,execution_time_seconds,git_commit,l
 2026-01-10T18:05:33.713304,test_ibkr_crypto_backtest_produces_tearsheet_and_trade_artifacts,unknown,,9.842,42d1d0cf,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_local_validation_apitest
 2026-01-10T18:10:00.569086,test_ibkr_crypto_backtest_produces_tearsheet_and_trade_artifacts,unknown,,9.349,42d1d0cf,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_local_validation_apitest
 2026-01-10T18:16:26.125783,test_ibkr_crypto_backtest_produces_tearsheet_and_trade_artifacts,unknown,,7.845,42d1d0cf,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_local_validation_apitest
+2026-01-10T18:57:41.924891,test_ibkr_crypto_backtest_smoke_local_fills_market_order[BTC],unknown,,2.723,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_backtest_apitest
+2026-01-10T18:57:44.672552,test_ibkr_crypto_backtest_smoke_local_fills_market_order[ETH],unknown,,2.636,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_backtest_apitest
+2026-01-10T18:57:59.051004,test_ibkr_crypto_backtest_smoke_local_fills_market_order[BTC],unknown,,2.5,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_backtest_apitest
+2026-01-10T18:58:01.588779,test_ibkr_crypto_backtest_smoke_local_fills_market_order[ETH],unknown,,2.439,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_backtest_apitest
+2026-01-10T18:58:04.119520,test_ibkr_crypto_backtest_smoke_local_fills_marketable_limit_orders,unknown,,2.428,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_backtest_apitest
+2026-01-10T18:58:28.946480,test_ibkr_crypto_backtest_produces_tearsheet_and_trade_artifacts,unknown,,12.157,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_local_validation_apitest
+2026-01-10T19:01:06.358192,test_ibkr_crypto_backtest_produces_tearsheet_and_trade_artifacts,unknown,,14.101,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_local_validation_apitest
+2026-01-10T19:01:29.023177,test_ibkr_crypto_backtest_roundtrip_produces_tearsheet_and_trades,unknown,,22.547,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_local_validation_apitest
+2026-01-10T19:01:41.401817,test_ibkr_crypto_warm_backtest_does_not_touch_downloader,unknown,,12.249,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_local_validation_apitest
+2026-01-10T19:02:04.656510,test_ibkr_crypto_minute_close_series_matches_polygon_reasonably[BTC],Polygon,,9.081,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_polygon_parity_apitest
+2026-01-10T19:02:14.576193,test_ibkr_crypto_minute_close_series_matches_polygon_reasonably[ETH],Polygon,,9.82,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_polygon_parity_apitest
+2026-01-10T19:02:31.474486,test_ibkr_crypto_buyhold_return_is_close_to_polygon[BTC],Polygon,,16.798,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_polygon_parity_apitest
+2026-01-10T19:03:52.394360,test_ibkr_crypto_buyhold_return_is_close_to_polygon[ETH],Polygon,,80.784,bf0d0510,4.4.32,,,,,Auto-tracked from test_ibkr_crypto_polygon_parity_apitest

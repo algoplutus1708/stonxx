@@ -59,7 +59,8 @@ def _require_local_ibkr_downloader() -> str:
     return base_url
 
 
-def test_ibkr_crypto_backtest_smoke_local_fills_market_order(monkeypatch, tmp_path):
+@pytest.mark.parametrize("symbol", ["BTC", "ETH"])
+def test_ibkr_crypto_backtest_smoke_local_fills_market_order(monkeypatch, tmp_path, symbol: str):
     _require_local_ibkr_downloader()
 
     import lumibot.tools.ibkr_helper as ibkr_helper
@@ -67,7 +68,7 @@ def test_ibkr_crypto_backtest_smoke_local_fills_market_order(monkeypatch, tmp_pa
     monkeypatch.setattr(ibkr_helper, "LUMIBOT_CACHE_FOLDER", tmp_path.as_posix())
     monkeypatch.setenv("IBKR_CRYPTO_VENUE", "ZEROHASH")
 
-    base = Asset("BTC", asset_type=Asset.AssetType.CRYPTO)
+    base = Asset(symbol, asset_type=Asset.AssetType.CRYPTO)
     quote = Asset("USD", asset_type=Asset.AssetType.FOREX)
 
     # Seed the cache with "latest available" bars (may not overlap now on weekends).
@@ -105,6 +106,10 @@ def test_ibkr_crypto_backtest_smoke_local_fills_market_order(monkeypatch, tmp_pa
     assert "open" in df.columns
     assert "bid" in df.columns
     assert "ask" in df.columns
+    # Quotes should have at least some non-zero spread so market buys hit ask and sells hit bid.
+    spread = (pd.to_numeric(df["ask"], errors="coerce") - pd.to_numeric(df["bid"], errors="coerce")).dropna()
+    assert (spread >= 0).all()
+    assert (spread > 0).any(), "Expected some non-zero bid/ask spread for IBKR crypto"
 
     data_source = InteractiveBrokersRESTBacktesting(
         datetime_start=window_start.to_pydatetime(),
@@ -144,6 +149,10 @@ def test_ibkr_crypto_backtest_smoke_local_fills_market_order(monkeypatch, tmp_pa
         quote=quote,
     )
 
+    # Capture the quote at submit time so we can assert market orders fill at ask.
+    quote_snapshot = broker.get_quote(base, quote=quote)
+    expected_ask = float(getattr(quote_snapshot, "ask"))
+
     strategy.submit_order(order)
     broker.process_pending_orders(strategy)
     strategy._executor.process_queue()
@@ -154,3 +163,101 @@ def test_ibkr_crypto_backtest_smoke_local_fills_market_order(monkeypatch, tmp_pa
     strategy._executor.process_queue()
 
     assert strategy.cash < 100_000.0
+    assert order.is_filled()
+    assert order.get_fill_price() == pytest.approx(expected_ask, rel=1e-6)
+
+
+def test_ibkr_crypto_backtest_smoke_local_fills_marketable_limit_orders(monkeypatch, tmp_path):
+    _require_local_ibkr_downloader()
+
+    import lumibot.tools.ibkr_helper as ibkr_helper
+
+    monkeypatch.setattr(ibkr_helper, "LUMIBOT_CACHE_FOLDER", tmp_path.as_posix())
+    monkeypatch.setenv("IBKR_CRYPTO_VENUE", "ZEROHASH")
+
+    base = Asset("BTC", asset_type=Asset.AssetType.CRYPTO)
+    quote = Asset("USD", asset_type=Asset.AssetType.FOREX)
+
+    now = datetime.now(timezone.utc)
+    ibkr_helper.get_price_data(
+        asset=base,
+        quote=quote,
+        timestep="minute",
+        start_dt=now - timedelta(minutes=120),
+        end_dt=now,
+        exchange=None,
+        include_after_hours=True,
+    )
+
+    parquet_files = list(tmp_path.rglob("*.parquet"))
+    assert parquet_files, "Expected IBKR parquet cache to be written"
+    cached = pd.read_parquet(parquet_files[0])
+    assert not cached.empty, "Expected cached bars to contain data"
+
+    window_end: Optional[pd.Timestamp] = cached.index.max() if isinstance(cached.index, pd.DatetimeIndex) else None
+    assert window_end is not None
+    window_start = window_end - pd.Timedelta(minutes=30)
+
+    data_source = InteractiveBrokersRESTBacktesting(
+        datetime_start=window_start.to_pydatetime(),
+        datetime_end=(window_end + pd.Timedelta(minutes=1)).to_pydatetime(),
+        market="24/7",
+        show_progress_bar=False,
+        log_backtest_progress_to_file=False,
+    )
+    data_source.load_data()
+
+    broker = BacktestingBroker(data_source=data_source)
+    broker.initialize_market_calendars(data_source.get_trading_days_pandas())
+    broker._first_iteration = False
+
+    strategy = _DummyIbkrCryptoStrategy(
+        broker=broker,
+        budget=100_000.0,
+        analyze_backtest=False,
+        parameters={},
+    )
+    strategy._first_iteration = False
+
+    data_source.get_historical_prices_between_dates(
+        (base, quote),
+        timestep="minute",
+        quote=quote,
+        start_date=window_start.to_pydatetime(),
+        end_date=window_end.to_pydatetime(),
+    )
+
+    # Marketable BUY limit should fill at ask.
+    quote0 = broker.get_quote(base, quote=quote)
+    expected_ask = float(getattr(quote0, "ask"))
+    buy = strategy.create_order(
+        base,
+        Decimal("0.01"),
+        Order.OrderSide.BUY,
+        order_type=Order.OrderType.LIMIT,
+        limit_price=Decimal("999999999"),
+        quote=quote,
+    )
+    strategy.submit_order(buy)
+    broker.process_pending_orders(strategy)
+    strategy._executor.process_queue()
+    assert buy.is_filled()
+    assert buy.get_fill_price() == pytest.approx(expected_ask, rel=1e-6)
+
+    # Advance one minute then marketable SELL limit should fill at bid.
+    broker._update_datetime(broker.datetime + timedelta(minutes=1))
+    quote1 = broker.get_quote(base, quote=quote)
+    expected_bid = float(getattr(quote1, "bid"))
+    sell = strategy.create_order(
+        base,
+        Decimal("0.01"),
+        Order.OrderSide.SELL,
+        order_type=Order.OrderType.LIMIT,
+        limit_price=Decimal("0"),
+        quote=quote,
+    )
+    strategy.submit_order(sell)
+    broker.process_pending_orders(strategy)
+    strategy._executor.process_queue()
+    assert sell.is_filled()
+    assert sell.get_fill_price() == pytest.approx(expected_bid, rel=1e-6)
