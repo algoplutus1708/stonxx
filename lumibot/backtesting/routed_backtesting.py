@@ -574,6 +574,9 @@ class RoutedBacktestingPandas(ThetaDataBacktestingPandas):
         return normalized
 
     def _provider_spec_for_asset(self, asset: Asset) -> ProviderSpec:
+        if getattr(self, "_registry", None) is None:
+            # Defensive: some unit tests construct the router via __new__ without running __init__.
+            self._registry = _ProviderRegistry(self)
         asset_type = str(getattr(asset, "asset_type", "") or "").lower()
         raw = self._routing.get(asset_type) or self._routing.get("default") or "thetadata"
         return self._registry.resolve_provider_spec(raw)
@@ -633,4 +636,3 @@ class RoutedBacktestingPandas(ThetaDataBacktestingPandas):
                 timestep = "day"
 
         return super().get_last_price(asset, timestep=timestep, quote=quote, exchange=exchange, **kwargs)
-
