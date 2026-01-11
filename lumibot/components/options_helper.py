@@ -786,7 +786,11 @@ class OptionsHelper:
                                     best_idx = idx
 
                         if best_idx is not None:
-                            for idx in range(max(0, best_idx - 2), min(len(strikes_sorted), best_idx + 3)):
+                            # Add a wider neighborhood around the best strike. The Black–Scholes
+                            # inversion estimate is intentionally coarse (fixed sigma) and can be
+                            # off by a few strikes; ensure we still include the true closest delta
+                            # without falling back to the full binary-walk.
+                            for idx in range(max(0, best_idx - 6), min(len(strikes_sorted), best_idx + 7)):
                                 strike = strikes_sorted[idx]
                                 if strike in strike_deltas:
                                     continue
@@ -988,8 +992,10 @@ class OptionsHelper:
             # selection we prefer "no data" over an expensive fallback; the caller can try a
             # nearby strike instead.
             broker = getattr(self.strategy, "broker", None)
-            is_backtesting = bool(getattr(broker, "IS_BACKTESTING_BROKER", False)) or bool(
-                getattr(self.strategy, "is_backtesting", False)
+            # Only treat these flags as "on" when they're explicitly True. This avoids subtle
+            # truthiness bugs (e.g., when the broker/strategy is a Mock in unit tests).
+            is_backtesting = (getattr(broker, "IS_BACKTESTING_BROKER", False) is True) or (
+                getattr(self.strategy, "is_backtesting", False) is True
             )
             if is_backtesting:
                 self._per_bar_delta_cache[delta_cache_key] = None
