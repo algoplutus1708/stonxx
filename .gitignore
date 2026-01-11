@@ -9,6 +9,7 @@
 lumibot/cache
 *cache*
 !lumibot/tools/backtest_cache.py
+!lumibot/tools/parquet_series_cache.py
 !tests/test_backtest_cache_manager.py
 !docs/remote_cache.md
 generated-docs/
