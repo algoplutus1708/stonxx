@@ -72,6 +72,11 @@ def get_price_data(
     end_local = end_utc.astimezone(LUMIBOT_DEFAULT_PYTZ)
 
     asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    if asset_type == "future" and getattr(asset, "expiration", None) is None:
+        raise ValueError(
+            "IBKR futures require an explicit expiration on Asset(asset_type='future'). "
+            "Use asset_type='cont_future' for continuous futures."
+        )
     effective_exchange = exchange
     if asset_type in {"future", "cont_future"} and not effective_exchange:
         effective_exchange = (os.environ.get("IBKR_FUTURES_EXCHANGE") or "CME").strip().upper()
@@ -909,27 +914,41 @@ def _lookup_conid_crypto(*, asset: Asset, quote: Optional[Asset]) -> int:
     )
     if not isinstance(payload, list):
         raise RuntimeError(f"Unexpected IBKR secdef/search response for crypto: {payload}")
+    fallback_any: Optional[int] = None
+    fallback_quote: Optional[int] = None
     for entry in payload:
         entry_currency = str(entry.get("currency") or "").strip().upper()
+        conid = entry.get("conid")
+        if conid is not None and fallback_any is None:
+            try:
+                fallback_any = int(conid)
+            except Exception:
+                fallback_any = None
         sections = entry.get("sections") or []
         for section in sections:
             if str(section.get("secType") or "").upper() == "CRYPTO":
                 if venue:
                     exch = str(section.get("exchange") or "").upper()
                     if venue not in exch:
+                        # Keep a best-effort fallback if the quote matches but the venue doesn't.
+                        if fallback_quote is None:
+                            try:
+                                fallback_quote = int(conid) if conid is not None else None
+                            except Exception:
+                                fallback_quote = None
                         continue
                 section_currency = str(section.get("currency") or "").strip().upper()
                 resolved_currency = section_currency or entry_currency
                 if desired_quote and resolved_currency and desired_quote != resolved_currency:
                     continue
-                conid = entry.get("conid")
                 if conid is not None:
                     return int(conid)
-    # Fallback: accept the first conid.
-    if payload and not desired_quote:
-        conid = payload[0].get("conid")
-        if conid is not None:
-            return int(conid)
+    # Fallback: prefer any quote-matching crypto conid even if the venue metadata doesn't match.
+    if fallback_quote is not None:
+        return int(fallback_quote)
+    # Final fallback: accept the first conid only when the caller didn't request a specific quote.
+    if fallback_any is not None and not desired_quote:
+        return int(fallback_any)
     raise RuntimeError(
         f"Unable to resolve IBKR crypto conid for {asset.symbol}/{getattr(quote,'symbol',None)} "
         f"(venue={venue or 'AUTO'})."
