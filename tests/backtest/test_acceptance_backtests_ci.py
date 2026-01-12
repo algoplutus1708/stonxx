@@ -106,6 +106,10 @@ def _base_env(repo_root: Path) -> dict[str, str]:
     env.update(
         {
             "IS_BACKTESTING": "True",
+            # Acceptance backtests are intended to validate ThetaData + downloader + S3 warm-cache
+            # behavior. Many Strategy Library demo scripts default to Polygon for minute-level runs,
+            # so force ThetaData here regardless of the script's `datasource_class=` argument.
+            "BACKTESTING_DATA_SOURCE": "thetadata",
             "SHOW_PLOT": "False",
             "SHOW_INDICATORS": "False",
             # Never open the tearsheet in a browser during tests.
