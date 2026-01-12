@@ -484,12 +484,24 @@ class TestDailyDataTimestampComparison:
         print(f"{'='*80}\n")
 
 
+@pytest.fixture(scope="class")
+def intraday_isolated_cache(tmp_path_factory):
+    """Prevent order-dependent failures by isolating ThetaData cache writes for intraday validation."""
+    mp = pytest.MonkeyPatch()
+    cache_dir = tmp_path_factory.mktemp("thetadata_intraday_validation_cache")
+    mp.setenv("LUMIBOT_CACHE_FOLDER", str(cache_dir))
+    mp.setattr(thetadata_helper, "LUMIBOT_CACHE_FOLDER", str(cache_dir), raising=False)
+    yield
+    mp.undo()
+
+
 @pytest.mark.skipif(
     not os.environ.get("POLYGON_API_KEY")
     or not os.environ.get("THETADATA_USERNAME")
     or not os.environ.get("THETADATA_PASSWORD"),
     reason="Requires Polygon + ThetaData credentials",
 )
+@pytest.mark.usefixtures("intraday_isolated_cache")
 class TestIntradayDataComparison:
     """
     Comprehensive intraday interval comparison (5min, 10min, 15min, 30min, hour).
