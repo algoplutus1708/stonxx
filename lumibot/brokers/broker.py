@@ -858,7 +858,11 @@ class Broker(ABC):
                     except Exception:
                         return []
 
-                normalized_chains.enable_lazy_strikes(_load_strikes)
+                # NOTE: Lazy strike fetching can trigger `option/list/strikes` fanout. In
+                # backtesting/CI acceptance runs we enforce a strict warm-cache invariant (no
+                # downloader queue submissions), so never enable lazy strike hydration there.
+                if not bool(getattr(self, "IS_BACKTESTING_BROKER", False)):
+                    normalized_chains.enable_lazy_strikes(_load_strikes)
             except Exception:
                 pass
 

@@ -194,7 +194,31 @@ class BacktestCacheManager:
 
         try:
             started = time.perf_counter()
-            client.download_file(self._settings.bucket, remote_key, str(tmp_path))
+            if hasattr(client, "get_object"):
+                # PERF: `boto3`'s `download_file` uses the high-level S3Transfer manager which can add
+                # substantial overhead when hydrating thousands of *small* cache objects (common in
+                # option-heavy backtests, where each contract has its own parquet file).
+                #
+                # Streaming `get_object` directly to disk avoids that overhead and is materially faster
+                # for small objects. We still write via a temp file + atomic rename to keep the cache
+                # consistent if a download is interrupted.
+                response = client.get_object(Bucket=self._settings.bucket, Key=remote_key)
+                body = response.get("Body")
+                if body is None:
+                    raise RuntimeError(f"S3 get_object missing Body for key={remote_key!r}")
+                with tmp_path.open("wb") as handle:
+                    while True:
+                        chunk = body.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                try:
+                    body.close()
+                except Exception:
+                    pass
+            else:
+                # Test doubles may only implement the legacy `download_file` API.
+                client.download_file(self._settings.bucket, remote_key, str(tmp_path))
             elapsed = time.perf_counter() - started
             downloaded_bytes = 0
             try:

@@ -13,6 +13,13 @@ As of this writing, ThetaData provides historical data for free. If you pay for 
 
 This backtesting method caches the data on your computer making it faster for subsequent backtests. So even if it takes a bit of time the first time, the following backtests will be much faster.
 
+Session close coverage (index/stock minute bars)
+-----------------------------------------------
+
+For some assets, minute-bar feeds are **regular-session (RTH) bounded** (for example, U.S. indexes such as SPX typically have bars from ~09:30 to ~16:00 ET).
+
+In those cases, LumiBot treats **coverage through the session close** as “complete” for backtest cache reuse. This prevents pathological behavior where a backtest end date represented as midnight (or UTC-midnight) would otherwise imply a requirement for bars through ``23:59`` even though the provider does not publish them.
+
 Options pricing and mark-to-market (important)
 ----------------------------------------------
 

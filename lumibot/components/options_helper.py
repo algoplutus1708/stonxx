@@ -361,19 +361,14 @@ class OptionsHelper:
             exp_date = self._normalize_to_trading_expiry(exp_date)
             if (underlying_asset.symbol, exp_date) in invalid_expiries:
                 continue
+            next_retry_at = None
             if cooldown_days and current_dt is not None:
                 exp_key = (underlying_asset.symbol, exp_date, put_or_call.upper())
                 next_retry_at = cooldown.get(exp_key)
-                if next_retry_at is not None and current_dt < next_retry_at:
-                    continue
+            if next_retry_at is not None and current_dt < next_retry_at:
+                continue
 
             attempts += 1
-            available_strikes = chains.strikes(exp_date, put_or_call.upper())
-            if not available_strikes:
-                self.non_existing_expiry_dates.append(
-                    {"underlying_asset_symbol": underlying_asset.symbol, "expiry": exp_date}
-                )
-                continue
 
             max_spread_pct = None
             params = getattr(self.strategy, "parameters", None)
@@ -386,6 +381,53 @@ class OptionsHelper:
                         break
                     except (TypeError, ValueError):
                         max_spread_pct = None
+
+            available_strikes = chains.strikes(exp_date, put_or_call.upper())
+            if not available_strikes:
+                # Fallback: if the chain doesn't provide strikes for this expiry (common when
+                # providers prune strike lists for performance), attempt to validate the requested
+                # strike directly. This avoids any potential lazy strike hydration fanout in
+                # backtests while still allowing strategies to proceed when the target strike is
+                # tradeable.
+                try:
+                    requested_strike = float(rounded_underlying_price)
+                except Exception:
+                    requested_strike = None
+
+                if requested_strike is not None and requested_strike > 0:
+                    option = Asset(
+                        underlying_asset.symbol,
+                        asset_type="option",
+                        expiration=exp_date,
+                        strike=requested_strike,
+                        right=put_or_call,
+                        underlying_asset=underlying_asset,
+                    )
+
+                    if is_theta_backtest:
+                        mark_price, bid, ask = self._get_option_mark_from_quote(option, snapshot=True)
+                        if mark_price is None:
+                            mark_price, bid, ask = self._get_option_mark_from_quote(option, snapshot=False)
+                        if mark_price is not None:
+                            if max_spread_pct is not None and (bid is None or ask is None):
+                                mark_price = None
+                            if mark_price is not None:
+                                self.strategy.log_message(
+                                    f"Target strike {rounded_underlying_price} -> Using requested strike with price data: {requested_strike}",
+                                    color="green",
+                                )
+                                return option
+                    else:
+                        self.strategy.log_message(
+                            f"Target strike {rounded_underlying_price} -> Using requested strike: {requested_strike}",
+                            color="green",
+                        )
+                        return option
+
+                self.non_existing_expiry_dates.append(
+                    {"underlying_asset_symbol": underlying_asset.symbol, "expiry": exp_date}
+                )
+                continue
 
             strikes_sorted = sorted(
                 [float(s) for s in available_strikes if s is not None],
@@ -1490,77 +1532,97 @@ class OptionsHelper:
         data_quality_flags: List[str] = []
         sanitization_notes: List[str] = []
 
-        # Attempt to get quotes first
         quote = None
-        try:
-            quote = self.strategy.get_quote(option_asset)
-        except Exception as exc:
-            if should_log_info:
-                self.strategy.log_message(
-                    f"Error fetching quote for {option_asset}: {exc}",
-                    color="red",
-                )
-
-        if quote is not None:
-            if getattr(quote, "bid", None) is not None:
-                bid = self._coerce_price(getattr(quote, "bid", None), "bid", data_quality_flags, sanitization_notes)
-            if getattr(quote, "ask", None) is not None:
-                ask = self._coerce_price(getattr(quote, "ask", None), "ask", data_quality_flags, sanitization_notes)
-
-        if getattr(option_asset, "asset_type", None) == Asset.AssetType.OPTION:
-            broker = getattr(self.strategy, "broker", None)
-            data_source = getattr(broker, "data_source", None) if broker is not None else None
-            is_theta_backtest = (
-                broker is not None
-                and (
-                    getattr(broker, "IS_BACKTESTING_BROKER", False) is True
-                    or getattr(data_source, "IS_BACKTESTING_DATA_SOURCE", False) is True
-                )
-                and data_source is not None
-                and data_source.__class__.__name__ == "ThetaDataBacktestingPandas"
+        broker = getattr(self.strategy, "broker", None)
+        data_source = getattr(broker, "data_source", None) if broker is not None else None
+        is_theta_backtest = (
+            broker is not None
+            and (
+                getattr(broker, "IS_BACKTESTING_BROKER", False) is True
+                or getattr(data_source, "IS_BACKTESTING_DATA_SOURCE", False) is True
             )
+            and data_source is not None
+            and data_source.__class__.__name__ == "ThetaDataBacktestingPandas"
+        )
 
-            is_daily_cadence = False
-            if is_theta_backtest:
-                # Daily-cadence backtests can have a mismatch between:
-                # - bar-aligned "day" quotes (which can effectively reflect a prior close), and
-                # - intraday option NBBO (which is what execution/fill logic should anchor to).
-                #
-                # Prefer a point-in-time NBBO snapshot for ThetaData options when running daily
-                # cadence, but keep the existing behavior for intraday strategies (and for cases
-                # where snapshot quotes are genuinely missing).
-                try:
-                    sleeptime = getattr(self.strategy, "sleeptime", None)
-                    if isinstance(sleeptime, str) and sleeptime.strip().upper().endswith("D"):
-                        is_daily_cadence = True
-                except Exception:
-                    pass
-                try:
-                    if getattr(data_source, "_timestep", None) == "day":
-                        is_daily_cadence = True
-                except Exception:
-                    pass
+        is_daily_cadence = False
+        if is_theta_backtest:
+            try:
+                sleeptime = getattr(self.strategy, "sleeptime", None)
+                if isinstance(sleeptime, str) and sleeptime.strip().upper().endswith("D"):
+                    is_daily_cadence = True
+            except Exception:
+                pass
+            try:
+                if getattr(data_source, "_timestep", None) == "day":
+                    is_daily_cadence = True
+            except Exception:
+                pass
 
-            if is_theta_backtest and is_daily_cadence:
-                _, snap_bid, snap_ask = self._get_option_mark_from_quote(option_asset, snapshot=True)
-                if snap_bid is not None and snap_ask is not None:
-                    if bid != snap_bid or ask != snap_ask:
-                        data_quality_flags.append("snapshot_nbbo_override")
-                    bid = snap_bid
-                    ask = snap_ask
-            elif (bid is None or ask is None) and is_theta_backtest:
-                # Prefer actionable NBBO from a point-in-time snapshot when bar-aligned quotes omit
-                # bid/ask (common in historical option backtests). Only fall back to `quote.price`
-                # or last-trade pricing when NBBO is unavailable.
-                _, snap_bid, snap_ask = self._get_option_mark_from_quote(option_asset, snapshot=True)
-                if snap_bid is not None and snap_ask is not None:
-                    bid = snap_bid
-                    ask = snap_ask
-                else:
-                    if bid is None and snap_bid is not None:
+        # PERF/CORRECTNESS: In ThetaData daily-cadence backtests, calling Strategy.get_quote() can
+        # trigger expensive day/EOD quote fetches for options, only to be immediately overridden by
+        # the intraday snapshot NBBO (which is the correct execution anchor).
+        #
+        # Prefer snapshot NBBO first. Only fall back to the regular quote path when the snapshot is
+        # missing so we avoid unnecessary downloader/cache churn.
+        if getattr(option_asset, "asset_type", None) == Asset.AssetType.OPTION and is_theta_backtest and is_daily_cadence:
+            _, snap_bid, snap_ask = self._get_option_mark_from_quote(option_asset, snapshot=True)
+            if snap_bid is not None and snap_ask is not None:
+                bid = snap_bid
+                ask = snap_ask
+                # Backwards-compatible flag name used by tests/docs.
+                data_quality_flags.append("snapshot_nbbo_override")
+            else:
+                try:
+                    quote = self.strategy.get_quote(option_asset)
+                except Exception as exc:
+                    if should_log_info:
+                        self.strategy.log_message(
+                            f"Error fetching quote for {option_asset}: {exc}",
+                            color="red",
+                        )
+                if quote is not None:
+                    if getattr(quote, "bid", None) is not None:
+                        bid = self._coerce_price(getattr(quote, "bid", None), "bid", data_quality_flags, sanitization_notes)
+                    if getattr(quote, "ask", None) is not None:
+                        ask = self._coerce_price(getattr(quote, "ask", None), "ask", data_quality_flags, sanitization_notes)
+                    if (bid is None or ask is None) and (snap_bid is not None or snap_ask is not None):
+                        data_quality_flags.append("snapshot_nbbo_partial")
+                        if bid is None and snap_bid is not None:
+                            bid = snap_bid
+                        if ask is None and snap_ask is not None:
+                            ask = snap_ask
+        else:
+            # Attempt to get quotes first (default behavior)
+            try:
+                quote = self.strategy.get_quote(option_asset)
+            except Exception as exc:
+                if should_log_info:
+                    self.strategy.log_message(
+                        f"Error fetching quote for {option_asset}: {exc}",
+                        color="red",
+                    )
+
+            if quote is not None:
+                if getattr(quote, "bid", None) is not None:
+                    bid = self._coerce_price(getattr(quote, "bid", None), "bid", data_quality_flags, sanitization_notes)
+                if getattr(quote, "ask", None) is not None:
+                    ask = self._coerce_price(getattr(quote, "ask", None), "ask", data_quality_flags, sanitization_notes)
+
+            if getattr(option_asset, "asset_type", None) == Asset.AssetType.OPTION and is_theta_backtest:
+                if (bid is None or ask is None):
+                    # Prefer actionable NBBO from a point-in-time snapshot when bar-aligned quotes omit
+                    # bid/ask (common in historical option backtests). Only fall back to `quote.price`
+                    # or last-trade pricing when NBBO is unavailable.
+                    _, snap_bid, snap_ask = self._get_option_mark_from_quote(option_asset, snapshot=True)
+                    if snap_bid is not None and snap_ask is not None:
                         bid = snap_bid
-                    if ask is None and snap_ask is not None:
                         ask = snap_ask
+                    else:
+                        if bid is None and snap_bid is not None:
+                            bid = snap_bid
+                        if ask is None and snap_ask is not None:
+                            ask = snap_ask
 
         has_bid_ask = bid is not None and ask is not None
 
@@ -1984,7 +2046,11 @@ class OptionsHelper:
         if is_backtesting and underlying_symbol and as_of_date is not None:
             disabled_until = self._expiration_validation_disabled_until.get(underlying_symbol)
             if isinstance(disabled_until, date) and as_of_date < disabled_until:
-                skip_quote_validation = True
+                # Only skip quote validation for intraday backtests. In daily-cadence strategies,
+                # returning an unvalidated expiration can cause massive downstream cache churn
+                # (and, in CI acceptance runs, violate the warm-cache invariant).
+                if not is_daily_cadence:
+                    skip_quote_validation = True
 
         # PERF: Quote-based expiration validation can be very expensive in long-window backtests,
         # especially when far-dated expirations are not listed yet (or quote history is sparse).
@@ -2229,19 +2295,6 @@ class OptionsHelper:
                     candidates_to_check = candidates
 
             for exp_str, exp_date in candidates_to_check:
-                # PERF/ROBUSTNESS: For far-dated expirations in historical ThetaData backtests,
-                # strict quote validation is both expensive (requires strike list + quote probes)
-                # and can produce false negatives (sparse historical NBBO coverage). For those
-                # horizons, accept the expiration and let strategies handle missing pricing at
-                # point-of-trade.
-                if is_theta_backtest and as_of_date is not None:
-                    try:
-                        horizon_days = (exp_date - as_of_date).days
-                    except Exception:
-                        horizon_days = None
-                    if horizon_days is not None and horizon_days >= 60:
-                        return exp_date
-
                 strikes = specific_chain.get(exp_str)
                 if not strikes:
                     continue
@@ -2361,10 +2414,15 @@ class OptionsHelper:
                             # probe returns no price signal at all, fall back to the normal quote path
                             # so we don't incorrectly skip otherwise tradeable expirations.
                             if bid is None and ask is None and mark_price is None:
-                                mark_price, bid, ask = self._get_option_mark_from_quote(
-                                    test_option,
-                                    snapshot=False,
-                                )
+                                # ThetaData backtests should not validate expirations using bar-aligned
+                                # quotes: it can turn "no intraday NBBO" into a false-positive validity
+                                # signal and cause downstream cache churn (e.g., selecting far-dated
+                                # expirations with no usable intraday pricing).
+                                if not is_theta_backtest:
+                                    mark_price, bid, ask = self._get_option_mark_from_quote(
+                                        test_option,
+                                        snapshot=False,
+                                    )
                             has_bid_ask = bid is not None or ask is not None
 
                             if has_bid_ask:
@@ -2470,6 +2528,7 @@ class OptionsHelper:
             and as_of_date is not None
             and quote_validation_attempted
             and not skip_quote_validation
+            and not is_daily_cadence
         ):
             disabled_until = as_of_date + timedelta(days=7)
             existing_until = self._expiration_validation_disabled_until.get(underlying_symbol)

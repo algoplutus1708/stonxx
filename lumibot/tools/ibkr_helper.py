@@ -83,6 +83,7 @@ def get_price_data(
     if asset_type == "crypto" and not effective_exchange:
         effective_exchange = (os.environ.get("IBKR_CRYPTO_VENUE") or IBKR_DEFAULT_CRYPTO_VENUE).strip().upper()
 
+    source_was_explicit = source is not None
     history_source = _normalize_history_source(source)
 
     # Normalize timestep classification once so callers can pass "day", "1d", "1day", etc.
@@ -200,7 +201,7 @@ def get_price_data(
     #
     # IMPORTANT (performance): do not do this for daily series (and avoid doing it for large
     # multi-month windows unless required) because it multiplies request volume.
-    if asset_type == "crypto" and str(timestep_component).endswith("minute"):
+    if (not source_was_explicit) and asset_type == "crypto" and str(timestep_component).endswith("minute"):
         df_aug, changed = _maybe_augment_crypto_bid_ask(
             df_cache=df_cache,
             asset=asset,

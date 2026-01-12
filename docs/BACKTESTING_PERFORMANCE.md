@@ -603,6 +603,7 @@ Forward-filling may keep the backtest running, but it can also mask missing data
 
 **Fix patterns**
 - ensure the underlying minute OHLC coverage is correct for the requested trading calendar
+- for Theta index minute OHLC (RTH-bounded), treat **session close** as “complete coverage” (do not require 23:59/UTC-midnight bars)
 - ensure option quotes are requested at times where quotes exist
 - add negative caching for known-missing slices to avoid retry storms
 

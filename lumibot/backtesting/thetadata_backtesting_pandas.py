@@ -860,6 +860,59 @@ class ThetaDataBacktestingPandas(PandasData):
                             "[THETA][DEBUG][END_REQUIREMENT] failed to align intraday option end_requirement",
                             exc_info=True,
                         )
+                # CORRECTNESS + PERFORMANCE: For index minute OHLC in Theta backtests, the provider is
+                # regular-session (RTH) bounded (e.g. ~09:30–16:00 ET for SPX) and does not provide
+                # bars through 23:59/UTC-midnight. If we require coverage through the backtest end
+                # bound (often 23:59 or 18:59 ET depending on how end dates are serialized), the
+                # cache will *never* be "complete" and we can enter a perpetual STALE→REFRESH loop
+                # (observed in SPX0DTEHybridStrangle production runs).
+                #
+                # Clamp the intraday end requirement down to the session close for the end date so
+                # "covered through close" is considered complete.
+                if (
+                    is_index_asset
+                    and require_ohlc_data
+                    and not snapshot_only
+                    and ts_unit in {"minute", "hour"}
+                    and end_requirement is not None
+                ):
+                    try:
+                        from lumibot.tools.helpers import get_trading_days
+
+                        market = os.environ.get("BACKTESTING_MARKET", "NYSE")
+                        close_cache = getattr(self, "_session_close_cache", None)
+                        if close_cache is None:
+                            close_cache = {}
+                            self._session_close_cache = close_cache
+
+                        cache_date = end_requirement.date()
+                        cache_key = (market, cache_date)
+                        if cache_key in close_cache:
+                            cached_close = close_cache.get(cache_key)
+                        else:
+                            schedule = get_trading_days(
+                                market=market,
+                                start_date=end_requirement,
+                                end_date=end_requirement + timedelta(days=2),
+                                tzinfo=self.tzinfo,
+                            )
+                            cached_close = None
+                            if not schedule.empty:
+                                cached_close = schedule.iloc[0]["market_close"]
+                            close_cache[cache_key] = cached_close
+
+                        if cached_close is not None and end_requirement > cached_close:
+                            logger.debug(
+                                "[THETA][DEBUG][END_REQUIREMENT] clamping index intraday end_requirement to session close: %s -> %s",
+                                end_requirement,
+                                cached_close,
+                            )
+                            end_requirement = cached_close
+                    except Exception:
+                        logger.debug(
+                            "[THETA][DEBUG][END_REQUIREMENT] failed to clamp index end_requirement to session close",
+                            exc_info=True,
+                        )
         else:
             end_requirement = (
                 end_anchor
@@ -3162,8 +3215,9 @@ class ThetaDataBacktestingPandas(PandasData):
                     ivl_ms,
                     datastyle="quote",
                     include_after_hours=True,
-                    # Cache the bucketed window (not the full session) so strike/delta probes stay cheap.
-                    prefer_full_session=False,
+                    # Cache the full regular session for stability and to maximize reuse of warmed
+                    # S3 objects (acceptance backtests require the warm-cache invariant).
+                    prefer_full_session=True,
                 )
 
                 def _negative_ttl() -> timedelta:
@@ -3205,8 +3259,32 @@ class ThetaDataBacktestingPandas(PandasData):
                     )
 
                 if current_mode == "day":
+                    # Daily-cadence backtests use a small forward-looking snapshot window to
+                    # account for end-of-minute timestamping (the first "09:30" quote bar can
+                    # appear at ~09:31). Prefer the first two-sided NBBO row within that forward
+                    # window to avoid one-sided quotes at the open causing strategies to skip
+                    # otherwise tradeable contracts (acceptance runs rely on this behavior).
                     row = df_snapshot.iloc[0]
                     row_ts = df_snapshot.index[0]
+                    try:
+                        df_window = df_snapshot
+                        try:
+                            df_window = df_snapshot.loc[start_dt:end_dt]
+                        except Exception:
+                            df_window = df_snapshot
+
+                        if isinstance(df_window, pd.DataFrame) and not df_window.empty:
+                            col_map = {str(c).lower(): c for c in df_window.columns}
+                            bid_col = col_map.get("bid")
+                            ask_col = col_map.get("ask")
+                            if bid_col is not None and ask_col is not None:
+                                mask = df_window[bid_col].notna() & df_window[ask_col].notna()
+                                if bool(mask.any()):
+                                    first_idx = df_window.index[mask.argmax()]  # type: ignore[arg-type]
+                                    row = df_window.loc[first_idx]
+                                    row_ts = first_idx
+                    except Exception:
+                        pass
                 else:
                     # Prefer the last bar at/before dt. If none exist (common at the open due to
                     # end-of-minute timestamping), fall forward to the first bar after dt.
