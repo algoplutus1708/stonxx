@@ -1,6 +1,6 @@
 # Changelog
 
-## 4.4.33 - Unreleased
+## 4.4.33 - 2026-01-12
 
 ### Fixed
 - SMART_LIMIT (live): avoid scanning full tracked order history in the background loop by using the broker’s active-order fast path, preventing high RSS growth in accounts with large historical order lists.
