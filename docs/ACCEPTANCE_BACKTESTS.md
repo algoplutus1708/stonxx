@@ -59,8 +59,8 @@ For full details, see:
 ## Guardrails
 
 - **Do not modify demo strategy files** under `Strategy Library/Demos/`. Fix issues in **LumiBot** (or the data-downloader if proven root cause).
-- Use the shared downloader endpoint (do not hard-code an IP):
-  - `DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080`
+- Use a downloader endpoint appropriate for your environment (do not hard-code private hosts or IPs into the repo):
+  - `DATADOWNLOADER_BASE_URL` must be set (local: `http://localhost:8080`, remote: `https://<your-downloader-host>:8080`)
   - `DATADOWNLOADER_API_KEY` must be set (value lives in env/secrets; do not paste into docs).
 - Wrap long runs with `/Users/robertgrzesik/bin/safe-timeout …`.
 
@@ -85,7 +85,7 @@ cd "/Users/robertgrzesik/Documents/Development/Strategy Library"
 /Users/robertgrzesik/bin/safe-timeout 900s env \
   PYTHONPATH="/Users/robertgrzesik/Documents/Development/lumivest_bot_server/strategies/lumibot" \
   IS_BACKTESTING=True BACKTESTING_DATA_SOURCE=thetadata \
-  DATADOWNLOADER_BASE_URL="http://data-downloader.lumiwealth.com:8080" \
+  DATADOWNLOADER_BASE_URL="http://localhost:8080" \
   SHOW_PLOT=True SHOW_INDICATORS=True SHOW_TEARSHEET=True \
   BACKTESTING_QUIET_LOGS=false BACKTESTING_SHOW_PROGRESS_BAR=true \
   BACKTESTING_START=YYYY-MM-DD BACKTESTING_END=YYYY-MM-DD \

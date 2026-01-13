@@ -74,8 +74,8 @@ In short: **SMART_LIMIT is a first-class execution primitive**.
 ## Constraints / Guardrails
 
 - Never run `git checkout`.
-- Backtests must use the stable downloader URL for ThetaData:
-  - `DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080`
+- Backtests must use the downloader URL from your runtime environment:
+  - `DATADOWNLOADER_BASE_URL=https://<your-downloader-host>:8080` (remote) or `http://localhost:8080` (local)
 - Do not break:
   - legacy unit tests
   - acceptance backtests

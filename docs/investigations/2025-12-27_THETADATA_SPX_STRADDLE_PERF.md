@@ -12,7 +12,7 @@ Strategy Library command (warm cache focus):
 cd "/Users/robertgrzesik/Documents/Development/Strategy Library"
 env PYTHONPATH="/Users/robertgrzesik/Documents/Development/lumivest_bot_server/strategies/lumibot" \
   IS_BACKTESTING=True BACKTESTING_DATA_SOURCE=thetadata \
-  DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080 \
+  DATADOWNLOADER_BASE_URL=https://<your-downloader-host>:8080 \
   BACKTESTING_START=2024-12-31 BACKTESTING_END=2025-12-20 \
   python3 "Demos/SPX Short Straddle Intraday (Copy).py"
 ```
@@ -37,4 +37,3 @@ env PYTHONPATH="/Users/robertgrzesik/Documents/Development/lumivest_bot_server/s
 
 - If we want to avoid option OHLC downloads entirely (when a strategy truly doesn’t need trade prints), we should store **quote-only vs OHLC** datasets separately (no column-mismatch merges), or implement a safe prefetch/update strategy that doesn’t trigger concat dtype warnings.
 - Production wall-time gap vs local likely reflects instance CPU + cache hit rate + downloader latency; adding detailed per-backtest timing breakdowns (download vs sim) to the status payload will make this measurable.
-

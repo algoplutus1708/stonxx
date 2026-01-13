@@ -25,7 +25,8 @@ This repo is frequently edited by **multiple AI sessions**. To avoid lost work:
   - If a new env var is truly required for a user-facing feature, document it in `docsrc/environment_variables.rst` in the same PR.
 
 1. **Never launch ThetaTerminal locally WITH PRODUCTION CREDENTIALS.** Production has the only licensed session for that account. Starting the jar with prod credentials (even briefly or via Docker) instantly terminates the prod connection and halts all customers.
-2. **Use the shared downloader endpoint for backtests.** All tests/backtests must set `DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080` and `DATADOWNLOADER_API_KEY=<secret>`. Do not short-cut by hitting Theta directly (and avoid hard-coded IPs—they can change on redeploy).
+2. **Use the downloader for backtests.** All tests/backtests must set `DATADOWNLOADER_BASE_URL` and `DATADOWNLOADER_API_KEY` via the runtime environment. Do not short-cut by hitting Theta directly.
+3. **Never hardcode or share private downloader URLs.** Do not paste real downloader hostnames/URLs into code, docs, tests, logs, AGENTS, or CLAUDE; use placeholders (e.g., `http://localhost:8080` or `https://<your-downloader-host>:8080`) and refer to `DATADOWNLOADER_BASE_URL`.
 
 ### Dev Credentials for Local ThetaTerminal Testing (SAFE)
 

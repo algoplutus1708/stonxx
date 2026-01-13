@@ -119,7 +119,8 @@ This page documents environment variables used by LumiBot, with an emphasis on *
 
 ### `DATADOWNLOADER_BASE_URL`
 - Purpose: Points LumiBot at the remote downloader service.
-- Example: `http://data-downloader.lumiwealth.com:8080`
+- Example (local): `http://localhost:8080`
+- Example (remote): `https://<your-downloader-host>:8080`
 
 ### `DATADOWNLOADER_API_KEY` / `DATADOWNLOADER_API_KEY_HEADER`
 - Purpose: Authentication for the downloader service.

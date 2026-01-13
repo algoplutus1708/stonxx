@@ -172,7 +172,7 @@ DataSource (ABC)
 
 Backtests are intended to use the **remote downloader** service, not a locally-started ThetaTerminal.
 
-- Base URL: `http://data-downloader.lumiwealth.com:8080`
+- Base URL: `http://localhost:8080` (local) or `https://<your-downloader-host>:8080` (remote)
 - Avoid hard-coded downloader IPs (they can change on redeploy)
 - Local downloader code checkout: `Documents/Development/botspot_data_downloader`
 
@@ -612,7 +612,7 @@ BACKTESTING_QUIET_LOGS=false  # useful when debugging (otherwise logs may be emp
 ```bash
 THETADATA_USERNAME=xxx
 THETADATA_PASSWORD=xxx
-DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080  # Data Downloader URL (preferred)
+DATADOWNLOADER_BASE_URL=http://localhost:8080  # Data Downloader URL (set to your environment)
 DATADOWNLOADER_API_KEY=xxx
 DATADOWNLOADER_API_KEY_HEADER=X-Downloader-Key  # default header name used by downloader
 DATADOWNLOADER_SKIP_LOCAL_START=true  # Don't start local ThetaTerminal
@@ -631,7 +631,7 @@ LUMIBOT_CACHE_MODE=readwrite
 ### ThetaData Rules (from AGENTS.md)
 
 1. **NEVER run ThetaTerminal locally** - Only use the Data Downloader
-2. **Use the shared downloader endpoint** - Set `DATADOWNLOADER_BASE_URL`
+2. **Use the downloader endpoint from your environment** - Set `DATADOWNLOADER_BASE_URL`
 3. **Respect queue/backoff** - Handle `{"error":"queue_full"}` responses
 4. **Long commands need safe-timeout** - Use `safe-timeout` wrapper
 

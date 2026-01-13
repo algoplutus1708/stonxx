@@ -11,7 +11,7 @@ This doc records one profiled production run and a comparable profiled local run
 - Window: `2025-01-06 → 2025-12-24`
 - Flags (prod-like + profiling):
   - `BACKTESTING_DATA_SOURCE=thetadata`
-  - `DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080`
+  - `DATADOWNLOADER_BASE_URL=https://<your-downloader-host>:8080`
   - `SHOW_PLOT=True`, `SHOW_INDICATORS=True`, `SHOW_TEARSHEET=True`
   - `BACKTESTING_QUIET_LOGS=false`, `BACKTESTING_SHOW_PROGRESS_BAR=true`
   - `BACKTESTING_PROFILE=yappi`
@@ -60,4 +60,3 @@ Key difference observed in logs:
    - investigate downloader throughput / queue contention
    - investigate ECS CPU/memory sizing
    - consider additional caching/negative-caching tweaks (only with accuracy preserved)
-

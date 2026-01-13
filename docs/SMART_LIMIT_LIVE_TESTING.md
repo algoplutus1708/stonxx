@@ -5,6 +5,15 @@ This repo has two layers of coverage:
 - **Unit tests** (deterministic): validate SMART_LIMIT math + state machine behavior without broker APIs.
 - **API tests** (`pytest -m apitest`): place real paper orders to validate submission + repricing + fills.
 
+### Background loop note (memory-constrained workers)
+
+In live mode, LumiBot runs a small background loop (`StrategyExecutor.check_queue`) that periodically calls
+`_process_smart_limit_orders()`. This is required so SMART_LIMIT orders can be repriced/canceled over time without
+waiting for the strategy’s main `on_trading_iteration` cadence.
+
+**Pitfall:** the SMART_LIMIT loop must stay cheap when *no* SMART_LIMIT orders exist. Avoid scanning large historical
+order lists here; prefer broker “active order” fast paths (e.g., `broker.get_active_tracked_orders(...)`).
+
 ### 1) One-time setup
 
 - Put broker creds in `.env` (repo root). The tests load it automatically.
@@ -30,6 +39,11 @@ These are “fast confidence” tests (stocks + single-leg options + 4-leg optio
   tests/test_smart_limit_live_alpaca.py \
   tests/test_smart_limit_live_tradier.py
 ```
+
+Notes:
+- Alpaca smoke submits+then cancels an ultra-low limit order (should not fill).
+- Tradier smoke includes a paper connectivity check; the submit/cancel lifecycle test requires explicit live config
+  (`TRADIER_IS_PAPER=false`) and should be run only when you intend to touch the live API.
 
 ### 4) Run live matrix (market hours)
 

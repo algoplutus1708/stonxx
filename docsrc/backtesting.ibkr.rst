@@ -13,7 +13,7 @@ Quick Start
 
 .. code-block:: bash
 
-   export DATADOWNLOADER_BASE_URL="http://data-downloader.lumiwealth.com:8080"
+   export DATADOWNLOADER_BASE_URL="http://localhost:8080"
    export DATADOWNLOADER_API_KEY="..."
 
 3. Select IBKR for backtesting:

@@ -139,7 +139,8 @@ DATADOWNLOADER_BASE_URL
 ^^^^^^^^^^^^^^^^^^^^^^^
 
 - Purpose: Points LumiBot at a remote downloader service that can fetch ThetaData on demand.
-- Example: ``http://data-downloader.lumiwealth.com:8080``
+- Example (local): ``http://localhost:8080``
+- Example (remote): ``https://<your-downloader-host>:8080``
 
 DATADOWNLOADER_API_KEY / DATADOWNLOADER_API_KEY_HEADER
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

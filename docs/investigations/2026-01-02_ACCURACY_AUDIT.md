@@ -5,7 +5,7 @@ This is a structured, human-readable audit checklist for the ThetaData acceptanc
 Scope:
 - LumiBot `4.4.21` local runs
 - Production-like flags (`BACKTESTING_QUIET_LOGS=false`, progress bar on, plots/indicators/tearsheet on)
-- Remote downloader: `DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080`
+- Remote downloader: `DATADOWNLOADER_BASE_URL=https://<your-downloader-host>:8080`
 - Artifacts written to `Strategy Library/logs/`
 
 These notes are intentionally “what to look for” + “what I observed”, not hard assertions.
