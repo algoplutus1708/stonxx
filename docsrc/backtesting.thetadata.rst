@@ -18,7 +18,7 @@ Session close coverage (index/stock minute bars)
 
 For some assets, minute-bar feeds are **regular-session (RTH) bounded** (for example, U.S. indexes such as SPX typically have bars from ~09:30 to ~16:00 ET).
 
-In those cases, LumiBot treats **coverage through the session close** as “complete” for backtest cache reuse. This prevents pathological behavior where a backtest end date represented as midnight (or UTC-midnight) would otherwise imply a requirement for bars through ``23:59`` even though the provider does not publish them.
+In those cases, LumiBot treats **coverage through the last trading session close at or before the requested end** as “complete” for backtest cache reuse (holiday/weekend/early-close safe). This prevents pathological behavior where a backtest end date represented as midnight (or UTC-midnight) would otherwise imply a requirement for bars through ``23:59`` even though the provider does not publish them.
 
 Options pricing and mark-to-market (important)
 ----------------------------------------------

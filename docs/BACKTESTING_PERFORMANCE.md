@@ -607,6 +607,29 @@ Forward-filling may keep the backtest running, but it can also mask missing data
 - ensure option quotes are requested at times where quotes exist
 - add negative caching for known-missing slices to avoid retry storms
 
+See also:
+- `docs/investigations/2026-01-13_SPX_INTRADAY_STALE_LOOP_FIX.md` (production “ETA days” incident, root cause, fix, and regression tests)
+
+### 7.8 Case study: “ETA days” SPX intraday STALE loop (10×–100× lever)
+
+If you ever see a backtest that appears “stuck” and the logs show:
+- `[THETA][CACHE][STALE] prefetch_complete but coverage insufficient` repeating
+- extremely high `Submitted to queue` rates for `v3/index/history/ohlc` (SPX minute OHLC)
+
+...the fastest path to a 10× win is almost always to restore the warm invariant:
+- **warm means** `queue_submits == 0` (same S3 namespace, fresh local disk cache)
+
+This specific failure mode was fixed by clamping the intraday “coverage required” end timestamp for index assets to the **last trading session close at or before** the end requirement (holiday/weekend/early-close safe). See:
+- `docs/investigations/2026-01-13_SPX_INTRADAY_STALE_LOOP_FIX.md`
+
+#### Why this matters for “S3 vs EBS/EFS” discussions
+
+Before pursuing storage changes, validate whether warm runs are actually warm and where time goes:
+- If “warm” still submits to the downloader, storage changes do not help (you’re dominated by queue work).
+- If “warm” has `queue_submits≈0`, profile with yappi to see if the run is CPU-bound or S3-IO-bound.
+
+In a prod-like warm baseline for the client benchmark `SPX0DTEHybridStrangle`, yappi showed `s3_io` was ~1% and `pandas_numpy` dominated. That implies EBS/EFS would not produce an order-of-magnitude speedup for warm runs of that strategy (CPU/artifacts are the next levers).
+
 ---
 
 ## 8) Profiling with YAPPI (how to attribute time)

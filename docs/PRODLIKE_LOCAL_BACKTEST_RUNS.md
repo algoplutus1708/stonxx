@@ -67,3 +67,66 @@ Warm proof:
 - keep the same `--cache-version`
 - change only `--cache-folder` to a new empty folder
 - expect near-zero “Submitted to queue” lines
+
+## Client benchmark: `SPX0DTEHybridStrangle` (SPX Short Straddle Intraday Copy 4)
+
+This is the current “must-be-fast” benchmark strategy (client-facing).
+
+Strategy file:
+- `/Users/robertgrzesik/Documents/Development/Strategy Library/Demos/SPX Short Straddle Intraday (Copy 4).py`
+
+Related investigation (why “ETA days” happened in prod for SPX strategies):
+- `docs/investigations/2026-01-13_SPX_INTRADAY_STALE_LOOP_FIX.md`
+
+### Cold run (new S3 namespace)
+
+```bash
+RUNID="$(date +%Y%m%d_%H%M%S)"
+CACHE_DIR="/Users/robertgrzesik/Documents/Development/tmp/lumibot_cache_spx_${RUNID}"
+mkdir -p "$CACHE_DIR"
+
+/Users/robertgrzesik/bin/safe-timeout 900s \
+  python3 scripts/run_backtest_prodlike.py \
+    --label spx0dtehybridstrangle_cold \
+    --cache-folder "$CACHE_DIR" \
+    --cache-version "spx_cold_${RUNID}" \
+    --main "/Users/robertgrzesik/Documents/Development/Strategy Library/Demos/SPX Short Straddle Intraday (Copy 4).py" \
+    --start 2025-02-03 \
+    --end 2025-02-07
+```
+
+### Warm run (same S3 namespace; yappi enabled)
+
+Warm definition: `queue_submits == 0` (same `--cache-version`, new empty local `--cache-folder`).
+
+```bash
+RUNID="$(date +%Y%m%d_%H%M%S)"
+CACHE_DIR="/Users/robertgrzesik/Documents/Development/tmp/lumibot_cache_spx_warm_${RUNID}"
+mkdir -p "$CACHE_DIR"
+
+/Users/robertgrzesik/bin/safe-timeout 900s \
+  python3 scripts/run_backtest_prodlike.py \
+    --label spx0dtehybridstrangle_warm \
+    --profile yappi \
+    --cache-folder "$CACHE_DIR" \
+    --cache-version "<THE_SAME_CACHE_VERSION_USED_FOR_COLD>" \
+    --main "/Users/robertgrzesik/Documents/Development/Strategy Library/Demos/SPX Short Straddle Intraday (Copy 4).py" \
+    --start 2025-02-03 \
+    --end 2025-02-07
+```
+
+### Where the outputs go (always)
+
+For each run, the runner creates a clean workdir under:
+- `~/Documents/Development/backtest_runs/<run_id>/`
+
+Important artifacts:
+- `~/Documents/Development/backtest_runs/<run_id>/metrics.json`
+  - wall time (seconds)
+  - `queue_submits`
+  - `thetadata_cache_stale`
+  - top endpoint families (by `path=...`)
+- `~/Documents/Development/backtest_runs/<run_id>/logs/*_profile_yappi.csv` (when `--profile yappi` is used)
+
+Practical advice:
+- Don’t jump to “S3 is slow” conclusions until you’ve run the warm run and checked `metrics.json`.

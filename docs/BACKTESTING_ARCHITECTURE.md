@@ -343,6 +343,26 @@ ThetaData’s EOD day data is keyed by trading date, but returned timestamps may
 
 Primary location: `lumibot/tools/thetadata_helper.py` (day-index alignment helpers).
 
+## Intraday Bars: Session-Close Coverage (CRITICAL)
+
+ThetaData index/stock intraday (minute/hour) feeds are often **regular-session (RTH) bounded**.
+For example, SPX index minute OHLC typically yields ~391 bars/day and ends at the trading session close (or early close).
+
+**Failure mode (performance + correctness):**
+- If the backtest “required end coverage” timestamp is interpreted literally as `23:59` (or `18:59` ET due to UTC-midnight transport),
+  the cache can never be considered “complete” for an RTH-bounded feed.
+- This can trigger an endless loop of:
+  - `[THETA][CACHE][STALE] prefetch_complete but coverage insufficient` and
+  - `Submitted to queue ... v3/index/history/ohlc ...`
+  even on “warm” runs.
+
+**Fix direction (implemented for ThetaData index intraday):**
+- Define “coverage complete” for index intraday by the **last trading session close at or before** the end requirement
+  (holiday/weekend/early-close safe), rather than requiring bars through an arbitrary end datetime.
+
+See:
+- `docs/investigations/2026-01-13_SPX_INTRADAY_STALE_LOOP_FIX.md`
+
 **Split Handling (FIXED - Nov 28, 2025)**
 
 ✅ **ThetaData split handling is now working correctly.**
