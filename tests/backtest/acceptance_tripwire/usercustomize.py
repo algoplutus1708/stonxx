@@ -52,17 +52,6 @@ def _normalize_downloader_base_url(base_url: str) -> str:
     if not host:
         return normalized
 
-    # If the env points at a numeric IP, LumiBot rewrites to the stable DNS name.
-    # Mirror that here so the tripwire still triggers.
-    try:
-        import ipaddress
-
-        ip = ipaddress.ip_address(host)
-        if ip.version == 4 and host not in {"127.0.0.1", "0.0.0.0"}:
-            return "http://data-downloader.lumiwealth.com:8080"
-    except Exception:
-        pass
-
     return normalized
 
 
@@ -71,8 +60,7 @@ def _matches_downloader(url: str, normalized_base_url: str) -> bool:
         return False
     url = str(url)
     base = normalized_base_url.rstrip("/")
-    stable = "http://data-downloader.lumiwealth.com:8080"
-    return url.startswith(base) or url.startswith(stable)
+    return url.startswith(base)
 
 
 def _install_tripwire() -> None:

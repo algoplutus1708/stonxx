@@ -339,7 +339,7 @@ WAIT_TIME = 60
 MAX_DAYS = 30
 CACHE_SUBFOLDER = "thetadata"
 DEFAULT_THETA_BASE = "http://127.0.0.1:25503"
-DEFAULT_DOWNLOADER_BASE_URL = "http://data-downloader.lumiwealth.com:8080"
+DEFAULT_DOWNLOADER_BASE_URL = "http://localhost:8080"
 _downloader_base_env = os.environ.get("DATADOWNLOADER_BASE_URL")
 _theta_fallback_base = os.environ.get("THETADATA_BASE_URL", DEFAULT_THETA_BASE)
 
@@ -350,9 +350,9 @@ def _normalize_base_url(raw: Optional[str]) -> str:
     raw = raw.strip()
     if not raw:
         return DEFAULT_THETA_BASE
-    # Standardize away from deprecated/ephemeral endpoints.
-    if "44.192.43.146" in raw or "test-server" in raw:
-        raw = DEFAULT_DOWNLOADER_BASE_URL
+    # Do not rewrite environment-specific endpoints to any baked-in host.
+    # If a user has an old hard-coded host/IP, keep it (so it's debuggable) and
+    # allow downstream calls to fail loudly.
     if not raw.startswith(("http://", "https://")):
         raw = f"http://{raw}"
     return raw.rstrip("/")

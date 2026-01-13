@@ -93,11 +93,13 @@ QUEUE_SUBMIT_BACKOFF_BASE = float(os.environ.get("THETADATA_QUEUE_SUBMIT_BACKOFF
 QUEUE_SUBMIT_BACKOFF_MAX = float(os.environ.get("THETADATA_QUEUE_SUBMIT_BACKOFF_MAX", "30"))
 QUEUE_SUBMIT_BACKOFF_JITTER_PCT = float(os.environ.get("THETADATA_QUEUE_SUBMIT_BACKOFF_JITTER_PCT", "0.1"))
 
-STABLE_DOWNLOADER_BASE_URL = "http://data-downloader.lumiwealth.com:8080"
-
-
 def _normalize_downloader_base_url(base_url: str) -> str:
-    """Normalize the downloader base URL and rewrite legacy numeric IPs to the stable DNS name."""
+    """Normalize the downloader base URL.
+
+    Notes:
+    - This function intentionally does **not** rewrite hosts. The downloader base URL is an
+      environment-specific setting and must not be hard-coded to any private endpoint.
+    """
     normalized = (base_url or "").strip().rstrip("/")
     if not normalized:
         return normalized
@@ -110,17 +112,8 @@ def _normalize_downloader_base_url(base_url: str) -> str:
     if host.lower() in {"localhost", "127.0.0.1", "0.0.0.0"}:
         return normalized_with_scheme
 
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        return normalized_with_scheme
-
-    logger.warning(
-        "DATADOWNLOADER_BASE_URL uses a numeric IP (%s); rewriting to %s",
-        host,
-        STABLE_DOWNLOADER_BASE_URL,
-    )
-    return STABLE_DOWNLOADER_BASE_URL
+    # Numeric IPs are valid; keep them as-is.
+    return normalized_with_scheme
 
 
 @dataclass
@@ -166,7 +159,7 @@ class QueueClient:
         """Initialize the queue client.
 
         Args:
-            base_url: Data Downloader base URL (e.g., http://data-downloader.lumiwealth.com:8080)
+            base_url: Data Downloader base URL (e.g., http://localhost:8080 or https://<your-downloader-host>:8080)
             api_key: API key for Data Downloader
             api_key_header: Header name for API key
             poll_interval: Seconds between status polls (default 10ms)
@@ -1087,7 +1080,7 @@ def queue_request(
     - Permanent error detection (moves to DLQ, raises exception)
 
     Args:
-        url: Full URL (e.g., http://data-downloader.lumiwealth.com:8080/v3/stock/history/ohlc)
+        url: Full URL (e.g., http://localhost:8080/v3/stock/history/ohlc)
         querystring: Query parameters
         headers: Optional headers
         timeout: Max seconds to wait (0 = wait forever)
