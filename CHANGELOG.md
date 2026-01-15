@@ -1,5 +1,63 @@
 # Changelog
 
+## 4.4.33 - 2026-01-12
+
+### Fixed
+- SMART_LIMIT (live): avoid scanning full tracked order history in the background loop by using the broker’s active-order fast path, preventing high RSS growth in accounts with large historical order lists.
+- Backtesting (router): make dataset lookup timestep-aware so minute requests don’t accidentally resolve to daily Data objects, and routed crypto assets passed as `(base, quote)` work reliably.
+- Backtesting (router): refactor multi-provider routing to a provider registry + adapters (no hard-coded branching), add `alpaca`/`ccxt` support, and allow CCXT exchange-id aliases like `coinbase`/`kraken` (case/sep-insensitive).
+- IBKR (crypto): normalize daily timestep handling (`day`/`1d`/`1day`) so crypto daily bars consistently use the derived-daily path.
+- ThetaData: prevent acceptance backtests from hitting the downloader queue by enforcing CI-only warm-cache guardrails consistently (local runs behave like GitHub CI).
+- ThetaData: treat **session close** as “complete coverage” for index minute OHLC to avoid perpetual STALE→REFRESH loops when backtest end dates are represented as midnight.
+- Backtest cache (S3): speed up warm-cache hydration by streaming small objects via `get_object` instead of `download_file` transfer manager overhead.
+
+## 4.4.32 - 2026-01-10
+
+### Added
+- Runtime telemetry: lightweight memory/health JSON lines (`LUMIBOT_TELEMETRY ...`) for diagnosing OOMs in long-running live workers.
+- Broker API smoke apitests: basic Alpaca and Tradier connectivity + order lifecycle checks (paper/live as available).
+
+### Fixed
+- Live (Tradier): treat `submitted/open/new` as equivalent to reduce repeated NEW events under polling; bound live trade-event history to avoid unbounded memory growth in long-running workers.
+- Live (Tradier): avoid heavy DataFrame copy chains when cleaning orders; skip ingesting large historical *closed* order lists on the first poll to prevent startup memory spikes in accounts with long histories.
+
+## 4.4.31 - 2026-01-09
+
+Deploy marker: `d5c6b730` ("deploy 4.4.31")
+
+### Added
+- SMART_LIMIT: live matrix apitests + runner scripts; expanded unit coverage for edge cases.
+- Investigations/docs: production endpoint breakdown notes and an expanded backtesting performance playbook.
+- ThetaData: per-asset download progress reporting for option-chain strike scans (exposed via `download_status`).
+
+### Changed
+- Acceptance backtests now run in CI (no longer marked `apitest`); baselines were refreshed for LEAPS + MELI; CI caps were raised for long full-year strategies due to runner variability.
+- CI policy: use pytest markers (not env vars) for opt-in/slow tests; some slow ThetaData backtest tests were made opt-in, then re-enabled once bounded.
+- Backtests under pytest no longer auto-open HTML artifacts (plots/indicators/tearsheets) in a browser.
+- Strategy collaboration workflow: clarified “shared version branch” conventions.
+
+### Fixed
+- ThetaData: reduced option-chain fanout and improved warm-cache parity (reuse chain cache under constraints; prefetch strikes only for head+tail expirations when unconstrained; bounded intraday chain defaults).
+- ThetaData: improved intraday cache coverage and corrected daily option MTM behavior.
+- Polygon: reduced split-cache rate limit thrash.
+- SMART_LIMIT: hardened behavior for quote/stream failures.
+- Backtesting progress: improved per-asset `download_status` for clearer “what is downloading” diagnostics.
+
+### Removed
+- ⚠️ Removed ThetaData chain default-horizon env vars (`THETADATA_CHAIN_DEFAULT_MAX_DAYS_OUT*`). Chain default horizons are now fixed and covered by tests.
+- Removed the short-lived `LUMIBOT_DISABLE_UI` env var (use `SHOW_PLOT/SHOW_INDICATORS/SHOW_TEARSHEET` + pytest non-interactive behavior instead).
+
+## 4.4.30 - 2026-01-06
+
+Version bump marker: `76b31467` ("Docs/tests: normalize artifacts + bump version")
+
+### Added
+- Backtesting performance playbook and production/local parity notes.
+- `LUMIBOT_DISABLE_DOTENV` to disable recursive `.env` scanning in prod-like runs.
+
+### Fixed
+- ThetaData: filtered intraday parquet loads to reduce memory footprint; daily option MTM fixes.
+
 ## 4.4.29 - 2026-01-06
 
 Deploy marker: `b8c6a839` ("deploy 4.4.29")

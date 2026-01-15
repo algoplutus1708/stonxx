@@ -1698,7 +1698,16 @@ class Strategy(_Strategy):
                 if order.order_class == Order.OrderClass.MULTILEG and order.child_orders:
                     return self._submit_multileg_smart_limit(order)
 
-                quote = self.get_quote(order.asset, quote=order.quote, exchange=order.exchange)
+                try:
+                    quote = self.get_quote(order.asset, quote=order.quote, exchange=order.exchange)
+                except Exception as exc:
+                    self.log_message(
+                        f"[SMART_LIMIT] Quote fetch failed for {order.asset} ({exc}); downgrading to market.",
+                        color="yellow",
+                    )
+                    order.smart_limit = None
+                    order.order_type = Order.OrderType.MARKET
+                    return self.broker.submit_order(order)
                 bid = getattr(quote, "bid", None)
                 ask = getattr(quote, "ask", None)
                 if bid is None or ask is None or bid < 0 or ask <= 0:
@@ -1721,8 +1730,8 @@ class Strategy(_Strategy):
                 order._smart_limit_state = {
                     "created_at": time.monotonic(),
                     "step_index": 0,
-                    "steps": order.smart_limit.get_step_count(),
-                    "step_seconds": order.smart_limit.get_step_seconds(),
+                    "steps": max(1, order.smart_limit.get_step_count()),
+                    "step_seconds": max(1, order.smart_limit.get_step_seconds()),
                     "final_hold_seconds": order.smart_limit.get_final_hold_seconds(),
                 }
 
@@ -1749,9 +1758,13 @@ class Strategy(_Strategy):
 
         quote_data: list[tuple[Order, float | None, float | None]] = []
         for leg in child_orders:
-            quote = self.get_quote(leg.asset, quote=leg.quote, exchange=leg.exchange)
-            bid = getattr(quote, "bid", None)
-            ask = getattr(quote, "ask", None)
+            try:
+                quote = self.get_quote(leg.asset, quote=leg.quote, exchange=leg.exchange)
+                bid = getattr(quote, "bid", None)
+                ask = getattr(quote, "ask", None)
+            except Exception:
+                bid = None
+                ask = None
             quote_data.append((leg, bid, ask))
 
         if any(bid is None or ask is None or bid < 0 or ask <= 0 for _, bid, ask in quote_data):
@@ -1822,8 +1835,8 @@ class Strategy(_Strategy):
         state = {
             "created_at": time.monotonic(),
             "step_index": 0,
-            "steps": smart_limit.get_step_count(),
-            "step_seconds": smart_limit.get_step_seconds(),
+            "steps": max(1, smart_limit.get_step_count()),
+            "step_seconds": max(1, smart_limit.get_step_seconds()),
             "final_hold_seconds": smart_limit.get_final_hold_seconds(),
             "multileg_order_type": initial_type,
         }
@@ -4912,10 +4925,10 @@ class Strategy(_Strategy):
         pandas_data: List[Data] = None,
         quote_asset: Asset = Asset(symbol="USD", asset_type="forex"),
         starting_positions: dict = None,
-        show_plot: bool = True,
+        show_plot: bool | None = None,
         tearsheet_file: str = None,
         save_tearsheet: bool = True,
-        show_tearsheet: bool = True,
+        show_tearsheet: bool | None = None,
         parameters: dict = {},
         buy_trading_fees: List[TradingFee] = [],
         sell_trading_fees: List[TradingFee] = [],
@@ -4923,7 +4936,7 @@ class Strategy(_Strategy):
         sell_trading_slippages: List[TradingSlippage] = [],
         polygon_api_key: str = None,
         indicators_file: str = None,
-        show_indicators: bool = True,
+        show_indicators: bool | None = None,
         save_logfile: bool = False,
         thetadata_username: str = None,
         thetadata_password: str = None,

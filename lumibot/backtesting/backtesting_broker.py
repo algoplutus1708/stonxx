@@ -1116,52 +1116,103 @@ class BacktestingBroker(Broker):
             logger.error(f"Cannot cash settle non-option contract {position.asset}")
             return
 
-        # First check if the option asset has an underlying asset
-        if position.asset.underlying_asset is None:
-            # Create a stock asset for the underlying asset
-            underlying_asset = Asset(
-                symbol=position.asset.symbol,
-                asset_type="stock",
-            )
-        else:
-            underlying_asset = position.asset.underlying_asset
+        def _infer_underlying_asset_from_strategy(symbol: str) -> Asset | None:
+            """Best-effort: reuse the strategy's own underlying Asset object when available.
+
+            Some Strategy Library demos construct option Assets without `underlying_asset=...`.
+            In that case we should NOT guess based on symbol strings; instead, look for an
+            explicit non-option Asset already attached to the strategy (e.g. `self.vars.underlying_asset`).
+            """
+            try:
+                symbol_norm = (symbol or "").upper()
+            except Exception:
+                symbol_norm = symbol
+
+            vars_obj = getattr(strategy, "vars", None)
+            if vars_obj is None:
+                return None
+
+            candidates: list[Asset] = []
+            try:
+                if hasattr(vars_obj, "all"):
+                    values = list(vars_obj.all().values())
+                else:
+                    values = list(getattr(vars_obj, "_vars_dict", {}).values())
+            except Exception:
+                values = []
+
+            def _maybe_add(value: object) -> None:
+                if not isinstance(value, Asset):
+                    return
+                if getattr(value, "symbol", None) != symbol_norm:
+                    return
+                if getattr(value, "asset_type", None) == Asset.AssetType.OPTION:
+                    return
+                candidates.append(value)
+
+            for value in values:
+                if isinstance(value, (list, tuple, set)):
+                    for item in value:
+                        _maybe_add(item)
+                else:
+                    _maybe_add(value)
+
+            if not candidates:
+                return None
+            if len(candidates) == 1:
+                return candidates[0]
+
+            for candidate in candidates:
+                if getattr(candidate, "asset_type", None) == Asset.AssetType.INDEX:
+                    return candidate
+            return candidates[0]
+
+        # First check if the option asset has an underlying asset, otherwise try to reuse the
+        # strategy's explicit underlying Asset (keeps asset_type deterministic for indices).
+        underlying_asset = position.asset.underlying_asset
+        if underlying_asset is None:
+            underlying_asset = _infer_underlying_asset_from_strategy(getattr(position.asset, "symbol", None))
+        if underlying_asset is None:
+            underlying_asset = Asset(symbol=position.asset.symbol, asset_type="stock")
 
         # Get the price of the underlying asset.
-        #
-        # ThetaData index options (e.g., SPXW) can arrive without an explicit underlying_asset,
-        # and legacy code defaulted to creating a stock Asset(symbol=SPX). That yields no data
-        # and can trigger ThetaData coverage guards. If that happens, retry using an index asset type.
-        #
-        # Also, some ThetaData environments can lag on *minute* index coverage while still having
-        # official daily close (EOD) data. Cash settlement only needs the underlying level at
-        # expiration, so if minute last-price fails due to coverage gaps, fall back to daily close.
         underlying_price = None
         last_price_error = None
-        try:
-            underlying_price = self.get_last_price(underlying_asset)
-        except Exception as exc:
-            last_price_error = exc
-            message = str(exc)
-            if (
-                "[THETA][COVERAGE][TAIL_PLACEHOLDER]" in message
-                and getattr(underlying_asset, "asset_type", None) != "index"
-            ):
-                underlying_asset = Asset(symbol=underlying_asset.symbol, asset_type="index")
-                try:
-                    underlying_price = self.get_last_price(underlying_asset)
-                    last_price_error = None
-                except Exception as exc2:
-                    last_price_error = exc2
 
-        # If the underlying was mis-typed (e.g., SPX created as stock), some data sources
-        # return None instead of raising. Retry as an index before settling.
-        if underlying_price is None and getattr(underlying_asset, "asset_type", None) != "index":
-            underlying_asset = Asset(symbol=underlying_asset.symbol, asset_type="index")
+        def _try_last_price(asset: Asset) -> None:
+            nonlocal underlying_price, last_price_error, underlying_asset
             try:
-                underlying_price = self.get_last_price(underlying_asset)
+                underlying_price = self.get_last_price(asset)
+                underlying_asset = asset
                 last_price_error = None
             except Exception as exc:
+                underlying_price = None
                 last_price_error = exc
+
+        _try_last_price(underlying_asset)
+
+        # Index options can arrive without an explicit underlying_asset. In that case we initially
+        # try the underlying as a stock (historical behavior), but SPX/NDX/VIX-style index symbols
+        # are not valid stocks in ThetaData and can produce placeholder-only minute series. When that
+        # happens (or when the price is None), retry as an index before failing.
+        if underlying_price is None and getattr(underlying_asset, "asset_type", None) == Asset.AssetType.STOCK:
+            symbol_upper = str(getattr(underlying_asset, "symbol", "") or "").upper()
+            index_root_aliases = {
+                "SPXW": "SPX",
+                "RUTW": "RUT",
+                "VIXW": "VIX",
+                "NDXP": "NDX",
+            }
+            index_root = index_root_aliases.get(symbol_upper, symbol_upper)
+            index_like_symbols = {
+                "SPX", "SPXW",
+                "NDX", "NDXP",
+                "VIX", "VIXW",
+                "RUT", "RUTW",
+                "XSP", "DJX", "OEX", "XEO",
+            }
+            if symbol_upper in index_like_symbols:
+                _try_last_price(Asset(symbol=index_root, asset_type="index"))
 
         if underlying_price is None and last_price_error is not None:
             # Common production failure mode: ThetaData returns placeholder-only minute bars for an

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
 import argparse
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -73,6 +75,41 @@ def count_queue_submits(log_csv: Path) -> int | None:
             return sum(1 for line in f if "Submitted to queue" in line)
     except FileNotFoundError:
         return None
+
+
+def parse_subprocess_metrics(log_path: Path) -> dict[str, object]:
+    metrics: dict[str, object] = {
+        "queue_submits": 0,
+        "thetadata_cache_stale": 0,
+        "paths": {},
+        "top_paths": [],
+    }
+
+    try:
+        raw = log_path.read_text(errors="replace")
+    except FileNotFoundError:
+        return metrics
+
+    submits = 0
+    stales = 0
+    paths: dict[str, int] = {}
+    path_re = re.compile(r"\bpath=([^ ]+)")
+
+    for line in raw.splitlines():
+        if "Submitted to queue" in line:
+            submits += 1
+            m = path_re.search(line)
+            if m:
+                p = m.group(1)
+                paths[p] = paths.get(p, 0) + 1
+        if "[THETA][CACHE][STALE]" in line:
+            stales += 1
+
+    metrics["queue_submits"] = submits
+    metrics["thetadata_cache_stale"] = stales
+    metrics["paths"] = paths
+    metrics["top_paths"] = sorted(paths.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    return metrics
 
 
 def _default_workdir(label: str) -> Path:
@@ -251,6 +288,10 @@ def main() -> int:
     elapsed_s = time.time() - started_at
     print(f"[run] exit_code={proc.returncode} elapsed_s={elapsed_s:.1f}")
 
+    # Scoreboard metrics: prefer the LumiBot `*_logs.csv` if present, but fall back to parsing the
+    # subprocess stdout/stderr (useful for strategies that don't emit `*_logs.csv`).
+    subprocess_metrics = parse_subprocess_metrics(subprocess_log)
+
     prefix = find_latest_prefix(log_dir, started_at)
     if prefix:
         trades = log_dir / f"{prefix}_trades.csv"
@@ -276,6 +317,13 @@ def main() -> int:
         submits = count_queue_submits(logs)
         if submits is not None:
             print(f"[metrics] queue_submits={submits}")
+        else:
+            print(f"[metrics] queue_submits={subprocess_metrics.get('queue_submits', 0)}")
+
+        print(f"[metrics] thetadata_cache_stale={subprocess_metrics.get('thetadata_cache_stale', 0)}")
+        top_paths = subprocess_metrics.get("top_paths") or []
+        if top_paths:
+            print(f"[metrics] top_paths={top_paths}")
 
         if args.copy_artifacts_to:
             dest_root = Path(args.copy_artifacts_to).resolve()
@@ -291,6 +339,27 @@ def main() -> int:
             print(f"[artifacts] copied_to={dest_root}")
     else:
         print(f"[warn] no artifacts found in {log_dir}; see subprocess_log={subprocess_log}")
+
+    try:
+        metrics_path = workdir / "metrics.json"
+        payload = {
+            "label": label,
+            "window": {"start": args.start, "end": args.end},
+            "elapsed_s": elapsed_s,
+            "exit_code": proc.returncode,
+            "subprocess_log": str(subprocess_log),
+            "metrics": subprocess_metrics,
+            "cache": {
+                "folder": env.get("LUMIBOT_CACHE_FOLDER"),
+                "s3_bucket": env.get("LUMIBOT_CACHE_S3_BUCKET"),
+                "s3_prefix": env.get("LUMIBOT_CACHE_S3_PREFIX"),
+                "s3_version": env.get("LUMIBOT_CACHE_S3_VERSION"),
+            },
+        }
+        metrics_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        print(f"[metrics] json={metrics_path}")
+    except Exception as exc:
+        print(f"[warn] failed to write metrics.json: {exc}")
 
     return proc.returncode
 

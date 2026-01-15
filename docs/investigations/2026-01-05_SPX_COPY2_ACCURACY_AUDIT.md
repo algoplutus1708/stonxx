@@ -1,5 +1,7 @@
 # 2026-01-05 — SPX Copy2 Accuracy Audit (manager_bot_id=c7c6bbd9-41f7-48c9-8754-3231e354f83b)
 
+**Last Updated:** 2026-01-06
+
 ## Scope
 
 - Strategy code (read-only repro): `/Users/robertgrzesik/Documents/Development/Strategy Library/tmp/backtest_code/c7c6bbd9-41f7-48c9-8754-3231e354f83b/main.py`
@@ -81,6 +83,33 @@ This validates the same invariants in production ECS:
 - Trades determinism: ✅ `trades.csv` is byte-identical vs cold
 - Artifacts:
   - `/Users/robertgrzesik/Documents/Development/Strategy Library/logs/prod_runs/spx_copy2_prod_warm/spx_copy2_prod_warm-20250107-20250117-j5ongzo7/`
+
+## Production cold→warm proof (extended window)
+
+This is the same invariant as the short-window proof, but over a larger range to ensure:
+- no request-explosion regressions,
+- cold hydration remains bounded, and
+- warm reruns stay queue-free.
+
+### Cold (prod; extended)
+
+- Window: `2025-01-07 -> 2025-04-07`
+- Bot ID: `spx_copy2_prod_long_cold-20250107-20250407-s3nfsdts`
+- S3 cache version: `spx_copy2_long_20260106`
+- Backtest time: `2073.5s` (~34.6m)
+- Queue submits (`Submitted to queue`): `2128`
+- Artifacts:
+  - `/Users/robertgrzesik/Documents/Development/Strategy Library/logs/prod_runs/spx_copy2_prod_long_cold/spx_copy2_prod_long_cold-20250107-20250407-s3nfsdts/`
+
+### Warm (prod; same S3 version; extended)
+
+- Window: `2025-01-07 -> 2025-04-07`
+- Bot ID: `spx_copy2_prod_long_warm-20250107-20250407-ladlh0om`
+- S3 cache version: `spx_copy2_long_20260106` (same as cold)
+- Backtest time: `381.5s` (~6.4m)
+- Queue submits: `0`
+- Artifacts:
+  - `/Users/robertgrzesik/Documents/Development/Strategy Library/logs/prod_runs/spx_copy2_prod_long_warm/spx_copy2_prod_long_warm-20250107-20250407-ladlh0om/`
 
 ## Accuracy Audit Deliverables
 

@@ -13,12 +13,14 @@ This folder contains **human-authored** documentation for the LumiBot trading an
 | File | Purpose | When to Read |
 |------|---------|--------------|
 | `BACKTESTING_ARCHITECTURE.md` | **START HERE** - Data flow diagrams, component relationships, how backtests execute | Before modifying any backtesting code |
+| `BACKTESTING_PERFORMANCE.md` | How to measure and improve backtest speed (startup, downloader, caching, parity, cost) | When investigating slowness or production/local parity |
 | `ENV_VARS.md` | Complete environment variable reference with defaults and examples | When adding/changing env vars or debugging config issues |
 | `ACCEPTANCE_BACKTESTS.md` | Release gate criteria - what must pass before deployment | Before any release or version bump |
 | `BACKTESTING_TESTS.md` | Test suite organization and how to run backtest-related tests | When writing or debugging tests |
 | `THETADATA_CACHE_VALIDATION.md` | How ThetaData caching works, cache invalidation, version bumping | When debugging stale data or cache issues |
 | `REMOTE_CACHE.md` | S3 remote cache architecture and configuration | When debugging cache sync or S3 issues |
 | `PRODLIKE_LOCAL_BACKTEST_RUNS.md` | How to run production-like backtests locally | When replicating prod behavior locally |
+| `DEPLOYMENT.md` | Release workflow (version branches, changelog, tags) | When deploying a new version |
 | `FUTURES_ROLL_POLICY.md` | Futures contract rolling logic and configuration | When working with futures strategies |
 | `DATABENTO_POLARS_OVERVIEW.md` | Databento integration and Polars dataframe usage | When working with Databento data source |
 

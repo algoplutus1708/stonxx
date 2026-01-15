@@ -288,35 +288,61 @@ def validate_cache(force_cache_update: bool, asset: Asset, cache_file: Path, api
     """
     if asset.asset_type not in [Asset.AssetType.STOCK, Asset.AssetType.OPTION]:
         return force_cache_update
-    cached_splits = pd.DataFrame()
-    splits_file_stale = True
+
+    # No cached price data => nothing to invalidate. Avoid an extra Polygon call (list_splits)
+    # which can contribute to rate limits in CI and doesn't provide correctness value here.
+    if not cache_file.exists() and not force_cache_update:
+        return force_cache_update
+
     # Use parquet only
     base_path = str(cache_file).rpartition(".parquet")[0]
     splits_file_path = Path(base_path + "_splits.parquet")
 
+    splits_file_stale = True
+    cached_splits: Optional[pd.DataFrame] = None
     if splits_file_path.exists():
         splits_file_stale = datetime.fromtimestamp(splits_file_path.stat().st_mtime).date() != date.today()
         if splits_file_stale:
-            cached_splits = pd.read_parquet(splits_file_path, engine='pyarrow')
-    if splits_file_stale or force_cache_update:
-        polygon_client = PolygonClient.create(api_key=api_key)
-        # Need to get the splits in execution order to make the list comparable across invocations.
-        splits = polygon_client.list_splits(ticker=asset.symbol, sort="execution_date", order="asc")
-        if isinstance(splits, Iterator):
-            # Convert the generator to a list so DataFrame will make a row per item.
-            splits_df = pd.DataFrame(list(splits))
-            if splits_file_path.exists() and cached_splits.eq(splits_df).all().all():
-                # No need to rewrite contents.  Just update the timestamp.
-                splits_file_path.touch()
-            else:
-                logger.info(f"Invalidating cache for {asset.symbol} because its splits have changed.")
-                force_cache_update = True
-                cache_file.unlink(missing_ok=True)
-                # Create the directory if it doesn't exist
-                cache_file.parent.mkdir(parents=True, exist_ok=True)
-                splits_df.to_parquet(splits_file_path, compression='snappy', engine='pyarrow')
+            try:
+                cached_splits = pd.read_parquet(splits_file_path, engine="pyarrow")
+            except Exception as exc:
+                logger.warning(f"Failed to read cached splits file for {asset.symbol}: {exc}")
+                cached_splits = None
         else:
-            logger.warning(f"Unexpected response getting splits for {asset.symbol} from Polygon.  Response: {splits}")
+            # Fresh splits file for today => nothing to do.
+            return force_cache_update
+
+    if not splits_file_stale and not force_cache_update:
+        return force_cache_update
+
+    # Need to get the splits in execution order to make the list comparable across invocations.
+    try:
+        polygon_client = PolygonClient.create(api_key=api_key)
+        splits = polygon_client.list_splits(ticker=asset.symbol, sort="execution_date", order="asc")
+    except Exception as exc:
+        logger.warning(f"Failed to fetch splits for {asset.symbol} from Polygon: {exc}")
+        return force_cache_update
+
+    if not isinstance(splits, Iterator):
+        logger.warning(f"Unexpected response getting splits for {asset.symbol} from Polygon.  Response: {splits}")
+        return force_cache_update
+
+    splits_df = pd.DataFrame(list(splits))
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # If we have a prior splits snapshot, only invalidate if it actually changed.
+    if cached_splits is not None:
+        same = cached_splits.reset_index(drop=True).equals(splits_df.reset_index(drop=True))
+        if same:
+            splits_file_path.touch()
+            return force_cache_update
+
+        logger.info(f"Invalidating cache for {asset.symbol} because its splits have changed.")
+        force_cache_update = True
+        cache_file.unlink(missing_ok=True)
+
+    # Write/refresh today's splits snapshot (even if this is the first time we've recorded it).
+    splits_df.to_parquet(splits_file_path, compression="snappy", engine="pyarrow")
     return force_cache_update
 
 

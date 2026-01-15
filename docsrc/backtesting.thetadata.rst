@@ -13,6 +13,25 @@ As of this writing, ThetaData provides historical data for free. If you pay for 
 
 This backtesting method caches the data on your computer making it faster for subsequent backtests. So even if it takes a bit of time the first time, the following backtests will be much faster.
 
+Session close coverage (index/stock minute bars)
+-----------------------------------------------
+
+For some assets, minute-bar feeds are **regular-session (RTH) bounded** (for example, U.S. indexes such as SPX typically have bars from ~09:30 to ~16:00 ET).
+
+In those cases, LumiBot treats **coverage through the session close** as “complete” for backtest cache reuse. This prevents pathological behavior where a backtest end date represented as midnight (or UTC-midnight) would otherwise imply a requirement for bars through ``23:59`` even though the provider does not publish them.
+
+Options pricing and mark-to-market (important)
+----------------------------------------------
+
+Options can be illiquid: they may not trade every day, so the **last traded price** can be stale. In live brokers, mark-to-market and many fill models rely on **NBBO quotes** (bid/ask) when available.
+
+LumiBot follows that model:
+
+- ``get_last_price()`` is trade-derived (last trade / bar close) and can be stale for options.
+- ``get_quote()`` exposes bid/ask and allows LumiBot to derive a **mark** (mid) for option valuation and quote-based fills.
+
+In some historical option series, ThetaData can have gaps in **EOD/day** option history even when **intraday quote history** exists. In daily-cadence backtests, LumiBot may fall back to an intraday quote snapshot to compute an option mark when day/EOD pricing is unavailable. This avoids “unpriceable” option positions and keeps daily option backtests broker-like.
+
 To use this feature, you need to obtain an API key from thetadata, which is free and you can get in the Dashboard after you have created an account. You must then replace `username` and `password` with your own.
 
 Start by importing the ThetaDataBacktesting, BacktestingBroker and other necessary classes:

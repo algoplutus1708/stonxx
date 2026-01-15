@@ -623,14 +623,22 @@ class StrategyExecutor(Thread):
         if self.broker.IS_BACKTESTING_BROKER:
             return
 
-        orders = self.broker.get_tracked_orders(self.strategy.name)
+        # SMART_LIMIT should only operate on active orders. Scanning the full tracked-order
+        # history (which can include large closed/filled histories) in a tight background loop
+        # can cause significant allocation churn and high RSS in long-lived workers.
+        #
+        # Prefer the broker's fast-path active order list when available.
+        get_active = getattr(self.broker, "get_active_tracked_orders", None)
+        if callable(get_active):
+            orders = get_active(strategy=self.strategy.name)
+        else:
+            orders = [o for o in self.broker.get_tracked_orders(self.strategy.name) if o.is_active()]
+
         if not orders:
             return
 
         now = time.monotonic()
         for order in orders:
-            if not order.is_active():
-                continue
             smart_limit = getattr(order, "smart_limit", None)
             if smart_limit is None or order.order_type != Order.OrderType.SMART_LIMIT:
                 continue
@@ -640,11 +648,21 @@ class StrategyExecutor(Thread):
                 state = {
                     "created_at": now,
                     "step_index": 0,
-                    "steps": smart_limit.get_step_count(),
-                    "step_seconds": smart_limit.get_step_seconds(),
+                    "steps": max(1, smart_limit.get_step_count()),
+                    "step_seconds": max(1, smart_limit.get_step_seconds()),
                     "final_hold_seconds": smart_limit.get_final_hold_seconds(),
                 }
                 order._smart_limit_state = state
+            else:
+                # Defensive: older/corrupt state should not crash the executor.
+                try:
+                    if int(state.get("steps", 0)) <= 0:
+                        state["steps"] = max(1, smart_limit.get_step_count())
+                    if int(state.get("step_seconds", 0)) <= 0:
+                        state["step_seconds"] = max(1, smart_limit.get_step_seconds())
+                except Exception:
+                    state["steps"] = max(1, smart_limit.get_step_count())
+                    state["step_seconds"] = max(1, smart_limit.get_step_seconds())
 
             elapsed = now - state["created_at"]
             step_index = min(state["steps"] - 1, int(elapsed // state["step_seconds"]))
@@ -665,9 +683,13 @@ class StrategyExecutor(Thread):
             if order.order_class == Order.OrderClass.MULTILEG and order.child_orders:
                 quote_data: list[tuple[Order, float | None, float | None]] = []
                 for leg in order.child_orders:
-                    quote = self.strategy.get_quote(leg.asset, quote=leg.quote, exchange=leg.exchange)
-                    leg_bid = getattr(quote, "bid", None)
-                    leg_ask = getattr(quote, "ask", None)
+                    try:
+                        quote = self.strategy.get_quote(leg.asset, quote=leg.quote, exchange=leg.exchange)
+                        leg_bid = getattr(quote, "bid", None)
+                        leg_ask = getattr(quote, "ask", None)
+                    except Exception:
+                        leg_bid = None
+                        leg_ask = None
                     quote_data.append((leg, leg_bid, leg_ask))
 
                 if any(b is None or a is None or b < 0 or a <= 0 for _, b, a in quote_data):
@@ -745,7 +767,10 @@ class StrategyExecutor(Thread):
                 continue
 
             side = "buy" if order.is_buy_order() else "sell"
-            quote = self.strategy.get_quote(order.asset, quote=order.quote, exchange=order.exchange)
+            try:
+                quote = self.strategy.get_quote(order.asset, quote=order.quote, exchange=order.exchange)
+            except Exception:
+                quote = None
             bid = getattr(quote, "bid", None)
             ask = getattr(quote, "ask", None)
 

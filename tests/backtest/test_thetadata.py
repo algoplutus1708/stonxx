@@ -152,6 +152,15 @@ class ThetadataBacktestStrat(Strategy):
     def before_market_opens(self):
         underlying_asset = Asset(self.parameters["symbol"])
         self.market_opens_called = True
+        # CI/runtime guard: this strategy only needs a near-dated expiration, not the full chain.
+        try:
+            data_source = getattr(getattr(self, "broker", None), "data_source", None)
+            if data_source is not None:
+                base_date = self.get_datetime().date() if hasattr(self.get_datetime(), "date") else None
+                if base_date is not None:
+                    data_source._chain_constraints = {"max_expiration_date": base_date + timedelta(days=30)}
+        except Exception:
+            pass
         self.chains = self.get_chains(underlying_asset)
 
     def after_market_closes(self):
@@ -413,6 +422,9 @@ class TestThetaDataSource:
         data_source = ThetaDataBacktesting(
             start, end, username=THETADATA_USERNAME, password=THETADATA_PASSWORD
         )
+        # CI/runtime guard: building a full SPY chain can include hundreds of expirations (each requires a strike-list
+        # request). We only need a representative near-dated chain for this test, so bound the expiry window.
+        data_source._chain_constraints = {"max_expiration_date": start.date() + timedelta(days=30)}
 
         asset = Asset(symbol="SPY", asset_type="stock")
         chains = data_source.get_chains(asset)

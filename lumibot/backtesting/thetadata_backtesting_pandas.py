@@ -752,6 +752,27 @@ class ThetaDataBacktestingPandas(PandasData):
                 end_anchor = self._normalize_default_timezone(start_dt) or current_dt
             except Exception:
                 end_anchor = current_dt
+
+        # Index OHLC is a small surface area (vs option chains) and strategies often request it
+        # repeatedly throughout an intraday run (indicators, settlement, risk checks). If we only
+        # fetch up to the current simulation timestamp, we end up incrementally extending the same
+        # cache thousands of times (O(N^2) merges over a year window).
+        #
+        # Prefetching through the backtest end keeps behavior deterministic while allowing the
+        # Data() accessors to slice by `dt` (no lookahead as long as consumers pass `dt`).
+        if (
+            not snapshot_only
+            and require_ohlc_data
+            and asset_type_value == "index"
+            and asset_separated.asset_type != "option"
+            and self.datetime_end is not None
+        ):
+            try:
+                normalized_end = self._normalize_default_timezone(self.datetime_end)
+                if normalized_end is not None:
+                    end_anchor = normalized_end
+            except Exception:
+                pass
         if end_anchor is not None and self.datetime_end is not None:
             try:
                 normalized_end = self._normalize_default_timezone(self.datetime_end)
@@ -837,6 +858,59 @@ class ThetaDataBacktestingPandas(PandasData):
                     except Exception:
                         logger.debug(
                             "[THETA][DEBUG][END_REQUIREMENT] failed to align intraday option end_requirement",
+                            exc_info=True,
+                        )
+                # CORRECTNESS + PERFORMANCE: For index minute OHLC in Theta backtests, the provider is
+                # regular-session (RTH) bounded (e.g. ~09:30–16:00 ET for SPX) and does not provide
+                # bars through 23:59/UTC-midnight. If we require coverage through the backtest end
+                # bound (often 23:59 or 18:59 ET depending on how end dates are serialized), the
+                # cache will *never* be "complete" and we can enter a perpetual STALE→REFRESH loop
+                # (observed in SPX0DTEHybridStrangle production runs).
+                #
+                # Clamp the intraday end requirement down to the session close for the end date so
+                # "covered through close" is considered complete.
+                if (
+                    is_index_asset
+                    and require_ohlc_data
+                    and not snapshot_only
+                    and ts_unit in {"minute", "hour"}
+                    and end_requirement is not None
+                ):
+                    try:
+                        from lumibot.tools.helpers import get_trading_days
+
+                        market = os.environ.get("BACKTESTING_MARKET", "NYSE")
+                        close_cache = getattr(self, "_session_close_cache", None)
+                        if close_cache is None:
+                            close_cache = {}
+                            self._session_close_cache = close_cache
+
+                        cache_date = end_requirement.date()
+                        cache_key = (market, cache_date)
+                        if cache_key in close_cache:
+                            cached_close = close_cache.get(cache_key)
+                        else:
+                            schedule = get_trading_days(
+                                market=market,
+                                start_date=end_requirement,
+                                end_date=end_requirement + timedelta(days=2),
+                                tzinfo=self.tzinfo,
+                            )
+                            cached_close = None
+                            if not schedule.empty:
+                                cached_close = schedule.iloc[0]["market_close"]
+                            close_cache[cache_key] = cached_close
+
+                        if cached_close is not None and end_requirement > cached_close:
+                            logger.debug(
+                                "[THETA][DEBUG][END_REQUIREMENT] clamping index intraday end_requirement to session close: %s -> %s",
+                                end_requirement,
+                                cached_close,
+                            )
+                            end_requirement = cached_close
+                    except Exception:
+                        logger.debug(
+                            "[THETA][DEBUG][END_REQUIREMENT] failed to clamp index end_requirement to session close",
                             exc_info=True,
                         )
         else:
@@ -1508,7 +1582,11 @@ class ThetaDataBacktestingPandas(PandasData):
         #
         # Options are handled differently: placeholder rows / negative caching are useful to avoid
         # re-fetch storms, so we continue to preserve full-history semantics there.
-        preserve_full_history = bool(is_option_asset)
+        #
+        # Day bars are small on disk even for multi-year backtests, so preserving full history is
+        # safe and keeps cache/coverage behavior consistent (and avoids surprising truncations when
+        # refreshing cached daily data).
+        preserve_full_history = bool(is_option_asset or ts_unit == "day")
 
         def _fetch_ohlc():
             return thetadata_helper.get_price_data(
@@ -3118,6 +3196,18 @@ class ThetaDataBacktestingPandas(PandasData):
                     start_dt = dt - delta_td
                     end_dt = dt + window_td
 
+                    # PERF: Keep snapshot-only quote payloads small but stable. Bucket to a fixed
+                    # intraday window so delta probes don't download full-session quote history and
+                    # don't create one cache file per bar.
+                    try:
+                        bucket_td = timedelta(minutes=15)
+                        bucket_minute = (dt.minute // 15) * 15
+                        bucket_start = dt.replace(minute=bucket_minute, second=0, microsecond=0)
+                        start_dt = bucket_start
+                        end_dt = bucket_start + bucket_td
+                    except Exception:
+                        pass
+
                 df_snapshot = thetadata_helper.get_historical_data_snapshot_cached(
                     asset,
                     start_dt,
@@ -3125,9 +3215,8 @@ class ThetaDataBacktestingPandas(PandasData):
                     ivl_ms,
                     datastyle="quote",
                     include_after_hours=True,
-                    # PERF: Cache a stable full-session file per (asset, trading_day) instead of a
-                    # unique file per dt-window. Long-window backtests (NVDA/SPX) otherwise generate
-                    # thousands of tiny snapshot files and spend most of their time in downloader IO.
+                    # Cache the full regular session for stability and to maximize reuse of warmed
+                    # S3 objects (acceptance backtests require the warm-cache invariant).
                     prefer_full_session=True,
                 )
 
@@ -3170,8 +3259,32 @@ class ThetaDataBacktestingPandas(PandasData):
                     )
 
                 if current_mode == "day":
+                    # Daily-cadence backtests use a small forward-looking snapshot window to
+                    # account for end-of-minute timestamping (the first "09:30" quote bar can
+                    # appear at ~09:31). Prefer the first two-sided NBBO row within that forward
+                    # window to avoid one-sided quotes at the open causing strategies to skip
+                    # otherwise tradeable contracts (acceptance runs rely on this behavior).
                     row = df_snapshot.iloc[0]
                     row_ts = df_snapshot.index[0]
+                    try:
+                        df_window = df_snapshot
+                        try:
+                            df_window = df_snapshot.loc[start_dt:end_dt]
+                        except Exception:
+                            df_window = df_snapshot
+
+                        if isinstance(df_window, pd.DataFrame) and not df_window.empty:
+                            col_map = {str(c).lower(): c for c in df_window.columns}
+                            bid_col = col_map.get("bid")
+                            ask_col = col_map.get("ask")
+                            if bid_col is not None and ask_col is not None:
+                                mask = df_window[bid_col].notna() & df_window[ask_col].notna()
+                                if bool(mask.any()):
+                                    first_idx = df_window.index[mask.argmax()]  # type: ignore[arg-type]
+                                    row = df_window.loc[first_idx]
+                                    row_ts = first_idx
+                    except Exception:
+                        pass
                 else:
                     # Prefer the last bar at/before dt. If none exist (common at the open due to
                     # end-of-minute timestamping), fall forward to the first bar after dt.
@@ -3489,6 +3602,61 @@ class ThetaDataBacktestingPandas(PandasData):
 
         current_date = self.get_datetime().date()
         constraints = getattr(self, "_chain_constraints", None) or {}
+
+        # PERF: intraday option strategies often ask for chains repeatedly (sometimes directly via
+        # Strategy.get_chains, not via OptionsHelper). If we allow ThetaData's default horizon
+        # (up to 2 years for equities) the chain builder will issue one strike-list request per
+        # expiration, which can be thousands of requests (especially for SPX/SPXW daily expirations).
+        #
+        # Apply a conservative default max-expiration bound for intraday backtests unless the
+        # strategy explicitly configured a different max_expiration_date via `_chain_constraints`.
+        try:
+            needs_default_max = not isinstance(constraints, dict) or constraints.get("max_expiration_date") is None
+        except Exception:
+            needs_default_max = True
+
+        if needs_default_max and getattr(self, "_timestep", None) != "day":
+            try:
+                symbol_upper = (getattr(asset, "symbol", "") or "").upper()
+                asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+                is_index_like = asset_type == "index" or symbol_upper in {
+                    "SPX",
+                    "SPXW",
+                    "NDX",
+                    "NDXP",
+                    "RUT",
+                    "RUTW",
+                    "VIX",
+                    "VIXW",
+                    "XSP",
+                    "DJX",
+                    "OEX",
+                    "XEO",
+                }
+                # Intraday backtests are especially sensitive to chain build fanout. Keep the
+                # default horizon bounded (vs Theta's multi-year default), but conservative enough
+                # not to break common 30-60DTE strategies. Strategies that truly need a different
+                # horizon should set `_chain_constraints["max_expiration_date"]`.
+                max_days_out = 45 if is_index_like else 60
+
+                base_date = current_date
+                try:
+                    min_dt = constraints.get("min_expiration_date") if isinstance(constraints, dict) else None
+                    if isinstance(min_dt, datetime):
+                        min_dt = min_dt.date()
+                    if isinstance(min_dt, date) and min_dt > base_date:
+                        base_date = min_dt
+                except Exception:
+                    base_date = current_date
+
+                max_expiration = base_date + timedelta(days=max_days_out)
+                if isinstance(constraints, dict):
+                    constraints = dict(constraints)
+                else:
+                    constraints = {}
+                constraints["max_expiration_date"] = max_expiration
+            except Exception:
+                pass
 
         # PERF: `get_chains_cached()` hits parquet (local/S3) and `Chains(...)` normalizes expiry keys.
         # Option-heavy strategies can call `get_chains()` hundreds of times per trading day, which

@@ -62,6 +62,17 @@ class IronCondor0DTE(Strategy):
         # Run the bot every 5 minutes during the trading day
         self.sleeptime = "5M"
 
+        # CI/runtime guard: chain building can include many expirations (each requires a strike-list request).
+        # This strategy is 0DTE-focused, so only near-dated expirations are needed for correctness.
+        try:
+            data_source = getattr(getattr(self, "broker", None), "data_source", None)
+            if data_source is not None and getattr(data_source, "_chain_constraints", None) is None:
+                start_dt = getattr(self, "backtesting_start", None)
+                if start_dt is not None and hasattr(start_dt, "date"):
+                    data_source._chain_constraints = {"max_expiration_date": start_dt.date() + timedelta(days=30)}
+        except Exception:
+            pass
+
         # Helpers for options selection and VIX-based filters
         self.options_helper = OptionsHelper(self)
         self.vix_helper = VixHelper(self)

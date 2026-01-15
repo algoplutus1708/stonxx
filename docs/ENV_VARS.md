@@ -13,6 +13,15 @@ This page documents environment variables used by LumiBot, with an emphasis on *
 
 ## Backtesting selection + dates
 
+### `LUMIBOT_DISABLE_DOTENV`
+- Purpose: Disable recursive `.env` discovery (`os.walk`) at startup.
+- Values: truthy enables (`1`, `true`, `yes`); unset/`0` disables.
+- Default: disabled.
+- Why it matters:
+  - Recursive `.env` scanning can add startup latency and can accidentally load the wrong `.env` when running in a directory with nested repos.
+  - In production/BotManager backtests we rely on injected environment variables, so `.env` discovery should be off.
+- Where: `lumibot/credentials.py`
+
 ### `IS_BACKTESTING`
 - Purpose: Signals backtesting mode for certain code paths.
 - Values: `True` / `False` (string).
@@ -25,8 +34,28 @@ This page documents environment variables used by LumiBot, with an emphasis on *
 - Purpose: Selects the backtesting datasource **even if code passes an explicit `datasource_class`**.
 - Values (case-insensitive):
   - `thetadata`, `yahoo`, `polygon`, `alpaca`, `ccxt`, `databento`
+  - `ibkr` / `interactivebrokersrest` / `interactive_brokers_rest` (IBKR Client Portal REST via Data Downloader)
+  - `router` (multi-provider routing; defaults to Theta for stock/option/index and IBKR for futures/crypto)
+  - JSON mapping (multi-provider routing by asset type), e.g.:
+    - `{"default":"thetadata","stock":"thetadata","option":"thetadata","index":"thetadata","future":"ibkr","crypto":"ibkr"}`
+    - Provider values are case/whitespace/_/- insensitive. Supported values include:
+      - `thetadata`, `ibkr`, `polygon`, `alpaca`
+      - `ccxt` (auto-select exchange from existing env/credentials)
+      - any CCXT exchange id (e.g., `coinbase`, `kraken`, `binance`, `kucoin`) to route crypto to that exchange
   - `none` to disable env override and rely on code.
 - Where: `lumibot/strategies/_strategy.py` datasource selection logic.
+
+## Testing / CI guardrails (engineering-only)
+
+### `LUMIBOT_ACCEPTANCE_TRIPWIRE`
+- Purpose: **Acceptance backtests only** — when truthy, a Python startup hook (`tests/backtest/acceptance_tripwire/usercustomize.py`)
+  aborts the subprocess the moment it attempts to call the remote Data Downloader.
+- Values: truthy enables (`1`, `true`, `yes`); unset/`0` disables.
+- Default: disabled outside the acceptance harness.
+- Notes:
+  - This is intentionally test-only behavior and must not change production LumiBot semantics.
+  - CI uses this to enforce the “warm S3 cache invariant” for canonical acceptance windows.
+  - Exit behavior: tripwire prints `[ACCEPTANCE][TRIPWIRE] …` and hard-exits the subprocess with code `86`.
 
 ## Backtest output + UX flags
 
@@ -167,3 +196,30 @@ These env vars are used by the ThetaData chain cache/builder in `lumibot/tools/t
 - Values: **never commit**.
 
 For cache key layout and validation workflow, see `docs/remote_cache.md`.
+
+## Runtime telemetry (memory/health)
+
+LumiBot can emit lightweight, vendor-neutral telemetry lines to stdout so you can debug OOMs in any environment
+(Render, ECS, local Docker, etc.). Telemetry is **best-effort**: failures are swallowed and must never crash trading.
+
+Each emission is a single JSON line prefixed with `LUMIBOT_TELEMETRY`.
+
+### `LUMIBOT_TELEMETRY`
+- Purpose: Enable/disable runtime telemetry emission.
+- Values: truthy enables (`1`, `true`, `yes`); falsy disables (`0`, `false`).
+- Default: enabled for live runs; disabled for backtests and pytest.
+
+### `LUMIBOT_TELEMETRY_INTERVAL_SECONDS`
+- Purpose: Base telemetry cadence.
+- Values: seconds (float).
+- Default: `300`.
+
+### `LUMIBOT_TELEMETRY_DEEP`
+- Purpose: Enable deep snapshot mode for diagnosing unknown memory sources.
+- Values: truthy enables (`1`, `true`, `yes`); falsy disables.
+- Default: disabled.
+- Notes: Deep mode uses `tracemalloc` and only emits snapshots when memory is near OOM.
+
+Notes:
+- Burst mode (more frequent logs) turns on automatically above ~80% of container memory.
+- Deep snapshots trigger above ~90% with a ~1 hour cooldown (these thresholds are fixed defaults today).

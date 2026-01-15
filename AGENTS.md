@@ -5,7 +5,10 @@ These rules are mandatory whenever you work on ThetaData integrations.
 ## Multi-Agent Collaboration (CRITICAL)
 This repo is frequently edited by **multiple AI sessions**. To avoid lost work:
 
-- **Branch etiquette:** if a task mandates a specific version branch (e.g., `4.4.25`), treat it as the shared branch—stay on it and do not create new branches/PRs unless explicitly instructed. Otherwise, start new work branches from a stable base branch (e.g., `dev`/`main`/`master`) and avoid chaining feature/WIP branches.
+- **Branch etiquette (STRICT):** if you are on a version branch (e.g., `version/4.4.31`), treat it as the shared collaboration branch.
+  - **Do not create additional branches** (no `git switch -c`, no `git branch`, no `version/4.4.31-foo`, no `version/4.4.31/<topic>`), unless the user explicitly asks.
+  - If a PR is needed for review, **the PR head must be the existing version branch** (e.g., `version/4.4.31`), not a new feature branch.
+  - Do not switch branches unless explicitly instructed; if you suspect you're on the wrong branch, stop and ask.
 - **No “feature branch chaining”:** if you’re already on a feature/WIP or version branch (e.g., `feature/*`, `fix/*`, `wip/*`, `version/*`, `release/*`, or a version-named branch like `X.Y.Z`), keep working there; don’t create another feature branch from it unless explicitly instructed.
 - **Branch naming (LumiBot convention):** prefer version-scoped branches so multiple agents can collaborate without “feature branch naming drift”. Use the repo’s existing convention (e.g., `4.4.25` or `version/X.Y.Z`).
   - Default for active release work: the shared version branch (e.g., `4.4.25`).
@@ -17,6 +20,9 @@ This repo is frequently edited by **multiple AI sessions**. To avoid lost work:
 - **Avoid stepping on the CI agent:** if `tests/backtest/`, baselines, or CI workflows are in-flight, coordinate via `docs/handoffs/` and keep edits non-overlapping.
 - **Document + test behavioral changes:** update the relevant docs in `docs/` and add regression tests in the same commit; add comments explaining “why/invariants” for non-obvious logic.
 - **Cache safety:** never delete shared caches. Use S3 namespace versioning (e.g., `LUMIBOT_CACHE_S3_VERSION=...`) for cold-cache simulations; only delete cache objects when explicitly requested and tightly scoped (symbol/version-specific).
+- **Test gating (STRICT):** do not introduce new environment variables just to skip/disable tests or to paper over CI failures.
+  - Prefer existing pytest markers (`apitest`, `acceptance_backtest`, etc.) and normal test skips with clear reasons.
+  - If a new env var is truly required for a user-facing feature, document it in `docsrc/environment_variables.rst` in the same PR.
 
 1. **Never launch ThetaTerminal locally WITH PRODUCTION CREDENTIALS.** Production has the only licensed session for that account. Starting the jar with prod credentials (even briefly or via Docker) instantly terminates the prod connection and halts all customers.
 2. **Use the shared downloader endpoint for backtests.** All tests/backtests must set `DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080` and `DATADOWNLOADER_API_KEY=<secret>`. Do not short-cut by hitting Theta directly (and avoid hard-coded IPs—they can change on redeploy).
@@ -79,6 +85,12 @@ Failure to follow these rules will break everyone's workflows—double-check env
 ## Env var documentation (REQUIRED)
 - **Do not add new environment variables by default.** Env vars are hard to discover, hard to document, and easy to
   drift across deploy targets. Prefer explicit function parameters, config objects, or stable defaults.
+- **Testing policy:** do not add env vars just to toggle/skip tests. If a test is slow/flaky/non-deterministic in CI,
+  mark it with existing pytest markers like `pytest.mark.apitest` and/or `pytest.mark.downloader` (CI already runs
+  with `-m "not apitest and not downloader"`).
+- **Broker change policy:** when changing broker behavior (Tradier/Alpaca especially), add/extend:
+  - deterministic unit/regression tests, and
+  - `pytest.mark.apitest` smoke coverage against the real paper APIs when feasible (see `docs/SMART_LIMIT_LIVE_TESTING.md`).
 - Only introduce a new env var when it is genuinely required for deployment/runtime configuration (secrets, endpoints,
   toggles needed for ops/rollout), and keep it narrowly scoped.
 - If you add or change an environment variable, update:
@@ -164,6 +176,7 @@ git log --oneline vX.Y.Z..HEAD
 
 To keep deployments traceable (and easy to diff):
 
+- **Follow the repo workflow** in `docs/DEPLOYMENT.md` (version branch → `deploy X.Y.Z` commit → changelog → tag → GitHub Release → next version branch).
 - **Tag the deploy commit** with the semantic version (annotated tag): `vX.Y.Z`
 - **Push the tag** to GitHub
 - **Create a GitHub Release** from that tag and paste the corresponding `CHANGELOG.md` entry
@@ -175,6 +188,7 @@ To keep deployments traceable (and easy to diff):
 ## Documentation Layout
 
 - `docs/` = hand-authored markdown (architecture, investigations, handoffs, ops notes); start with `docs/BACKTESTING_ARCHITECTURE.md`
+- Backtesting speed/parity playbook: `docs/BACKTESTING_PERFORMANCE.md` (update when you learn a new perf pattern)
 - Handoffs: `docs/handoffs/`
 - Investigations: `docs/investigations/`
 - `docsrc/` = Sphinx source for the public docs site

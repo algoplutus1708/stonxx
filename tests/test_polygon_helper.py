@@ -1,4 +1,5 @@
 import datetime
+import os
 from pathlib import Path
 
 import numpy as np
@@ -220,6 +221,76 @@ class TestPolygonHelpers:
         assert len(df_loaded)
         assert df_loaded["close"].iloc[0] == 2
         assert df_loaded.index[0] == pd.DatetimeIndex(["2023-07-01 09:30:00-00:00"])[0]
+
+    def test_validate_cache_skips_splits_when_no_cache_file(self, mocker, tmpdir):
+        asset = Asset("AAPL")
+        cache_file = Path(tmpdir) / "polygon" / "stock_AAPL_1D.parquet"
+        create = mocker.patch.object(ph.PolygonClient, "create")
+
+        force_cache_update = ph.validate_cache(
+            force_cache_update=False,
+            asset=asset,
+            cache_file=cache_file,
+            api_key="test",
+        )
+
+        assert force_cache_update is False
+        create.assert_not_called()
+
+    def test_validate_cache_writes_splits_without_invalidating_on_first_snapshot(self, mocker, tmpdir):
+        asset = Asset("AAPL")
+        cache_file = Path(tmpdir) / "polygon" / "stock_AAPL_1D.parquet"
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"open": [1.0], "close": [1.0]}, index=[pd.Timestamp("2024-01-02")]).to_parquet(
+            cache_file, engine="pyarrow", compression="snappy"
+        )
+
+        fake_client = mocker.MagicMock()
+        fake_client.list_splits.return_value = iter([{"execution_date": "2020-01-01", "split_from": 1, "split_to": 1}])
+        mocker.patch.object(ph.PolygonClient, "create", return_value=fake_client)
+
+        force_cache_update = ph.validate_cache(
+            force_cache_update=False,
+            asset=asset,
+            cache_file=cache_file,
+            api_key="test",
+        )
+
+        assert force_cache_update is False
+        assert cache_file.exists()
+
+        splits_file_path = Path(str(cache_file).rpartition(".parquet")[0] + "_splits.parquet")
+        assert splits_file_path.exists()
+
+    def test_validate_cache_invalidates_when_splits_change(self, mocker, tmpdir):
+        asset = Asset("AAPL")
+        cache_file = Path(tmpdir) / "polygon" / "stock_AAPL_1D.parquet"
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"open": [1.0], "close": [1.0]}, index=[pd.Timestamp("2024-01-02")]).to_parquet(
+            cache_file, engine="pyarrow", compression="snappy"
+        )
+
+        splits_file_path = Path(str(cache_file).rpartition(".parquet")[0] + "_splits.parquet")
+        pd.DataFrame([{"execution_date": "2020-01-01", "split_from": 1, "split_to": 1}]).to_parquet(
+            splits_file_path, engine="pyarrow", compression="snappy"
+        )
+        # Make it "stale" so validate_cache checks Polygon.
+        yesterday = datetime.datetime.now() - datetime.timedelta(days=1)
+        os.utime(splits_file_path, (yesterday.timestamp(), yesterday.timestamp()))
+
+        fake_client = mocker.MagicMock()
+        fake_client.list_splits.return_value = iter([{"execution_date": "2020-01-01", "split_from": 2, "split_to": 1}])
+        mocker.patch.object(ph.PolygonClient, "create", return_value=fake_client)
+
+        force_cache_update = ph.validate_cache(
+            force_cache_update=False,
+            asset=asset,
+            cache_file=cache_file,
+            api_key="test",
+        )
+
+        assert force_cache_update is True
+        assert not cache_file.exists()
 
     def test_update_cache(self, tmpdir):
         cache_file = Path(tmpdir / "polygon" / "stock_SPY_1D.parquet")
@@ -612,5 +683,3 @@ class TestPolygonPriceData:
         )
 
         assert bars.df.index[-1] <= now
-
-

@@ -10,7 +10,17 @@ LumiBot supports configuring many behaviors via environment variables. This page
    **Never commit secrets** (API keys, passwords, AWS secret keys) into any repo or docs. Document variable names and semantics only.
 
 Backtesting configuration
-------------------------
+-------------------------
+
+LUMIBOT_DISABLE_DOTENV
+^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Disable recursive ``.env`` discovery (directory scanning) at startup.
+- Values: truthy enables (``1``, ``true``, ``yes``); unset/``0`` disables.
+- Default: disabled.
+- Notes:
+  - Recursive ``.env`` scanning can add startup latency and can accidentally load the wrong ``.env`` when running in a directory with nested repos.
+  - In production/BotManager backtests we rely on injected environment variables, so ``.env`` discovery should be off.
 
 IS_BACKTESTING
 ^^^^^^^^^^^^^^
@@ -30,7 +40,25 @@ BACKTESTING_DATA_SOURCE
 - Purpose: Select the backtesting datasource **even if your code passes a `datasource_class`**.
 - Values (case-insensitive):
   - ``thetadata``, ``yahoo``, ``polygon``, ``alpaca``, ``ccxt``, ``databento``
+  - ``ibkr`` / ``interactivebrokersrest`` / ``interactive_brokers_rest`` (IBKR Client Portal REST via Data Downloader)
+  - ``router`` (multi-provider routing; defaults to Theta for stock/option/index and IBKR for futures/crypto)
+  - JSON mapping (multi-provider routing by asset type), e.g. ``{"default":"thetadata","stock":"thetadata","option":"thetadata","index":"thetadata","future":"ibkr","crypto":"ibkr"}``
+    - Provider values are case/whitespace/_/- insensitive.
+    - Supported values include ``thetadata``, ``ibkr``, ``polygon``, ``alpaca``, and ``ccxt``.
+    - For CCXT, you may use ``ccxt`` (auto-select exchange from existing env/credentials) **or** specify a CCXT exchange id directly (for example: ``coinbase``, ``kraken``, ``binance``, ``kucoin``).
   - ``none`` to disable the env override and rely on code.
+
+Testing / CI guardrails
+-----------------------
+
+LUMIBOT_ACCEPTANCE_TRIPWIRE
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: **Acceptance backtests only** — when truthy, a Python startup hook aborts the subprocess the moment it attempts to call the remote Data Downloader.
+- Values: truthy enables (``1``, ``true``, ``yes``); unset/``0`` disables.
+- Notes:
+  - This is an engineering/CI guardrail to enforce “warm-cache” acceptance backtests. It should not be used for normal production backtests.
+  - When triggered, it prints a marker and exits the subprocess with a non-zero code so the test fails reliably.
 
 Backtest artifacts + UX flags
 -----------------------------
@@ -126,7 +154,7 @@ DATADOWNLOADER_SKIP_LOCAL_START
 - Values: ``1`` / ``true`` enable; unset/``0`` disable.
 
 ThetaData option-chain building (performance)
---------------------------------------------
+---------------------------------------------
 
 THETADATA_CHAIN_DEFAULT_MAX_DAYS_OUT
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -166,10 +194,10 @@ THETADATA_CHAIN_STRIKES_BATCH_SIZE
 - Default: ``0`` (use queue client concurrency).
 
 ThetaData corporate action normalization (accuracy)
---------------------------------------------------
+------------------------------------------------------------
 
 THETADATA_APPLY_CORPORATE_ACTIONS_INTRADAY
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Purpose: Apply split/dividend adjustments to **intraday** frames (minute/second/hour) in backtests so intraday prices match daily split-adjusted prices and option-chain strike normalization stays consistent.
 - Values: ``1`` / ``true`` enable; ``0`` / ``false`` disable.
@@ -561,3 +589,32 @@ LUMIWEALTH_API_KEY
 
 - Purpose: LumiWealth platform API key (for enterprise features).
 - Values: Obtain from LumiWealth (**do not hardcode**).
+
+Runtime telemetry (memory/health)
+--------------------------------
+
+LUMIBOT_TELEMETRY
+^^^^^^^^^^^^^^^^^
+
+- Purpose: Enable/disable runtime telemetry emission (single-line JSON to stdout prefixed with ``LUMIBOT_TELEMETRY``).
+- Values: truthy enables (``1``, ``true``, ``yes``); falsy disables (``0``, ``false``).
+- Default: enabled for live runs; disabled for backtests and pytest.
+
+LUMIBOT_TELEMETRY_INTERVAL_SECONDS
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Base telemetry cadence.
+- Values: seconds (float).
+- Default: ``300``.
+
+LUMIBOT_TELEMETRY_DEEP
+^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Enable deep snapshot mode for diagnosing unknown memory sources.
+- Values: truthy enables; falsy disables.
+- Default: disabled.
+
+Notes:
+
+- Burst mode (more frequent telemetry logs) turns on automatically above ~80% of container memory.
+- Deep snapshots trigger above ~90% with a ~1 hour cooldown (these thresholds are fixed defaults today).

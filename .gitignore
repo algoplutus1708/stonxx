@@ -9,6 +9,7 @@
 lumibot/cache
 *cache*
 !lumibot/tools/backtest_cache.py
+!lumibot/tools/parquet_series_cache.py
 !tests/test_backtest_cache_manager.py
 !docs/remote_cache.md
 generated-docs/
@@ -27,6 +28,8 @@ test_bot.py
 .vscode
 .coverage*
 .env
+.env.local
+.env.*.local
 lumi_tradier
 lumiwealth_tradier
 ThetaTerminal.jar
@@ -63,6 +66,7 @@ AGENTS.md
 
 # Acceptance backtest run artifacts (local + CI)
 tests/backtest/_acceptance_runs/
+tests/backtest/_acceptance_warm_runs/
 
 # Local tool configs (untracked, user-specific)
 context*.json

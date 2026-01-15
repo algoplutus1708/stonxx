@@ -59,6 +59,22 @@ else:
 # CI enforces this via workflow env; do the same for local runs.
 os.environ["BACKTESTING_DATA_SOURCE"] = "none"
 
+# Many tests flip `IS_BACKTESTING` on/off via direct `os.environ[...] = ...` assignment (not using
+# pytest's monkeypatch), which can leak state across the suite and create order-dependent failures.
+# Keep the environment stable by restoring `IS_BACKTESTING` after every test.
+@pytest.fixture(autouse=True)
+def _restore_is_backtesting_env():
+    original = os.environ.get("IS_BACKTESTING")
+    try:
+        # Force a clean baseline for each test (prevents order-dependent leakage).
+        os.environ.pop("IS_BACKTESTING", None)
+        yield
+    finally:
+        if original is None:
+            os.environ.pop("IS_BACKTESTING", None)
+        else:
+            os.environ["IS_BACKTESTING"] = original
+
 # Ensure working directory is set to project root for tests
 # This fixes issues with ConfigsHelper and other path-dependent code
 original_cwd = os.getcwd()

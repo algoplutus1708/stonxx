@@ -7,6 +7,7 @@ import pandas as pd
 
 from lumibot.data_sources import DataSourceBacktesting
 from lumibot.entities import Asset, Bars, Quote
+from lumibot.tools.helpers import parse_timestep_qty_and_unit
 from lumibot.tools.lumibot_logger import get_logger
 
 logger = get_logger(__name__)
@@ -349,6 +350,34 @@ class PandasData(DataSourceBacktesting):
         return result
 
     def find_asset_in_data_store(self, asset, quote=None, timestep=None):
+        requested_unit = None
+        if timestep is not None:
+            try:
+                _, requested_unit = parse_timestep_qty_and_unit(str(timestep))
+            except Exception:
+                requested_unit = str(timestep)
+            requested_unit = (requested_unit or "").strip().lower()
+            if requested_unit in {"m", "min", "mins"}:
+                requested_unit = "minute"
+            elif requested_unit in {"minutes"}:
+                requested_unit = "minute"
+            elif requested_unit in {"h", "hr", "hrs", "hour", "hours"}:
+                requested_unit = "hour"
+            elif requested_unit in {"d", "day", "days"}:
+                requested_unit = "day"
+
+        def _accepts_timestep(data_obj) -> bool:
+            if requested_unit is None:
+                return True
+            data_ts = str(getattr(data_obj, "timestep", "") or "").strip().lower()
+            if requested_unit == "minute":
+                return data_ts == "minute"
+            if requested_unit == "day":
+                # Day requests can be satisfied by either day data or minute data (resample).
+                return data_ts in {"day", "minute"}
+            # Fallback: require exact match for other timesteps.
+            return data_ts == requested_unit
+
         candidates = []
 
         if timestep is not None:
@@ -367,7 +396,11 @@ class PandasData(DataSourceBacktesting):
 
         for key in candidates:
             if key in self._data_store:
-                return key
+                data_obj = self._data_store.get(key)
+                if data_obj is None:
+                    continue
+                if _accepts_timestep(data_obj):
+                    return key
         return None
 
     def _pull_source_symbol_bars(

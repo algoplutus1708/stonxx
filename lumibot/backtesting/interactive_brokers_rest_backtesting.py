@@ -1,86 +1,237 @@
-from collections import OrderedDict
+import logging
+import uuid
+from datetime import datetime, timedelta
+from typing import Optional
 
+import pandas as pd
 
-from lumibot.data_sources import InteractiveBrokersRESTData, DataSourceBacktesting
+from lumibot.data_sources import PandasData
 from lumibot.entities import Asset, Data
+import lumibot.tools.ibkr_helper as ibkr_helper
+from lumibot.tools.thetadata_queue_client import set_queue_client_id
+
+logger = logging.getLogger(__name__)
 
 
-class InteractiveBrokersRESTBacktesting(DataSourceBacktesting, InteractiveBrokersRESTData):
+class InteractiveBrokersRESTBacktesting(PandasData):
+    """Backtesting data source that fetches historical data from IBKR via the Data Downloader.
+
+    IMPORTANT:
+    - Uses the Client Portal Gateway (REST) style via the shared Data Downloader.
+    - Implements local parquet caching under `LUMIBOT_CACHE_FOLDER/ibkr/...` with optional S3 mirroring.
+    - Focuses on 1-minute+ bars (seconds are intentionally out of scope for now).
     """
-    Backtesting implementation of Interactive Brokers REST API
 
-    This class allows using Interactive Brokers REST API data for backtesting
-    while maintaining compatibility with the live trading implementation.
-    """
+    MIN_TIMESTEP = "minute"
+    ALLOW_DAILY_TIMESTEP = True
+    SOURCE = "InteractiveBrokersREST"
 
-    def __init__(self, datetime_start, datetime_end, pandas_data=None, **kwargs):
-        # Initialize the data store before anything else
-        self.pandas_data = OrderedDict()
-        self._data_store = self.pandas_data
-        self._date_index = None
-        self._timestep = "minute"
+    def __init__(
+        self,
+        datetime_start: datetime,
+        datetime_end: datetime,
+        pandas_data=None,
+        *,
+        exchange: Optional[str] = None,
+        history_source: Optional[str] = None,
+        **kwargs,
+    ):
+        super().__init__(datetime_start=datetime_start, datetime_end=datetime_end, pandas_data=pandas_data, **kwargs)
+        self._timestep = self.MIN_TIMESTEP
+        self.exchange = exchange
+        self.history_source = history_source
 
-        # Initialize the parent classes
-        # Note: The order matters for multiple inheritance
-        InteractiveBrokersRESTData.__init__(self, **kwargs)
-        DataSourceBacktesting.__init__(self, datetime_start, datetime_end, **kwargs)
+        unique_id = uuid.uuid4().hex[:8]
+        strategy_name = kwargs.get("name", "Backtest")
+        client_id = f"{strategy_name}_{unique_id}"
+        set_queue_client_id(client_id)
+        logger.info("[IBKR][QUEUE] Set client_id for queue fairness: %s", client_id)
 
-        # Set pandas data if provided
-        if pandas_data is not None:
-            self._set_pandas_data(pandas_data)
+        # Set data_source to self since this class acts as its own DataSource.
+        self.data_source = self
+        # Track which (asset, quote, timestep) series have been fully loaded for the backtest window.
+        # Without this, PandasData's default behavior can end up seeding only a couple of bars
+        # (e.g., `length=2` in strategy code) and then portfolio mark-to-market gets "stuck"
+        # forward-filling the last available price for the rest of the run.
+        self._fully_loaded_series: set[tuple] = set()
 
-    def _set_pandas_data(self, pandas_data):
-        """Set the pandas data to use for backtesting"""
-        if pandas_data is None:
+    def _build_dataset_keys(self, asset: Asset, quote: Optional[Asset], ts_unit: str) -> tuple[tuple, tuple]:
+        quote_asset = quote if quote is not None else Asset("USD", "forex")
+        canonical_key = (asset, quote_asset, ts_unit)
+        legacy_key = (asset, quote_asset)
+        return canonical_key, legacy_key
+
+    def get_last_price(self, asset, quote=None, exchange=None):
+        """Return the best available last price for mark-to-market during IBKR backtests.
+
+        For IBKR crypto daily backtests, prefetching the full-minute series for the entire backtest
+        window is prohibitively slow (and unnecessary). Prefer the daily series for crypto when
+        available, which is derived from intraday history and aligned to LumiBot's day cadence.
+
+        For non-crypto, keep the existing minute-first behavior to preserve prior semantics.
+        """
+        base_asset = asset
+        quote_asset = quote
+        if isinstance(base_asset, tuple):
+            base_asset, quote_asset = base_asset
+        quote_asset = quote_asset if quote_asset is not None else Asset("USD", "forex")
+
+        asset_type = str(getattr(base_asset, "asset_type", "") or "").lower()
+        now = self.get_datetime()
+        if asset_type == "crypto" and now.hour == 0 and now.minute == 0 and now.second == 0 and now.microsecond == 0:
+            day_key = (base_asset, quote_asset, "day")
+            if day_key not in self._fully_loaded_series:
+                try:
+                    self._update_pandas_data(
+                        base_asset,
+                        quote_asset,
+                        "day",
+                        start_dt=self.datetime_start - timedelta(days=7),
+                        end_dt=self.datetime_end,
+                        exchange=self.exchange,
+                        include_after_hours=True,
+                    )
+                except Exception:
+                    pass
+                self._fully_loaded_series.add(day_key)
+            day_data = self._data_store.get(day_key)
+            if day_data is not None:
+                try:
+                    return day_data.get_last_price(self.get_datetime())
+                except Exception:
+                    pass
+
+        minute_key = (base_asset, quote_asset, "minute")
+        if minute_key not in self._fully_loaded_series:
+            try:
+                self._update_pandas_data(
+                    base_asset,
+                    quote_asset,
+                    "minute",
+                    start_dt=self.datetime_start,
+                    end_dt=self.datetime_end,
+                    exchange=self.exchange,
+                    include_after_hours=True,
+                )
+            except Exception:
+                pass
+            self._fully_loaded_series.add(minute_key)
+        data = self._data_store.get(minute_key)
+        if data is not None:
+            try:
+                return data.get_last_price(self.get_datetime())
+            except Exception:
+                pass
+        return super().get_last_price(asset, quote=quote, exchange=exchange)
+
+    def get_quote(self, asset, quote=None, exchange=None, **kwargs):
+        """Return the best available quote snapshot for IBKR backtests.
+
+        Performance trade-off:
+        - Daily-cadence crypto strategies frequently execute at midnight timestamps.
+        - Fetching 1-minute history just to support quote-based fills can be extremely slow.
+
+        For crypto at midnight, prefer the derived daily series (fast, stable) as the quote
+        source; otherwise fall back to PandasData's default minute-based quote path.
+        """
+        from lumibot.entities import Quote
+
+        base_asset = asset
+        quote_asset = quote
+        if isinstance(base_asset, tuple):
+            base_asset, quote_asset = base_asset
+        quote_asset = quote_asset if quote_asset is not None else Asset("USD", "forex")
+
+        asset_type = str(getattr(base_asset, "asset_type", "") or "").lower()
+        now = self.get_datetime()
+        if asset_type == "crypto" and now.hour == 0 and now.minute == 0 and now.second == 0 and now.microsecond == 0:
+            day_key = (base_asset, quote_asset, "day")
+            if day_key not in self._fully_loaded_series:
+                try:
+                    self._update_pandas_data(
+                        base_asset,
+                        quote_asset,
+                        "day",
+                        start_dt=self.datetime_start - timedelta(days=7),
+                        end_dt=self.datetime_end,
+                        exchange=self.exchange,
+                        include_after_hours=True,
+                    )
+                except Exception:
+                    pass
+                self._fully_loaded_series.add(day_key)
+
+            day_data = self._data_store.get(day_key)
+            if day_data is not None:
+                try:
+                    ohlcv_bid_ask_dict = day_data.get_quote(now)
+                    return Quote(
+                        asset=base_asset,
+                        price=ohlcv_bid_ask_dict.get("close"),
+                        bid=ohlcv_bid_ask_dict.get("bid"),
+                        ask=ohlcv_bid_ask_dict.get("ask"),
+                        volume=ohlcv_bid_ask_dict.get("volume"),
+                        timestamp=now,
+                        bid_size=ohlcv_bid_ask_dict.get("bid_size"),
+                        ask_size=ohlcv_bid_ask_dict.get("ask_size"),
+                        raw_data=ohlcv_bid_ask_dict,
+                    )
+                except Exception:
+                    pass
+
+        return super().get_quote(base_asset, quote=quote_asset, exchange=exchange)
+
+    def _update_pandas_data(
+        self,
+        asset: Asset,
+        quote: Optional[Asset],
+        timestep: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        *,
+        exchange: Optional[str],
+        include_after_hours: bool,
+    ) -> None:
+        canonical_key, legacy_key = self._build_dataset_keys(asset, quote, timestep)
+        existing = self._data_store.get(canonical_key)
+        existing_df = getattr(existing, "df", None) if existing is not None else None
+
+        df = ibkr_helper.get_price_data(
+            asset=asset,
+            quote=quote,
+            timestep=timestep,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            exchange=exchange,
+            include_after_hours=include_after_hours,
+            source=self.history_source,
+        )
+
+        if df is None or df.empty:
             return
 
-        # Process each data item and add to the pandas_data dictionary
-        for data in pandas_data:
-            key = self._get_data_key(data)
-            self.pandas_data[key] = data
-            self._data_store[key] = data
-
-    def _get_data_key(self, data):
-        """Get the key to use for the data in the pandas_data dictionary"""
-        if isinstance(data.asset, tuple):
-            return data.asset
-        elif isinstance(data.asset, Asset):
-            if data.quote is None:
-                return (data.asset, Asset(symbol="USD", asset_type="forex"))
-            return (data.asset, data.quote)
+        if existing_df is not None and isinstance(existing_df, pd.DataFrame) and not existing_df.empty:
+            merged = pd.concat([existing_df, df], axis=0).sort_index()
+            merged = merged[~merged.index.duplicated(keep="last")]
         else:
-            raise ValueError("Asset must be an Asset or a tuple of Asset and quote")
+            merged = df
 
-    def _update_pandas_data(self, asset, quote, length, timestep, start_dt=None):
-        """
-        Get asset data and update the self.pandas_data dictionary.
-
-        This method retrieves historical data from Interactive Brokers REST API
-        and stores it in the pandas_data dictionary for use during backtesting.
-        """
+        data = Data(asset, merged, timestep=timestep, quote=quote)
+        # CRITICAL: Pandas backtesting expects each Data object to have `iter_index`/datalines
+        # built so prices advance as the backtest clock advances. Normally this is done via
+        # PandasData.load_data() -> Data.repair_times_and_fill(...), but IBKR loads data lazily.
+        #
+        # Use the merged index as the iteration index (it should already be 1-minute bars).
         try:
-            # Form the key for the data store
-            key = asset if isinstance(asset, tuple) else (asset, quote or Asset(symbol="USD", asset_type="forex"))
-
-            # Check if we already have data for this asset
-            if key in self.pandas_data:
-                # We already have data for this asset
-                return
-
-            # Get data from IB REST API
-            bars = super().get_historical_prices(
-                asset=asset,
-                length=length,
-                timestep=timestep,
-                quote=quote
-            )
-
-            if bars and not bars.df.empty:
-                data = Data(asset, bars.df, timestep=timestep, quote=quote)
-                self.pandas_data[key] = data
-                self._data_store[key] = data
-        except Exception as e:
-            print(f"Error in _update_pandas_data: {e}")
+            if isinstance(merged.index, pd.DatetimeIndex) and len(merged.index) > 0:
+                data.repair_times_and_fill(merged.index)
+        except Exception:
+            # Fallback: if repair fails, leave data as-is (callers will treat as missing).
+            pass
+        self._data_store[canonical_key] = data
+        # Only write the legacy key for minute data to avoid collisions with daily bars.
+        if timestep == "minute":
+            self._data_store[legacy_key] = data
 
     def _pull_source_symbol_bars(
         self,
@@ -92,25 +243,50 @@ class InteractiveBrokersRESTBacktesting(DataSourceBacktesting, InteractiveBroker
         exchange=None,
         include_after_hours=True,
     ):
-        """
-        Get bars for a given asset during backtesting.
+        asset_separated = asset
+        quote_asset = quote
+        if isinstance(asset_separated, tuple):
+            asset_separated, quote_asset = asset_separated
 
-        This method will first try to update the pandas data store with historical data
-        for the asset, and then delegate to the parent class to retrieve the bars.
-        """
-        if not timestep:
+        if isinstance(asset_separated, str):
+            asset_separated = Asset(symbol=asset_separated)
+        if timestep is None:
             timestep = self.get_timestep()
 
-        # Try to update the data store with historical data
-        try:
-            dt = self.get_datetime()
-            self._update_pandas_data(asset, quote, length, timestep, dt)
-        except Exception as e:
-            print(f"Error updating data for {asset}: {e}")
-
-        # Let the parent class handle the rest using the updated data store
+        end_dt = self.get_datetime()
+        # IBKR crypto/futures trade outside equity calendars; do not add the default 5-day padding.
+        start_dt, _ = self.get_start_datetime_and_ts_unit(length, timestep, start_dt=end_dt, start_buffer=timedelta(0))
+        asset_type = str(getattr(asset_separated, "asset_type", "") or "").lower()
+        ts_unit = str(timestep or "").strip().lower()
+        if asset_type == "crypto" and ts_unit == "day":
+            # Prefetch daily series for the full backtest window on first access so we do not
+            # hammer the downloader once per simulated day.
+            key = (asset_separated, quote_asset if quote_asset is not None else Asset("USD", "forex"), "day")
+            if key not in self._fully_loaded_series:
+                prefetch_start = min(start_dt, self.datetime_start - timedelta(days=max(7, int(length) + 5)))
+                prefetch_end = self.datetime_end
+                self._update_pandas_data(
+                    asset_separated,
+                    quote_asset,
+                    "day",
+                    start_dt=prefetch_start,
+                    end_dt=prefetch_end,
+                    exchange=exchange or self.exchange,
+                    include_after_hours=True,
+                )
+                self._fully_loaded_series.add(key)
+        else:
+            self._update_pandas_data(
+                asset_separated,
+                quote_asset,
+                timestep,
+                start_dt=start_dt,
+                end_dt=end_dt,
+                exchange=exchange or self.exchange,
+                include_after_hours=include_after_hours,
+            )
         return super()._pull_source_symbol_bars(
-            asset, length, timestep, timeshift, quote, exchange, include_after_hours
+            asset_separated, length, timestep, timeshift, quote_asset, exchange, include_after_hours
         )
 
     def get_historical_prices_between_dates(
@@ -123,61 +299,29 @@ class InteractiveBrokersRESTBacktesting(DataSourceBacktesting, InteractiveBroker
         start_date=None,
         end_date=None,
     ):
-        """
-        Get pricing data for an asset between specific dates during backtesting.
-        """
-        # Try to update the data store with historical data
-        self._update_pandas_data(asset, quote, 1, timestep)
+        asset_separated = asset
+        quote_asset = quote
+        if isinstance(asset_separated, tuple):
+            asset_separated, quote_asset = asset_separated
 
-        # Let the parent class handle the rest using the updated data store
-        response = super()._pull_source_symbol_bars_between_dates(
-            asset, timestep, quote, exchange, include_after_hours, start_date, end_date
-        )
-
-        if response is None:
+        if isinstance(asset_separated, str):
+            asset_separated = Asset(symbol=asset_separated)
+        if start_date is None or end_date is None:
             return None
 
-        bars = self._parse_source_symbol_bars(response, asset, quote=quote)
-        return bars
+        self._update_pandas_data(
+            asset_separated,
+            quote_asset,
+            timestep,
+            start_dt=start_date,
+            end_dt=end_date,
+            exchange=exchange or self.exchange,
+            include_after_hours=include_after_hours,
+        )
 
-    def get_last_price(self, asset, timestep="minute", quote=None, exchange=None, **kwargs):
-        """
-        Get the last price for an asset during backtesting.
-        """
-        try:
-            dt = self.get_datetime()
-            self._update_pandas_data(asset, quote, 1, timestep, dt)
-        except Exception as e:
-            print(f"Error get_last_price from Interactive Brokers REST: {e}")
-
-        return super().get_last_price(asset=asset, quote=quote, exchange=exchange)
-
-    def get_quote(self, asset, timestep="minute", quote=None, exchange=None, **kwargs):
-        """
-        Get quote data for an asset during backtesting.
-
-        Parameters
-        ----------
-        asset : Asset object
-            The asset for which the quote is needed.
-        timestep : str, optional
-            The timestep to use for the data.
-        quote : Asset object, optional
-            The quote asset for cryptocurrency pairs.
-        exchange : str, optional
-            The exchange to get the quote from.
-        **kwargs : dict
-            Additional keyword arguments.
-
-        Returns
-        -------
-        Quote
-            A Quote object with the quote information.
-        """
-        try:
-            dt = self.get_datetime()
-            self._update_pandas_data(asset, quote, 1, timestep, dt)
-        except Exception as e:
-            print(f"Error get_quote from Interactive Brokers REST: {e}")
-
-        return super().get_quote(asset=asset, quote=quote, exchange=exchange)
+        response = super()._pull_source_symbol_bars_between_dates(
+            asset_separated, timestep, quote_asset, exchange, include_after_hours, start_date, end_date
+        )
+        if response is None:
+            return None
+        return self._parse_source_symbol_bars(response, asset_separated, quote=quote_asset)

@@ -1006,6 +1006,7 @@ class TestTradovateTokenRenewal:
         print("✅ Automatic retry on 401 test passed")
     
     @pytest.mark.skipif(not os.environ.get('TRADOVATE_USERNAME'), reason="This test requires Tradovate credentials")
+    @pytest.mark.apitest
     def test_get_balances_with_token_renewal(self):
         """Test that _get_balances_at_broker handles token renewal correctly."""
         from lumibot.brokers.tradovate import Tradovate

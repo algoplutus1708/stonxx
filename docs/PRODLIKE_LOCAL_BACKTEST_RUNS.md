@@ -19,6 +19,7 @@ Use `scripts/run_backtest_prodlike.py`.
 Key behavior:
 - Runs the strategy in a **clean per-run workdir** under `~/Documents/Development/backtest_runs/…`.
 - Writes artifacts to `workdir/logs/` (`*_tearsheet.html`, `*_trades.csv`, `*_logs.csv`, `*_settings.json`).
+- Prints a small “scoreboard” and writes `workdir/metrics.json` (wall time + queue submits + Theta STALE count + top endpoint families) so runs are comparable.
 - Loads downloader + S3 config from `botspot_node/.env-local` **without printing secrets**.
 - Optionally copies artifacts into another folder (e.g., `Strategy Library/logs`) via `--copy-artifacts-to`.
 - For investigations, you can enable:

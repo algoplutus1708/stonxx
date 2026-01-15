@@ -3,6 +3,7 @@ import json
 import os
 import time
 import threading
+from collections import deque
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -83,6 +84,7 @@ class Broker(ABC):
         self.name = name
         self._lock = RLock()
         self._stop_event = threading.Event()  # Add stop event for clean shutdown
+        self._runtime_telemetry = None
         self._unprocessed_orders = SafeList(self._lock)
         self._placeholder_orders = SafeList(self._lock)
         self._new_orders = SafeList(self._lock)
@@ -97,7 +99,12 @@ class Broker(ABC):
         # (option-heavy intraday backtests can generate 100k+ events). Store rows in a Python list
         # and materialize a DataFrame lazily when needed.
         self._trade_event_log_enabled = True
-        self._trade_event_log_rows = []
+        # In live mode we must avoid unbounded growth in long-running workers (Render/ECS).
+        # Backtests keep full history for analysis.
+        self._trade_event_log_max_rows = None if self.IS_BACKTESTING_BROKER else 5000
+        self._trade_event_log_rows = (
+            deque(maxlen=self._trade_event_log_max_rows) if self._trade_event_log_max_rows else []
+        )
         self._trade_event_log_df_cache = pd.DataFrame()
         self._hold_trade_events = False
         self._held_trades = []
@@ -158,6 +165,64 @@ class Broker(ABC):
 
         # Trading calendar placeholder; StrategyExecutor will initialize.
         self._trading_days = None
+
+        self._start_runtime_telemetry()
+
+    def _telemetry_snapshot(self) -> dict:
+        """Lightweight, best-effort broker snapshot for runtime telemetry."""
+        snap: dict[str, object] = {}
+        try:
+            snap["orders_unprocessed"] = int(len(self._unprocessed_orders))
+            snap["orders_placeholder"] = int(len(self._placeholder_orders))
+            snap["orders_new"] = int(len(self._new_orders))
+            snap["orders_partial"] = int(len(self._partially_filled_orders))
+            snap["orders_filled"] = int(len(self._filled_orders))
+            snap["orders_canceled"] = int(len(self._canceled_orders))
+            snap["orders_error"] = int(len(self._error_orders))
+        except Exception:
+            pass
+
+        try:
+            snap["positions_tracked"] = int(len(self._filled_positions))
+        except Exception:
+            pass
+
+        try:
+            snap["trade_events_rows"] = int(len(self._trade_event_log_rows))
+        except Exception:
+            pass
+
+        for key in (
+            "_telemetry_polls_total",
+            "_telemetry_events_dispatched_total",
+            "_telemetry_orders_seen_max",
+        ):
+            try:
+                if hasattr(self, key):
+                    snap[key.removeprefix("_telemetry_")] = int(getattr(self, key))
+            except Exception:
+                continue
+
+        return snap
+
+    def _start_runtime_telemetry(self) -> None:
+        """Start always-on runtime memory telemetry (best-effort)."""
+        try:
+            from lumibot.tools.runtime_telemetry import RuntimeTelemetryConfig, RuntimeTelemetryEmitter
+
+            cfg = RuntimeTelemetryConfig.from_env(is_backtesting=bool(self.IS_BACKTESTING_BROKER))
+            if not cfg.enabled:
+                return
+
+            self._runtime_telemetry = RuntimeTelemetryEmitter(
+                broker=self,
+                stop_event=self._stop_event,
+                config=cfg,
+                logger=getattr(self, "logger", None),
+            )
+            self._runtime_telemetry.start()
+        except Exception:
+            return
 
     # --- Trading calendar initialization ---
     def initialize_market_calendars(self, trading_days_df):
@@ -355,6 +420,12 @@ class Broker(ABC):
             try:
                 self._orders_thread.join(timeout=1)
             except:
+                pass
+
+        if getattr(self, "_runtime_telemetry", None) is not None:
+            try:
+                self._runtime_telemetry.join(timeout=1)  # type: ignore[union-attr]
+            except Exception:
                 pass
 
     def __del__(self):
@@ -685,6 +756,115 @@ class Broker(ABC):
 
         raw_chains = self.data_source.get_chains(asset)
         normalized_chains = normalize_option_chains(raw_chains)
+
+        # PERF: ThetaData historical chains can contain hundreds of expirations. Eagerly fetching
+        # strike lists for each expiration (option/list/strikes fanout) makes cold backtests
+        # unusably slow. For ThetaData backtests, enable lazy strike loading so we only fetch
+        # strikes for the expirations a strategy actually accesses.
+        if (
+            getattr(self, "IS_BACKTESTING_BROKER", False)
+            and isinstance(raw_chains, dict)
+            and raw_chains.get("_chain_cache_version") is not None
+        ):
+            try:
+                from datetime import date as _date, datetime as _dt
+
+                from lumibot.tools import thetadata_helper
+
+                underlying_symbol = getattr(asset, "symbol", None) or normalized_chains.underlying_symbol or str(asset)
+                symbol_upper = str(underlying_symbol).upper()
+
+                # If this underlying has future splits relative to the chain's as-of date, Theta's
+                # strike lists can be on the pre-split scale. Reuse the same per-strike selection
+                # heuristic as build_historical_chain so strategies continue to see split-adjusted
+                # strikes when using lazy strike loading.
+                strike_normalizer = None
+                try:
+                    is_stock_underlying = str(getattr(asset, "asset_type", "")).lower() == "stock"
+                    as_of_date = self.data_source.get_datetime().date()
+                except Exception:
+                    is_stock_underlying = False
+                    as_of_date = None
+
+                if is_stock_underlying and isinstance(as_of_date, _date):
+                    try:
+                        splits = thetadata_helper._get_theta_splits(asset, as_of_date, _date.today())
+                        if splits is not None and not splits.empty and "event_date" in splits.columns:
+                            import math
+                            import pandas as _pd
+
+                            as_of_datetime = _pd.Timestamp(as_of_date)
+                            if splits["event_date"].dtype != "datetime64[ns]":
+                                splits["event_date"] = _pd.to_datetime(splits["event_date"])
+                            future_splits = splits[splits["event_date"] > as_of_datetime]
+                            if not future_splits.empty:
+                                cumulative_split_factor = float(future_splits["ratio"].prod())
+                                if cumulative_split_factor != 1.0:
+                                    reference_price = None
+                                    try:
+                                        ref_asset = Asset(asset.symbol, asset_type="stock")
+                                        ref_dt = _dt(as_of_date.year, as_of_date.month, as_of_date.day)
+                                        ref_df = thetadata_helper.get_price_data(
+                                            asset=ref_asset,
+                                            start=ref_dt,
+                                            end=ref_dt,
+                                            timespan="day",
+                                            datastyle="ohlc",
+                                            include_after_hours=False,
+                                        )
+                                        if ref_df is not None and not ref_df.empty:
+                                            for col in ("close", "Close", "adj_close", "Adj Close"):
+                                                if col in ref_df.columns:
+                                                    reference_price = float(ref_df[col].iloc[-1])
+                                                    break
+                                    except Exception:
+                                        reference_price = None
+
+                                    def _select_normalized_strike(raw_strike: float) -> float:
+                                        adjusted = raw_strike / cumulative_split_factor
+                                        if reference_price and reference_price > 0:
+                                            try:
+                                                raw_score = abs(math.log(raw_strike / reference_price))
+                                                adjusted_score = abs(math.log(adjusted / reference_price))
+                                            except (ValueError, ZeroDivisionError):
+                                                return adjusted
+                                            return adjusted if adjusted_score < raw_score else raw_strike
+                                        return adjusted
+
+                                    strike_normalizer = _select_normalized_strike
+                    except Exception:
+                        strike_normalizer = None
+
+                def _load_strikes(expiry_key: str) -> list[float]:
+                    try:
+                        exp_date = _dt.strptime(str(expiry_key), "%Y-%m-%d").date()
+                    except Exception:
+                        return []
+
+                    strike_symbol = str(underlying_symbol)
+                    if symbol_upper == "SPX":
+                        strike_symbol = "SPX" if thetadata_helper._is_third_friday(exp_date) else "SPXW"
+
+                    try:
+                        strikes = thetadata_helper.get_strikes(strike_symbol, _dt.combine(exp_date, _dt.min.time()))
+                        if strike_normalizer is not None and strikes:
+                            normalized = {
+                                round(float(strike_normalizer(float(s))), 5)
+                                for s in strikes
+                                if s is not None
+                            }
+                            return sorted(normalized)
+                        return strikes
+                    except Exception:
+                        return []
+
+                # NOTE: Lazy strike fetching can trigger `option/list/strikes` fanout. In
+                # backtesting/CI acceptance runs we enforce a strict warm-cache invariant (no
+                # downloader queue submissions), so never enable lazy strike hydration there.
+                if not bool(getattr(self, "IS_BACKTESTING_BROKER", False)):
+                    normalized_chains.enable_lazy_strikes(_load_strikes)
+            except Exception:
+                pass
 
         if not normalized_chains:
             logger.warning(
@@ -1740,7 +1920,8 @@ class Broker(ABC):
         cache = getattr(self, "_trade_event_log_df_cache", None)
         if cache is None:
             rows = getattr(self, "_trade_event_log_rows", [])
-            cache = pd.DataFrame(rows) if rows else pd.DataFrame()
+            # `rows` may be a deque in live mode.
+            cache = pd.DataFrame(list(rows)) if rows else pd.DataFrame()
             self._trade_event_log_df_cache = cache
         return cache
 
@@ -1754,6 +1935,11 @@ class Broker(ABC):
             return
         self._trade_event_log_enabled = True
         self._trade_event_log_df_cache = value
+        # Preserve bounded live behavior even if a caller sets the DF explicitly.
+        if getattr(self, "_trade_event_log_max_rows", None):
+            self._trade_event_log_rows = deque(maxlen=self._trade_event_log_max_rows)
+        else:
+            self._trade_event_log_rows = []
 
     def process_held_trades(self):
         """Processes any held trade notifications."""
@@ -1929,6 +2115,12 @@ class Broker(ABC):
             self._trade_event_log_rows.append(new_row)
             # Invalidate cached DataFrame representation.
             self._trade_event_log_df_cache = None
+
+        # Ensure cleanup runs even when a strategy rarely submits orders.
+        try:
+            self._trigger_periodic_cleanup()
+        except Exception:
+            pass
 
         return
 

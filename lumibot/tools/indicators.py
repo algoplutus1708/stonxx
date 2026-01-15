@@ -348,6 +348,8 @@ def get_symbol_returns(symbol, start=datetime(1900, 1, 1), end=datetime.now()):
 
     # Filter the DataFrame based on date range
     returns_df = returns_df.loc[(returns_df.index.date >= start.date()) & (returns_df.index.date <= end.date())]
+    if returns_df.empty:
+        return returns_df
 
     # Calculate percentage change and dividend yield
     returns_df.loc[:, "pct_change"] = returns_df["Close"].pct_change()
@@ -623,8 +625,13 @@ def plot_indicators(
                 col=1
             )
 
-        # Create graph
-        fig.write_html(plot_file_html, auto_open=show_indicators)
+        disable_ui = (
+            os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
+            or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        )
+
+        # Create graph (auto_open disabled for CI/tests).
+        fig.write_html(plot_file_html, auto_open=show_indicators and not disable_ui)
 
         # Get the file name for the CSV file by removing the .html extension and adding .csv
         csv_file = plot_file_html.replace(".html", ".csv")
@@ -672,6 +679,11 @@ def plot_returns(
     if not show_plot:
         logger.info("show_plot is False, not creating the plot file or CSV.")
         return
+
+    disable_ui = (
+        os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    )
 
     logger.info("\nCreating trades plot and CSV...")
 
@@ -960,8 +972,8 @@ def plot_returns(
         ),
     )
 
-    # Create graph
-    fig.write_html(plot_file_html, auto_open=show_plot)
+    # Create graph (auto_open disabled for CI/tests).
+    fig.write_html(plot_file_html, auto_open=show_plot and not disable_ui)
 
 
 def _prepare_tearsheet_returns(strategy_df: pd.DataFrame, benchmark_df: pd.DataFrame):
@@ -1063,12 +1075,6 @@ def create_tearsheet(
 
     logger.info("\nCreating tearsheet...")
 
-    df_final = _prepare_tearsheet_returns(strategy_df, benchmark_df)
-
-    if df_final is None:
-        logger.warning("No data to create tearsheet, skipping")
-        return
-
     def _write_placeholder_tearsheet(reason: str) -> None:
         """Write a small HTML file explaining why QuantStats was skipped/failed."""
         try:
@@ -1089,6 +1095,13 @@ def create_tearsheet(
                 f.write(placeholder)
         except Exception as exc:  # pragma: no cover
             logger.warning("Failed to write placeholder tearsheet to %s: %s", tearsheet_file, exc)
+
+    df_final = _prepare_tearsheet_returns(strategy_df, benchmark_df)
+
+    if df_final is None:
+        logger.warning("No data to create tearsheet; writing placeholder and skipping QuantStats.")
+        _write_placeholder_tearsheet("Insufficient data to compute strategy/benchmark return series for this window.")
+        return
 
     # Uncomment for debugging
     # _df1.to_csv(f"df1.csv")
@@ -1148,7 +1161,12 @@ def create_tearsheet(
         _write_placeholder_tearsheet(f"QuantStats error: {exc}")
         return
 
-    if show_tearsheet:
+    disable_ui = (
+        os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    )
+
+    if show_tearsheet and not disable_ui:
         url = "file://" + os.path.abspath(str(tearsheet_file))
         webbrowser.open(url)
 
