@@ -4734,10 +4734,14 @@ def start_theta_data_client(username: str, password: str):
         lumibot_jar = next((path for path in candidate_paths if path.exists()), None)
 
         if lumibot_jar is None:
+            # ThetaData is optional. Provide an actionable message rather than assuming bundling.
             raise FileNotFoundError(
-                "ThetaTerminal.jar not bundled with lumibot installation. "
-                f"Searched: {', '.join(str(path) for path in candidate_paths)}. "
-                f"Please reinstall lumibot or manually place the jar at {jar_file}"
+                "ThetaTerminal.jar not available. ThetaData support is optional and not installed by default. "
+                f"Searched for a bundled JAR at: {', '.join(str(path) for path in candidate_paths)}. "
+                "To enable ThetaData functionality, either:\n"
+                " - Install the optional extra: pip install \"lumibot[thetadata]\" (requires Java 11+), or\n"
+                f" - Manually download ThetaTerminal.jar from ThetaData and place it at: {jar_file}.\n"
+                "After installing, re-run your command."
             )
 
         logger.info(f"Copying ThetaTerminal.jar from {lumibot_jar} to {jar_file}")
@@ -4745,7 +4749,10 @@ def start_theta_data_client(username: str, password: str):
         logger.info(f"Successfully copied ThetaTerminal.jar to {jar_file}")
 
     if not jar_file.exists():
-        raise FileNotFoundError(f"ThetaTerminal.jar not found at {jar_file}")
+        raise FileNotFoundError(
+            "ThetaTerminal.jar not found. ThetaData support is optional and disabled. "
+            f"Expected at: {jar_file}. Install with: pip install 'lumibot[thetadata]' or place the JAR manually."
+        )
 
     try:
         jar_stats = jar_file.stat()

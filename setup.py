@@ -11,16 +11,23 @@ if DIST_DIR.exists():
 
 
 class BuildWithThetaJar(_build_py):
-    """Ensure ThetaTerminal.jar from the repo is included in every build."""
+    """Optionally bundle ThetaTerminal.jar if present locally.
+
+    This makes ThetaData optional at build/install time. If the JAR is not
+    present in lumibot/resources, we simply skip bundling it instead of failing
+    the build.
+    """
 
     def run(self):
         super().run()
-        self._copy_theta_terminal()
+        self._maybe_copy_theta_terminal()
 
-    def _copy_theta_terminal(self):
+    def _maybe_copy_theta_terminal(self):
         src = PROJECT_ROOT / "lumibot" / "resources" / "ThetaTerminal.jar"
         if not src.exists():
-            raise FileNotFoundError(f"ThetaTerminal.jar not found at {src}")
+            # Optional: nothing to do if JAR isn't in the repo
+            print("[build] ThetaTerminal.jar not found, skipping bundling (ThetaData is optional).")
+            return
         dest = Path(self.build_lib) / "lumibot" / "resources" / "ThetaTerminal.jar"
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
@@ -32,6 +39,8 @@ class BuildWithThetaJar(_build_py):
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
+theta_jar_path = PROJECT_ROOT / "lumibot" / "resources" / "ThetaTerminal.jar"
+
 setuptools.setup(
     name="lumibot",
     version="4.4.33",
@@ -41,7 +50,7 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/Lumiwealth/lumibot",
-    packages=setuptools.find_packages(),
+    packages=setuptools.find_packages(include=["lumibot", "lumibot.*"]),
     license="MIT",  # Add license argument
     include_package_data=True,
     install_requires=[
@@ -92,8 +101,17 @@ setuptools.setup(
         "requests-oauthlib",
         "boto3>=1.40.64",
     ],
+    # Include configuration files, and only include ThetaTerminal.jar if present
     package_data={
-        "lumibot": ["resources/ThetaTerminal.jar"],
+        "lumibot": [
+            "resources/conf.yaml",
+        ] + (["resources/ThetaTerminal.jar"] if theta_jar_path.exists() else []),
+    },
+    extras_require={
+        # Optional dependencies to enable ThetaData support
+        "thetadata": [
+            "thetadata",
+        ],
     },
     classifiers=[
         "Programming Language :: Python :: 3",
