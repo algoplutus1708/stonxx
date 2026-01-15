@@ -11,6 +11,7 @@ from typing import Dict, List
 import pandas as pd
 
 from lumibot.brokers.broker import Broker
+from lumibot.constants import LUMIBOT_DEFAULT_PYTZ
 from lumibot.data_sources import DataSource
 from lumibot.entities import Asset, Order, Position
 from lumibot.tools.lumibot_logger import get_logger
@@ -154,6 +155,9 @@ class ProjectX(Broker):
         # Asset cache for contract ID lookups
         self._asset_cache = {}
         self._contract_cache = {}
+
+        # Orders configuration
+        self.order_lookback_days = 30  # Look back period for fetching historical orders
 
         # Thread management
         self.max_workers = max_workers
@@ -368,7 +372,8 @@ class ProjectX(Broker):
                 order.error = f"Unsupported order type: {order.order_type}"
                 return order
 
-            order_side = self.ORDER_SIDE_MAPPING.get(order.side.lower())
+            side_t = "buy" if order.is_buy_order() else "sell" if order.is_sell_order() else "unknown"
+            order_side = self.ORDER_SIDE_MAPPING.get(side_t, None)
             if order_side is None:
                 order.status = "rejected"
                 order.error = f"Unsupported order side: {order.side}"
@@ -376,7 +381,7 @@ class ProjectX(Broker):
 
             # Detect synthetic bracket parent (do NOT apply secondary prices to entry)
             is_bracket_parent = (
-                getattr(order, 'order_class', None) == getattr(Order.OrderClass, 'BRACKET', None)
+                order.order_class == Order.OrderClass.BRACKET
                 and not getattr(order, '_is_bracket_child', False)
             )
 
@@ -580,8 +585,8 @@ class ProjectX(Broker):
 
             # Get orders from last 30 days to catch filled/cancelled orders
             # Note: Orders may disappear quickly after being filled
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=30)
+            end_date = datetime.now(LUMIBOT_DEFAULT_PYTZ).replace(hour=23, minute=59, second=59)
+            start_date = end_date.replace(hour=0, minute=0, second=0) - timedelta(days=self.order_lookback_days)
 
             orders_data = self.client.get_orders(
                 account_id=self.account_id,
@@ -950,14 +955,71 @@ class ProjectX(Broker):
             order.status = status
             order.limit_price = broker_order.get("limitPrice")
             order.stop_price = broker_order.get("stopPrice")
-            # Quantity & fill info
-            order.filled_quantity = broker_order.get("filledSize", broker_order.get("filledQty", 0))
-            # Robust fill price extraction across possible field names
-            for price_key in ("avgFillPrice", "averagePrice", "avgPrice", "fillPrice", "price", "lastFillPrice"):
-                if broker_order.get(price_key) is not None:
-                    order.avg_fill_price = broker_order.get(price_key)
-                    break
             order.tag = broker_order.get("customTag")
+
+            # Helper to return first non-None value from broker_order for given keys
+            def _first_non_none(keys, default=None):
+                for key in keys:
+                    if key in broker_order and broker_order.get(key) is not None:
+                        return broker_order.get(key)
+                return default
+
+            # Quantity & fill info
+            order.filled_quantity = _first_non_none(("fillVolume", "filledSize", "filledQty"), 0)
+            order.avg_fill_price = _first_non_none(("filledPrice", "avgFillPrice", "averagePrice", "avgPrice",
+                                                    "fillPrice", "price", "lastFillPrice"), None)
+
+            # Set timestamps using the helper to avoid KeyError if only one field exists
+            order.broker_create_date = _first_non_none(("creationTimestamp", "createdDateTime"), None)
+            order.created_at = order.broker_create_date
+            order.broker_update_date = _first_non_none(("updateTimestamp", "updatedDateTime"), None)
+
+            # Detect OCO order - both limit_price and stop_price set. ProjectX is different from
+            # other brokers like Tradier in that OCO orders are not separate entities, but rather a single order
+            # with both prices. Creat child orders, but use the same broker ID so that future modify calls update
+            # the parent instead of these children.
+            if order.limit_price is not None and order.stop_price is not None:
+                order.order_class = Order.OrderClass.OCO
+                child_limit_order = Order(
+                    strategy=order.strategy,
+                    asset=order.asset,
+                    quantity=order.quantity,
+                    side=order.side,
+                    order_type=Order.OrderType.LIMIT,
+                    identifier=broker_order_id,  # Same broker ID for modify calls
+                    limit_price=order.limit_price,
+                    status=order.status,
+                )
+                child_stop_order = Order(
+                    strategy=order.strategy,
+                    asset=order.asset,
+                    quantity=order.quantity,
+                    side=order.side,
+                    order_type=Order.OrderType.STOP,
+                    identifier=broker_order_id,  # Same broker ID for modify calls
+                    stop_price=order.stop_price,
+                    status=order.status,
+                )
+                child_limit_order.dependent_order = child_stop_order
+                child_stop_order.dependent_order = child_limit_order
+                order.child_orders = [child_limit_order, child_stop_order]
+
+                # If parent order is filled, check which child is closest to the fill price and mark is as filled and
+                # the other child as canceled
+                if order.is_filled():
+                    fill_price = order.avg_fill_price
+                    if fill_price is not None:
+                        limit_diff = abs(fill_price - order.limit_price)
+                        stop_diff = abs(fill_price - order.stop_price)
+                        filled_child = child_limit_order if limit_diff <= stop_diff else child_stop_order
+                        canceled_child = child_limit_order if limit_diff >= stop_diff else child_stop_order
+
+                        filled_child.status = "filled"
+                        filled_child.avg_fill_price = order.avg_fill_price
+                        filled_child.filled_quantity = order.filled_quantity
+                        canceled_child.filled_quantity = 0
+                        canceled_child.avg_fill_price = None
+                        canceled_child.status = "canceled"
 
             # If cached order exists, inherit strategy & any previously known fill data
             if cached_order:
@@ -1007,12 +1069,6 @@ class ProjectX(Broker):
                 # 3. Fallback to cached order even if strategy empty string above
                 if (not getattr(order, 'strategy', None)) and cached_order and getattr(cached_order, 'strategy', None):
                     order.strategy = cached_order.strategy
-
-            # Set timestamps
-            if broker_order.get("createdDateTime"):
-                order.created_at = pd.to_datetime(broker_order["createdDateTime"])
-            if broker_order.get("updatedDateTime"):
-                order.updated_at = pd.to_datetime(broker_order["updatedDateTime"])
 
             # Restore bracket meta from persistent map if not already attached
             if restore_bracket_meta_if_needed(order, self._orders_cache if hasattr(self, '_orders_cache') else {}, getattr(self, '_bracket_meta', {}), self.logger):
