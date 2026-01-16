@@ -1395,7 +1395,12 @@ class Alpaca(Broker):
 
                     # Propagate average filled price to stored order if available
                     try:
+                        # Prefer any available average fill price fields
                         avg_price = getattr(logged_order, 'filled_avg_price', None)
+                        if avg_price is None:
+                            avg_price = getattr(logged_order, 'avg_fill_price', None)
+                        if avg_price is None:
+                            avg_price = getattr(trade_update, 'avg_fill_price', None)
                         if avg_price is None:
                             avg_price = getattr(trade_update, 'price', None)
                         if avg_price is not None:
