@@ -267,31 +267,53 @@ def _is_placeholder(value: str) -> bool:
 @pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item: pytest.Item):
     """
-    Skip tests marked as requiring external APIs when credentials are missing
-    or look like placeholders. This centralizes the logic so individual tests
-    don't need inline skip-if checks.
+    Skip API/data-provider tests only for the providers they actually require.
 
-    Recognized markers:
+    Markers:
       - apitest: general external API usage
-      - downloader: tests that hit data providers (Polygon, ThetaData, etc.)
+      - downloader: tests that hit remote/downloader services
+      - polygon: requires Polygon credentials
+      - thetadata: requires ThetaData credentials
+
+    Behavior:
+      - If a test is marked with polygon and/or thetadata, only those
+        provider credentials are required.
+      - If a test has apitest/downloader but no provider-specific markers,
+        require both providers (legacy behavior for mixed-provider tests).
     """
     has_apitest = item.get_closest_marker("apitest") is not None
     has_downloader = item.get_closest_marker("downloader") is not None
     if not (has_apitest or has_downloader):
+        # Non-API tests are not gated
         return
 
-    # Validate Polygon & ThetaData creds if present/required
-    polygon_key = os.environ.get("POLYGON_API_KEY")
-    theta_user = os.environ.get("THETADATA_USERNAME")
-    theta_pass = os.environ.get("THETADATA_PASSWORD")
+    requires_polygon = item.get_closest_marker("polygon") is not None
+    requires_theta = item.get_closest_marker("thetadata") is not None
+
+    # Determine which providers are required
+    if requires_polygon or requires_theta:
+        need_polygon = requires_polygon
+        need_theta = requires_theta
+    else:
+        # No provider-specific markers: assume both may be used
+        need_polygon = True
+        need_theta = True
 
     missing = []
-    if _is_placeholder(polygon_key):
-        missing.append("POLYGON_API_KEY")
-    if _is_placeholder(theta_user):
-        missing.append("THETADATA_USERNAME")
-    if _is_placeholder(theta_pass):
-        missing.append("THETADATA_PASSWORD")
+
+    # Validate only the required credentials
+    if need_polygon:
+        polygon_key = os.environ.get("POLYGON_API_KEY")
+        if _is_placeholder(polygon_key):
+            missing.append("POLYGON_API_KEY")
+
+    if need_theta:
+        theta_user = os.environ.get("THETADATA_USERNAME")
+        theta_pass = os.environ.get("THETADATA_PASSWORD")
+        if _is_placeholder(theta_user):
+            missing.append("THETADATA_USERNAME")
+        if _is_placeholder(theta_pass):
+            missing.append("THETADATA_PASSWORD")
 
     if missing:
         reason = (

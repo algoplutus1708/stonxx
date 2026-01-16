@@ -6,6 +6,9 @@ from typing import Optional
 
 import pytest
 
+# This module exercises the shared downloader backed by ThetaData
+pytestmark = [pytest.mark.downloader, pytest.mark.thetadata]
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DOWNLOADER_BASE_URL = "http://data-downloader.lumiwealth.com:8080"
 
