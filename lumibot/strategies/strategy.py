@@ -3014,7 +3014,27 @@ class Strategy(_Strategy):
         >>> timezone = self.timezone
         >>> self.log_message(f"Timezone: {timezone}")
         """
-        return self.broker.data_source.tzinfo.zone
+        # Be defensive: pytz timezones have `.zone`, zoneinfo has `.key`, and
+        # datetime.timezone may only provide `tzname(None)`
+        tz = getattr(self.broker.data_source, "tzinfo", None)
+        if tz is None:
+            return None
+
+        # Prefer canonical zone identifiers when available
+        if hasattr(tz, "zone") and tz.zone:
+            return tz.zone
+        if hasattr(tz, "key") and tz.key:
+            return tz.key
+
+        # Fallbacks: tzname or string representation
+        try:
+            name = tz.tzname(None)
+            if name:
+                return name
+        except Exception:
+            pass
+
+        return str(tz)
 
     @property
     def pytz(self):
