@@ -552,12 +552,13 @@ class Alpaca(Broker):
         trail_price_value = getattr(response, 'trail_price', None) or resp_raw.get('trail_price')
         trail_percent_value = getattr(response, 'trail_percent', None) or resp_raw.get('trail_percent')
         stop_limit_price = limit_price_value if order_type_value == Order.OrderType.STOP_LIMIT or order_type_value == "stop_limit" else None
-        # Average fill price: prefer raw dict first to avoid MagicMock auto-attributes,
-        # support both Alpaca field names, then fall back to explicit attribute
+        # Average fill price: prefer raw dict first, support both Alpaca field names,
+        # then fall back to explicit attributes on the response object
         avg_fill_price_value = (
             (resp_raw.get('filled_avg_price') if isinstance(resp_raw, dict) else None)
             or (resp_raw.get('avg_fill_price') if isinstance(resp_raw, dict) else None)
             or getattr(response, 'filled_avg_price', None)
+            or getattr(response, 'avg_fill_price', None)
         )
 
         # Time in force and status

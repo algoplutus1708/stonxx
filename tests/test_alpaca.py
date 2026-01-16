@@ -473,9 +473,9 @@ class TestAlpacaBroker:
         mock_response.stop_price = None
         mock_response.trail_price = None
         mock_response.trail_percent = None
-        # Explicitly setting filled_avg_price and created_at to None
         mock_response.filled_avg_price = None
         mock_response.created_at = None
+        mock_response.avg_fill_price = None
 
         # Create raw response dict for _raw attribute
         resp_raw = {
