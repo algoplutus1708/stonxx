@@ -59,6 +59,7 @@ There is an opt-in apitest that runs a short parity check:
 
 - Continuous futures: if a window spans a roll boundary, the stitched series must match the roll schedule.
 - Maintenance gaps / weekends: futures have a daily maintenance gap and weekend close; caching must not repeatedly refetch those closed windows.
+- Holiday early closes: CME equity futures can close early (e.g., Labor Day 13:00 ET), producing large bar timestamp gaps that can affect “next bar open” execution semantics.
 - Tearsheet generation: short/degenerate windows can trip QuantStats KDE. LumiBot retries with KDE disabled.
 
 ## Current status (dev cache v2)
@@ -70,5 +71,8 @@ Artifact baselines selected by the user:
 
 Results snapshot:
 - MESFlipStrategy: trade parity PASS (fills match exactly); indicators max diff = 0.25; equity curve diff is small float noise.
-- MESMomentumSMA9: indicators parity is close (max diff ~1.0), but trade parity still diverges (different fill sequence).
+- MESMomentumSMA9: historically diverged starting at `2025-09-01 13:00 ET` due to a CME early-close gap (missing 13:00 bar; next bar at 18:00). A 4.4.36 fix adjusts IBKR futures session-gap fill handling and is locked in via a stubbed unit test. See:
+  - `docs/investigations/2026-01-19_IBKR_FUTURES_MESMOMENTUM_SESSION_GAP_FIX_4.4.36.md`
 
+Operational note:
+- If the remote downloader is unstable (queue submit timeouts), full parity harness re-runs can stall before populating the per-run cache folder. In that case, re-run once the downloader is stable or using already-warmed caches.

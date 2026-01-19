@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pandas as pd
 import pytz
+import pytest
 
 from lumibot.backtesting import InteractiveBrokersRESTBacktesting
 from lumibot.entities import Asset
@@ -20,7 +21,8 @@ def _minute_df(start: dt.datetime, end: dt.datetime) -> pd.DataFrame:
     return df
 
 
-def test_ibkr_futures_prefetch_reuses_minute_series_for_15minute_requests():
+@pytest.mark.parametrize("timestep", ["5minute", "15minute", "30minute"])
+def test_ibkr_futures_prefetch_reuses_minute_series_for_minute_multiple_requests(timestep):
     tz = pytz.timezone("America/New_York")
     start = tz.localize(dt.datetime(2026, 1, 12, 0, 0, 0))
     end = tz.localize(dt.datetime(2026, 1, 19, 0, 0, 0))
@@ -30,15 +32,15 @@ def test_ibkr_futures_prefetch_reuses_minute_series_for_15minute_requests():
 
     asset = Asset("MES", asset_type=Asset.AssetType.CONT_FUTURE)
 
-    df = _minute_df(start - dt.timedelta(days=3), end)
+    df = _minute_df(start - dt.timedelta(days=10), end)
 
     with patch("lumibot.tools.ibkr_helper.get_price_data", return_value=df) as mocked:
-        bars_1 = data_source.get_historical_prices(asset, 200, "15minute")
+        bars_1 = data_source.get_historical_prices(asset, 200, timestep)
         assert bars_1 is not None
         assert bars_1.df is not None
 
         data_source._update_datetime(start + dt.timedelta(minutes=15))
-        bars_2 = data_source.get_historical_prices(asset, 200, "15minute")
+        bars_2 = data_source.get_historical_prices(asset, 200, timestep)
         assert bars_2 is not None
 
         # Prefetch should occur once; subsequent calls should reuse cached data.

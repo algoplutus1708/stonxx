@@ -2329,8 +2329,15 @@ class BacktestingBroker(Broker):
                                 except Exception:
                                     is_session_gap = False
 
-                            if is_session_gap and not is_new_order:
-                                df = df_original[df_original.index >= self.datetime]
+                            # When the next bar is a large session gap (daily maintenance, holiday early
+                            # close, weekend), prefer filling from the last available bar (no jump to
+                            # the next session open).
+                            #
+                            # This keeps IBKR futures backtests consistent with our stored baselines
+                            # (DataBento artifact runs) which were produced under the same
+                            # "current-bar fallback" semantics for gaps.
+                            if is_session_gap:
+                                df = df_original[df_original.index <= self.datetime].tail(1)
                             else:
                                 df = df_next
                     else:
