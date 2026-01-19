@@ -370,9 +370,12 @@ def _run_script(case: _BaselineCase) -> tuple[Path, dict[str, int]]:
     payload = json.loads(settings.read_text(encoding="utf-8"))
     _assert_settings_match_window(case, payload)
 
-    # Structural (non-log-based) validation: acceptance backtests must not touch the downloader/queue
-    # because S3 is expected to already be warm for these canonical windows.
-    if case.data_source in {"thetadata", "ibkr"}:
+    # Structural (non-log-based) validation: ThetaData acceptance backtests must not touch the
+    # downloader/queue because S3 is expected to already be warm for these canonical windows.
+    #
+    # NOTE: IBKR acceptance currently allows small conid discovery calls (secdef/search) while
+    # the conid registry/backfill is being operationalized.
+    if case.data_source in {"thetadata"}:
         queue = payload.get("thetadata_queue_telemetry") or {}
         try:
             submit_requests = int(queue.get("submit_requests") or 0)

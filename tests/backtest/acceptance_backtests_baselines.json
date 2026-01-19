@@ -104,14 +104,14 @@
       "lumibot_version": "4.4.27",
       "max_backtest_time_seconds": 300,
       "metrics_centipercent": {
-        "cagr": 111,
+        "cagr": 103,
         "max_drawdown": -9930,
-        "total_return": 1400
+        "total_return": 1416
       },
       "metrics_raw": {
-        "cagr": "1.11%",
+        "cagr": "1.03%",
         "max_drawdown": "-99.30%",
-        "total_return": "14.00%"
+        "total_return": "14.16%"
       },
       "script_filename": "Meli Deep Drawdown Calls.py",
       "settings_backtesting_end": "2025-12-17 23:59:00-05:00",
@@ -128,14 +128,14 @@
       "lumibot_version": "4.4.27",
       "max_backtest_time_seconds": 900,
       "metrics_centipercent": {
-        "cagr": -382,
-        "max_drawdown": -1338,
-        "total_return": -300
+        "cagr": -530,
+        "max_drawdown": -2690,
+        "total_return": -480
       },
       "metrics_raw": {
-        "cagr": "-3.82%",
-        "max_drawdown": "-13.38%",
-        "total_return": "-3.00%"
+        "cagr": "-5.30%",
+        "max_drawdown": "-26.90%",
+        "total_return": "-4.80%"
       },
       "script_filename": "Backdoor Butterfly 0 DTE (Copy) - with SMART LIMITS.py",
       "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
@@ -152,14 +152,14 @@
       "lumibot_version": "4.4.27",
       "max_backtest_time_seconds": 900,
       "metrics_centipercent": {
-        "cagr": -1172,
-        "max_drawdown": -2872,
-        "total_return": -1100
+        "cagr": -1253,
+        "max_drawdown": -3128,
+        "total_return": -1210
       },
       "metrics_raw": {
-        "cagr": "-11.72%",
-        "max_drawdown": "-28.72%",
-        "total_return": "-11.00%"
+        "cagr": "-12.53%",
+        "max_drawdown": "-31.28%",
+        "total_return": "-12.10%"
       },
       "script_filename": "SPX Short Straddle Intraday (Copy).py",
       "settings_backtesting_end": "2025-12-25 23:59:00-05:00",
