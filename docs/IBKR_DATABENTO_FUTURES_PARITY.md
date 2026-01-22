@@ -62,17 +62,19 @@ There is an opt-in apitest that runs a short parity check:
 - Holiday early closes: CME equity futures can close early (e.g., Labor Day 13:00 ET), producing large bar timestamp gaps that can affect “next bar open” execution semantics.
 - Tearsheet generation: short/degenerate windows can trip QuantStats KDE. LumiBot retries with KDE disabled.
 
-## Current status (dev cache v2)
+## Current status (latest local rerun)
 
 Artifact baselines selected by the user:
 - `MESFlipStrategy_2025-11-25_23-19_dJE7Kl_*` (CME, ~5 days)
 - `MESMomentumSMA9_2025-10-15_12-52_88xWTg_*` (CME, ~29 days)
 - `GoldFlipMinuteStrategy_2025-11-12_01-58_ObSl6b_*` (COMEX, ~25 days; slow / non-CME)
 
-Results snapshot:
-- MESFlipStrategy: trade parity PASS (fills match exactly); indicators max diff = 0.25; equity curve diff is small float noise.
-- MESMomentumSMA9: still FAIL (strict) due to CME early-close gap behavior interacting with ATR-based bracket stops (one-tick/14 ATR drift causing stop-price mismatch, cascading trade-sequence divergence). A 4.4.36 fix removed the worst symptom (“use 18:00 open while timestamp is 13:00”) and is locked in via a stubbed unit test; remaining mismatch is documented here:
-  - `docs/investigations/2026-01-19_IBKR_FUTURES_MESMOMENTUM_SESSION_GAP_FIX_4.4.36.md`
+Results snapshot (strict parity vs stored artifacts):
+- **MESFlipStrategy:** FAIL. First fill price differs materially (~60 points) even though timestamps align. IBKR rerun is fetching the explicit contract month (e.g., `MES` expiring `2025-12-19`), while the stored “DataBento-era” artifact price line is offset. This strongly suggests the stored artifact was generated with a *different continuous pricing convention* (e.g., back-adjusted continuous) than IBKR’s explicit-contract stitching. See:
+  - `docs/investigations/2026-01-22_IBKR_DATABENTO_PARITY_RERUN_RESULTS.md`
+- **MESMomentumSMA9:** FAIL. The first divergence occurs early (first fill price differs by 2 ticks in the first few fills), and the trade stream then cascades. The prior “wrong-session open price at wrong timestamp” bug remains fixed, but we still do not have strict trade parity against stored artifacts. See:
+  - `docs/investigations/2026-01-22_IBKR_DATABENTO_PARITY_RERUN_RESULTS.md`
 
 Operational note:
 - If the remote downloader is unstable (queue submit timeouts), full parity harness re-runs can stall before populating the per-run cache folder. In that case, re-run once the downloader is stable or using already-warmed caches.
+- The parity harness now seeds `<run cache>/ibkr/conids.json` from `data/ibkr_tws_backfill_cache_dev_v2/ibkr/conids.json` and writes a matching `.s3key` marker so S3 cache hydration does not overwrite it with a partial file.
