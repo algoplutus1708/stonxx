@@ -97,3 +97,19 @@ Bucket summary (self time / `tsub_s`):
 
 Key delta vs baseline:
 - `inspect.*` functions (signature/parameter construction) no longer show up as a dominant hotspot, confirming the per-call introspection overhead was removed.
+
+### 2026-01-22 — Faster `Data.get_bars()` warm-run fast-path
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_datagbars_fastpath_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `pandas_numpy`: ~46%
+- `lumibot_other`: ~42%
+- `other`: ~10%
+
+Key delta:
+- pandas share drops substantially, and the dominant hotspots shift toward LumiBot-side overhead:
+  - `Bars.__init__`
+  - `BacktestingBroker._process_trade_event`
+  - `PandasData.find_asset_in_data_store`

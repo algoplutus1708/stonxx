@@ -224,8 +224,12 @@ class Data:
             self.trading_hours_start,
             self.trading_hours_end,
         )
-        self.datetime_start = self.df.index[0]
-        self.datetime_end = self.df.index[-1]
+        # PERF: `check_data` compares python datetimes against these bounds in tight loops.
+        # Storing them as python datetimes avoids pandas scalar validation/conversion overhead.
+        start_ts = self.df.index[0]
+        end_ts = self.df.index[-1]
+        self.datetime_start = start_ts.to_pydatetime() if isinstance(start_ts, pd.Timestamp) else start_ts
+        self.datetime_end = end_ts.to_pydatetime() if isinstance(end_ts, pd.Timestamp) else end_ts
 
         # PERF: `get_bars()` is called extremely frequently in minute-level backtests.
         # Avoid doing expensive pandas operations (dropna/fillna) on every slice when we can
@@ -252,6 +256,15 @@ class Data:
             self._ohlc_has_nan = True
             self._volume_has_nan = True
             self._dividend_has_nan = True
+
+        # PERF: `get_bars()` slices and then selects OHLCV columns on every call. Cache a stable
+        # OHLCV view once (initialized lazily after `repair_times_and_fill()` so it reflects any
+        # NaN filling performed there).
+        bars_cols = ["open", "high", "low", "close", "volume"]
+        if "dividend" in self.df.columns:
+            bars_cols.append("dividend")
+        self._bars_cols = [c for c in bars_cols if c in self.df.columns]
+        self._bars_df = None
 
     def set_times(self, trading_hours_start, trading_hours_end):
         """Set the start and end times for the data. The default is 0001 hrs to 2359 hrs.
@@ -449,6 +462,19 @@ class Data:
         # Populate the datalines dictionary (assuming to_datalines is defined elsewhere).
         self.datalines = dict()
         self.to_datalines()
+
+        # Initialize the cached OHLCV view after any in-place NaN filling above so `get_bars()`
+        # does not retain a stale pre-fill view (important for stubbed test fixtures that start
+        # with NaNs in open/high/low but expect them to be filled from close).
+        try:
+            bars_cols = getattr(self, "_bars_cols", None)
+            if bars_cols:
+                # `df[cols]` can produce a view with `_is_copy` metadata; downstream `Bars` may
+                # legitimately add derived columns (e.g., `return`), which would otherwise emit
+                # SettingWithCopyWarning in tight backtest loops.
+                self._bars_df = self.df[bars_cols].copy(deep=False)
+        except Exception:
+            self._bars_df = None
 
     def to_datalines(self):
         self.datalines.update(
@@ -914,11 +940,21 @@ class Data:
             except Exception:
                 iter_count = self.get_iter_count(dt)
 
+            df_source = getattr(self, "_bars_df", None)
+            if df_source is None:
+                try:
+                    bars_cols = getattr(self, "_bars_cols", None)
+                    df_source = self.df[bars_cols].copy(deep=False) if bars_cols else self.df
+                    if bars_cols:
+                        self._bars_df = df_source
+                except Exception:
+                    df_source = self.df
+
             if isinstance(timeshift, datetime.timedelta):
                 timeshift = int(timeshift.total_seconds() / 60)
 
             end_row = int(iter_count) - int(timeshift or 0)
-            data_len = len(self.df.index)
+            data_len = len(df_source.index)
             end_row = max(0, min(end_row, data_len))
             start_row = max(0, end_row - int(num_periods))
             if start_row > end_row:
@@ -926,15 +962,9 @@ class Data:
             if start_row == end_row and end_row > 0:
                 start_row = max(0, end_row - 1)
 
-            df = self.df.iloc[start_row:end_row]
+            df = df_source.iloc[start_row:end_row]
             if df is None or df.empty:
                 return None
-
-            cols = ["open", "high", "low", "close", "volume"]
-            if "dividend" in df.columns:
-                cols.append("dividend")
-            cols = [c for c in cols if c in df.columns]
-            df = df[cols]
 
             # PERF: avoid fillna on every slice unless the dataset actually contains NaNs.
             needs_copy = False
@@ -953,7 +983,7 @@ class Data:
             if required and getattr(self, "_ohlc_has_nan", True):
                 df = df.dropna(subset=required)
 
-            return df.tail(n=int(num_periods))
+            return df
 
         agg_column_map = {
             "open": "first",
@@ -986,6 +1016,16 @@ class Data:
             except Exception:
                 iter_count = self.get_iter_count(dt)
 
+            df_source = getattr(self, "_bars_df", None)
+            if df_source is None:
+                try:
+                    bars_cols = getattr(self, "_bars_cols", None)
+                    df_source = self.df[bars_cols].copy(deep=False) if bars_cols else self.df
+                    if bars_cols:
+                        self._bars_df = df_source
+                except Exception:
+                    df_source = self.df
+
             if isinstance(timeshift, datetime.timedelta):
                 if self.timestep == "day":
                     timeshift = int(timeshift.total_seconds() / (24 * 3600))
@@ -997,7 +1037,7 @@ class Data:
             else:
                 end_row = int(iter_count) - int(timeshift or 0)
 
-            data_len = len(self.df.index)
+            data_len = len(df_source.index)
             end_row = max(0, min(end_row, data_len))
             start_row = max(0, end_row - int(length))
             if start_row > end_row:
@@ -1005,15 +1045,9 @@ class Data:
             if start_row == end_row and end_row > 0:
                 start_row = max(0, end_row - 1)
 
-            df = self.df.iloc[start_row:end_row]
+            df = df_source.iloc[start_row:end_row]
             if df is None or df.empty:
                 return None
-
-            cols = list(agg_column_map.keys())
-            if "dividend" in df.columns:
-                cols.append("dividend")
-            cols = [c for c in cols if c in df.columns]
-            df = df[cols]
 
             # PERF: avoid fillna on every slice unless the dataset actually contains NaNs.
             needs_copy = False
@@ -1032,7 +1066,7 @@ class Data:
             if required and getattr(self, "_ohlc_has_nan", True):
                 df = df.dropna(subset=required)
 
-            return df.tail(n=int(num_periods))
+            return df
 
         if timestep == "day" and self.timestep == "minute":
             # If the data is minute data and we are requesting daily data then multiply the length by 1440

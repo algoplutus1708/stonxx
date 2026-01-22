@@ -81,6 +81,7 @@ Environment (protocol baseline):
 |------|--------|------------------|-----------------|-------|
 | 2026-01-22 | Protocol baseline (median of 3; `--iterations 2000`) | 3.687 | 5.540 | warm-cache; queue-free; no profiler |
 | 2026-01-22 | Cache `Strategy.get_historical_prices()` signature check | 3.520 | 5.309 | median of 3; eliminates per-call `inspect.signature()` overhead |
+| 2026-01-22 | Faster `Data.get_bars()` warm-run fast-path | 2.271 | 3.373 | median of 3; cache OHLCV view + avoid redundant tail/column selection |
 | 2026-01-22 | Source-tree stubbed benchmark (200 iters) | 1.072 | 1.491 | `scripts/bench_ibkr_speed_burner_stubbed.py` |
 | 2026-01-22 | Native multi-minute cache keys + slice fast-path | 0.936 | 1.383 | Fix `15min` → `15minute` keying; benchmark runs with `IS_BACKTESTING=true` quiet logs; 11 series loads |
 | 2026-01-22 | Warm-cache (cache-only) benchmark | 0.579 | 0.849 | `scripts/bench_ibkr_speed_burner_warm_cache.py` (queue-free; 2 futures + 3 crypto) |
@@ -102,6 +103,7 @@ This table uses a longer loop length to catch that early:
 |------|--------|------------|------------------|-----------------|-------|
 | 2026-01-22 | Protocol baseline (median of 3; warm-cache) | 20000 | 27.109 | 35.802 | queue-free; no profiler |
 | 2026-01-22 | Cache `Strategy.get_historical_prices()` signature check | 20000 | 25.426 | 34.235 | median of 3; eliminates per-call `inspect.signature()` overhead |
+| 2026-01-22 | Faster `Data.get_bars()` warm-run fast-path | 20000 | 14.467 | 17.061 | median of 3; cache OHLCV view + avoid redundant tail/column selection |
 | 2026-01-22 | Warm-cache (cache-only) benchmark | 2000 | 6.737 | 9.460 | `python3 scripts/bench_ibkr_speed_burner_warm_cache.py --iterations 2000` |
 | 2026-01-22 | Faster asof + avoid unused dataline dicts | 2000 | 6.069 | 9.137 | `Data.get_iter_count()` uses index searchsorted; `Data.get_bars()` slices native df before `_get_bars_dict()` |
 | 2026-01-22 | Skip per-slice dropna/fillna + faster Bars derived cols | 2000 | 3.797 | 5.305 | Same as above; also includes a benchmark guard to avoid accumulating unfillable orders when the clock exceeds the cached window |

@@ -234,7 +234,14 @@ class Bars:
                 self._pandas_cache = None
         else:
             # Already pandas, keep it as is
-            self._df = df
+            # PERF/SAFETY: many backtesting paths slice from a larger DataFrame and pass the slice
+            # through to `Bars`. We legitimately add derived columns (e.g., `return`) below; avoid
+            # `SettingWithCopyWarning` (and potential non-deterministic writes) by detaching from
+            # any parent view when pandas marks the frame as a slice.
+            try:
+                self._df = df.copy(deep=False) if getattr(df, "_is_copy", None) is not None else df
+            except Exception:
+                self._df = df
             # Calculate derived columns if needed
             if "dividend" in df.columns:
                 # PERF: `pct_change()` allocates several intermediate Series/Index objects and is a
@@ -389,10 +396,22 @@ class Bars:
             tz = pytz.timezone(tz)
 
         try:
-            if target_df.index.tz is None:
+            current_tz = target_df.index.tz
+            if current_tz is None:
                 target_df.index = target_df.index.tz_localize(tz)
             else:
-                target_df.index = target_df.index.tz_convert(tz)
+                # PERF: avoid `tz_convert()` when the tz already matches. Prefer cheap attribute checks
+                # over string conversions (this method is called in tight backtest loops).
+                current_zone = getattr(current_tz, "zone", None)
+                target_zone = getattr(tz, "zone", None)
+                current_key = getattr(current_tz, "key", None)
+                target_key = getattr(tz, "key", None)
+                if (current_zone and target_zone and current_zone == target_zone) or (
+                    current_key and target_key and current_key == target_key
+                ):
+                    pass
+                else:
+                    target_df.index = target_df.index.tz_convert(tz)
             self._tzinfo = tz
         except Exception:
             return target_df
