@@ -83,3 +83,4 @@ backtest_runs/
 # Local tool configs (untracked, user-specific)
 context*.json
 !context7.json
+/tests/backtest/_manual_runs

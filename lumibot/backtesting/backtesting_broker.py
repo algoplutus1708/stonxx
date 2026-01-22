@@ -1302,17 +1302,12 @@ class BacktestingBroker(Broker):
                 if position.asset.expiration == self.datetime.date() and time_to_close > seconds_before_closing:
                     continue
 
-                # Skip if there are still active orders working this asset.
-                active_orders = [
-                    o for o in self.get_tracked_orders(strategy=strategy.name)
-                    if o.asset == position.asset and o.is_active()
-                ]
-                if active_orders:
-                    continue
-
                 logger.info(f"Automatically selling expired contract for asset {position.asset}")
 
-                # Cancel any outstanding orders tied to this asset before forcing settlement.
+                # If there are still active orders working this asset (e.g., a market order that never
+                # filled due to missing bid/ask/trades data), a live broker would not leave them
+                # active after expiration. Cancel them and proceed to settlement so positions cannot
+                # get "stuck" indefinitely in long daily-cadence backtests.
                 self._cancel_open_orders_for_asset(strategy.name, position.asset, set())
 
                 # Cash settle the options contract
@@ -2800,7 +2795,20 @@ class BacktestingBroker(Broker):
             return None
 
         try:
-            quote = self.get_quote(order.asset, quote=order.quote)
+            quote_kwargs = {}
+            # ThetaData option NBBO is stored as intraday snapshot data. In daily-cadence backtests,
+            # requesting full-day minute quotes per option can explode runtime. Use snapshot mode
+            # (minimal window around `self.datetime`) so market/limit orders can still fill on
+            # actionable quotes without downloading an entire session.
+            if self._is_thetadata_source() and self._is_option_asset(order.asset) and getattr(self.data_source, "_timestep", None) == "day":
+                # NOTE: `Broker.get_quote()` does not accept extra kwargs; call the data source
+                # directly so we can pass `snapshot_only` and other backtesting-specific controls.
+                quote_kwargs["snapshot_only"] = True
+                quote = self.data_source.get_quote(order.asset, quote=order.quote, exchange=None, **quote_kwargs)
+            else:
+                # Default: preserve legacy broker behavior (and acceptance baselines) by using the
+                # broker-level `get_quote()` path without backtesting-only kwargs.
+                quote = self.get_quote(order.asset, quote=order.quote)
         except Exception as exc:  # pragma: no cover - defensive log for unexpected broker states
             self.logger.debug("Quote lookup failed for %s: %s", getattr(order.asset, "symbol", order.asset), exc)
             return None

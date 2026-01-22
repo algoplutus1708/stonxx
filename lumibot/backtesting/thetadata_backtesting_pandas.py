@@ -3103,9 +3103,12 @@ class ThetaDataBacktestingPandas(PandasData):
         dt = self.get_datetime()
         self._update_cadence_from_dt(dt)
 
-        # FIX (2025-12-12): In day mode, use day data for quote lookups instead of minute.
-        # This prevents 472 (no data) errors when ThetaData doesn't have minute quote data
-        # for historical options, but does have EOD data.
+        # Day-cadence alignment: in day mode, prefer day data for quote lookups to avoid downloading
+        # full intraday quote history for long backtests.
+        #
+        # NOTE: Order-fill logic can still request intraday "snapshot_only" quotes when needed
+        # (see `BacktestingBroker._try_fill_with_quote`) without forcing all quote consumers onto
+        # minute-level data.
         current_mode = getattr(self, "_timestep", None)
         self._effective_day_mode = current_mode == "day"
 
