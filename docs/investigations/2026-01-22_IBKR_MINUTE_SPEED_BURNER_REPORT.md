@@ -58,8 +58,28 @@ Notes:
 
 Record wall time and iterations/sec for each milestone. Keep results append-only.
 
+### Benchmark protocol (canonical; use for all future rows)
+
+Warm-cache (queue-free) runner:
+
+```bash
+env LUMIBOT_DISABLE_DOTENV=1 python3 scripts/bench_ibkr_speed_burner_warm_cache.py --iterations 2000
+env LUMIBOT_DISABLE_DOTENV=1 python3 scripts/bench_ibkr_speed_burner_warm_cache.py --iterations 20000
+```
+
+Protocol:
+- Record the **median of 3 runs** (no profiler) for both `--iterations 2000` and `--iterations 20000`.
+- Do **not** compare wall time between YAPPI/non-YAPPI runs (profiling overhead is large).
+
+Environment (protocol baseline):
+- commit: `34599dfb`
+- python: `3.11.8`
+- pandas: `2.2.1`
+- platform: `macOS-26.1-arm64-arm-64bit`
+
 | Date | Change | Futures time (s) | Crypto time (s) | Notes |
 |------|--------|------------------|-----------------|-------|
+| 2026-01-22 | Protocol baseline (median of 3; `--iterations 2000`) | 3.687 | 5.540 | warm-cache; queue-free; no profiler |
 | 2026-01-22 | Source-tree stubbed benchmark (200 iters) | 1.072 | 1.491 | `scripts/bench_ibkr_speed_burner_stubbed.py` |
 | 2026-01-22 | Native multi-minute cache keys + slice fast-path | 0.936 | 1.383 | Fix `15min` → `15minute` keying; benchmark runs with `IS_BACKTESTING=true` quiet logs; 11 series loads |
 | 2026-01-22 | Warm-cache (cache-only) benchmark | 0.579 | 0.849 | `scripts/bench_ibkr_speed_burner_warm_cache.py` (queue-free; 2 futures + 3 crypto) |
@@ -79,6 +99,7 @@ This table uses a longer loop length to catch that early:
 
 | Date | Change | Iterations | Futures time (s) | Crypto time (s) | Notes |
 |------|--------|------------|------------------|-----------------|-------|
+| 2026-01-22 | Protocol baseline (median of 3; warm-cache) | 20000 | 27.109 | 35.802 | queue-free; no profiler |
 | 2026-01-22 | Warm-cache (cache-only) benchmark | 2000 | 6.737 | 9.460 | `python3 scripts/bench_ibkr_speed_burner_warm_cache.py --iterations 2000` |
 | 2026-01-22 | Faster asof + avoid unused dataline dicts | 2000 | 6.069 | 9.137 | `Data.get_iter_count()` uses index searchsorted; `Data.get_bars()` slices native df before `_get_bars_dict()` |
 | 2026-01-22 | Skip per-slice dropna/fillna + faster Bars derived cols | 2000 | 3.797 | 5.305 | Same as above; also includes a benchmark guard to avoid accumulating unfillable orders when the clock exceeds the cached window |
