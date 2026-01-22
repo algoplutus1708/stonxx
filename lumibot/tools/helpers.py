@@ -537,12 +537,24 @@ def parse_timestep_qty_and_unit(timestep):
 
     quantity = 1
     unit = timestep
-    m = re.search(r"(\d+)\s*(\w+)", timestep)
+    m = re.search(r"(\d+)\s*(\w+)", str(timestep or ""))
     if m:
         quantity = int(m.group(1))
         unit = m.group(2).rstrip("s")  # remove trailing 's' if any
 
-    return quantity, unit
+    raw_unit = str(unit or "").strip().lower()
+    canonical_unit = {
+        "m": "minute",
+        "min": "minute",
+        "minute": "minute",
+        "h": "hour",
+        "hr": "hour",
+        "hour": "hour",
+        "d": "day",
+        "day": "day",
+    }.get(raw_unit, raw_unit)
+
+    return quantity, canonical_unit
 
 
 def get_decimals(number):

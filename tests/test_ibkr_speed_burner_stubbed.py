@@ -164,6 +164,11 @@ def test_ibkr_speed_burner_prefetches_once_and_slices_forever(monkeypatch):
     crypto._first_iteration = False
     crypto.initialize(parameters={"coins": [btc, eth, sol]})
 
+    # Multi-timeframe request should work in backtesting without strategy-layer resampling.
+    bars_15m = futures.get_historical_prices(fut_mes, length=10, timestep="15min")
+    assert bars_15m is not None
+    assert len(bars_15m.df) == 10
+
     # Run a few hundred iterations of each loop. This is a correctness/speed-structure test:
     # it should not refetch the same series per iteration.
     iterations = 200

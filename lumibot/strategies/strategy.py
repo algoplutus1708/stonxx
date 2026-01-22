@@ -4005,11 +4005,22 @@ class Strategy(_Strategy):
 
         # Determine the actual timestep to use for data fetching
         if parsed and parsed[0] > 1:
-            # Multi-timeframe request detected
+            # Multi-timeframe request detected.
+            #
+            # Backtesting data sources already implement aggregation via Data.get_bars()
+            # (see `lumibot/entities/data.py`). In backtests, avoid doing an extra layer of
+            # resampling here; instead pass the original timestep (e.g., "15min") through to
+            # the backtesting data source so it can slice/aggregate efficiently and cache
+            # results internally.
             multiplier, base_unit = parsed
-            actual_timestep = base_unit
-            actual_length = length * multiplier
-            needs_resampling = True
+            if getattr(self, "is_backtesting", False) or getattr(getattr(self, "broker", None), "IS_BACKTESTING_BROKER", False):
+                actual_timestep = original_timestep
+                actual_length = length
+                needs_resampling = False
+            else:
+                actual_timestep = base_unit
+                actual_length = length * multiplier
+                needs_resampling = True
         elif parsed:
             # Standard format (1 minute or 1 day)
             multiplier, base_unit = parsed

@@ -28,6 +28,7 @@ Each iteration intentionally stresses the hot path:
 ## Benchmark runner(s)
 
 - Unit-style stubbed runner (no network): `tests/test_ibkr_speed_burner_stubbed.py`
+- Local benchmark script (no network): `scripts/bench_ibkr_speed_burner_stubbed.py`
 
 Future (acceptance / cache-backed):
 - Add a prodlike runner in `scripts/` that hits the cache and asserts queue-free behavior.
@@ -40,7 +41,7 @@ Record wall time and iterations/sec for each milestone. Keep results append-only
 
 | Date | Change | Futures time (s) | Crypto time (s) | Notes |
 |------|--------|------------------|-----------------|-------|
-| 2026-01-22 | Baseline (pre-optimizations) | TBD | TBD | Initial run |
+| 2026-01-22 | Source-tree stubbed benchmark (200 iters) | 1.072 | 1.491 | `scripts/bench_ibkr_speed_burner_stubbed.py` |
 | 2026-01-22 | Remove synthetic bars across gaps | TBD | TBD | Correctness + avoids fake work |
 | 2026-01-22 | Prefetch once → slice forever | TBD | TBD | Eliminates refetch/window thrash |
 | 2026-01-22 | DataFrame slice fast-path | TBD | TBD | Avoid per-call DataFrame rebuild |
@@ -52,4 +53,3 @@ Record wall time and iterations/sec for each milestone. Keep results append-only
 - Do not create synthetic bars across gaps. See `docs/BACKTESTING_SESSION_GAPS_AND_DATA_GAPS.md`.
 - If the strategy clock lands in a futures session gap, orders may be accepted but must not fill until data resumes.
 - Prefer “warm-cache speed” as the primary metric; cold downloads are allowed once but must not repeat.
-

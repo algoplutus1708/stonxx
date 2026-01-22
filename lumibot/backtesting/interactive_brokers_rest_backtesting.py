@@ -376,7 +376,7 @@ class InteractiveBrokersRESTBacktesting(PandasData):
             self._update_pandas_data(
                 asset_separated,
                 quote_asset,
-                timestep,
+                ts_unit,
                 start_dt=start_dt,
                 end_dt=end_dt,
                 exchange=exchange or self.exchange,

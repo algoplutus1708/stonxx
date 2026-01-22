@@ -305,6 +305,7 @@ class DataSource(ABC):
         # Define mapping from timestep units to equivalent minutes
         time_unit_map = {
             "minute": 1,
+            "min": 1,  # Common shorthand (e.g., "15min")
             "hour": 60,
             "day": 24 * 60,
             "m": 1,  # "M" is for minutes
@@ -336,7 +337,16 @@ class DataSource(ABC):
             quantity_in_minutes = quantity * time_unit_map[unit]
             # Convert minutes to timedelta
             delta = timedelta(minutes=quantity_in_minutes)
-            return delta, unit
+            canonical_unit = {
+                "m": "minute",
+                "min": "minute",
+                "minute": "minute",
+                "h": "hour",
+                "hour": "hour",
+                "d": "day",
+                "day": "day",
+            }.get(unit, unit)
+            return delta, canonical_unit
         else:
             raise ValueError(f"Unknown unit: {unit}. Valid units are minute, hour, day, M, H, D")
 
