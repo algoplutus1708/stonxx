@@ -62,6 +62,69 @@ def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def _read_dotenv(path: Path) -> Dict[str, str]:
+    payload: Dict[str, str] = {}
+    try:
+        for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            payload[k.strip()] = v.strip().strip("'").strip('"')
+    except Exception:
+        return {}
+    return payload
+
+
+def _ensure_conids_seeded(*, cache_root: Path, dotenv: Path, cache_version: Optional[str]) -> None:
+    """
+    Ensure the IBKR conid registry exists under the per-run cache folder.
+
+    Why this exists
+    ---------------
+    IBKR Client Portal cannot reliably discover expired futures contracts (conids). LumiBot
+    therefore maintains a local registry at `<cache_root>/ibkr/conids.json`, populated via a
+    one-time TWS/Gateway backfill.
+
+    The parity harness runs each baseline in an isolated cache folder to keep runs
+    reproducible. That means the backtest subprocess may not have access to the shared
+    conids registry unless we seed it here.
+    """
+    dst = cache_root / "ibkr" / "conids.json"
+    if dst.exists():
+        return
+
+    seed = LUMIBOT_ROOT / "data" / "ibkr_tws_backfill_cache_dev_v2" / "ibkr" / "conids.json"
+    if not seed.exists():
+        raise SystemExit(
+            "Missing required IBKR conid registry for parity runs.\n"
+            f"- expected seed file: {seed}\n"
+            f"- expected cache path: {dst}\n"
+            "Run the one-time TWS/Gateway conid backfill to populate ibkr/conids.json, or "
+            "restore the repo seed under data/ibkr_tws_backfill_cache_dev_v2/."
+        )
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copy2(seed, dst)
+    except Exception as e:
+        raise SystemExit(f"Failed to seed conids.json into parity cache folder: {e}")
+
+    # If the remote cache backend is enabled (S3), `ensure_local_file()` will delete-and-redownload
+    # files without a matching `.s3key` marker. Seed the marker so the subprocess can reuse this
+    # conid registry without making a remote call (and without overwriting it with a partial file).
+    dotenv_payload = _read_dotenv(dotenv)
+    prefix = (dotenv_payload.get("LUMIBOT_CACHE_S3_PREFIX") or "").strip().strip("/")
+    version = (cache_version or dotenv_payload.get("LUMIBOT_CACHE_S3_VERSION") or "").strip().strip("/")
+    if prefix and version:
+        remote_key = f"{prefix}/{version}/ibkr/conids.json"
+        marker = dst.with_suffix(dst.suffix + ".s3key")
+        try:
+            marker.write_text(remote_key, encoding="utf-8")
+        except Exception:
+            pass
+
+
 def _newest_prefix(log_dir: Path) -> Optional[str]:
     candidates = sorted(log_dir.glob("*_settings.json"), key=lambda p: p.stat().st_mtime)
     if not candidates:
@@ -507,6 +570,7 @@ def main() -> int:
             raise SystemExit(f"Unable to infer symbol from baseline trades: {baseline_trades}")
 
         cache_folder = out_root / "cache" / b.name
+        _ensure_conids_seeded(cache_root=cache_folder, dotenv=dotenv, cache_version=args.cache_version)
         cold_dir = out_root / b.name / "ibkr_cold"
         warm_dir = out_root / b.name / "ibkr_warm"
         yappi_dir = out_root / b.name / "ibkr_yappi"

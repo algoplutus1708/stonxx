@@ -256,8 +256,12 @@ def main() -> int:
             env["IBKR_HISTORY_SOURCE"] = args.ibkr_history_source.strip()
 
     # Data downloader config
+    # WHY: In practice, `.env-local` can get stale for the downloader URL (host migrations,
+    # local vs remote testing). Allow an explicit process env override for the base URL,
+    # while still sourcing secrets (API key) from the dotenv file by default.
+    if "DATADOWNLOADER_BASE_URL" in dotenv:
+        env.setdefault("DATADOWNLOADER_BASE_URL", dotenv["DATADOWNLOADER_BASE_URL"])
     for k in [
-        "DATADOWNLOADER_BASE_URL",
         "DATADOWNLOADER_API_KEY",
         "DATADOWNLOADER_API_KEY_HEADER",
         "DATADOWNLOADER_SKIP_LOCAL_START",
