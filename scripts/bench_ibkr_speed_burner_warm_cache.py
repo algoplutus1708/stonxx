@@ -22,6 +22,7 @@ downloader (because warm-cache speed is the metric we care about).
 
 import os
 import sys
+import argparse
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -55,6 +56,15 @@ def _lock_down_env() -> None:
 def main() -> int:
     _lock_down_env()
     _force_source_tree_imports()
+
+    parser = argparse.ArgumentParser(description="IBKR warm-cache speed burner (cache-only) benchmark.")
+    parser.add_argument("--iterations", type=int, default=200, help="Iterations per loop (futures + crypto).")
+    parser.add_argument(
+        "--profile-yappi-csv",
+        default="",
+        help="Optional path to write a yappi CSV profile (matches LumiBot *_profile_yappi.csv format).",
+    )
+    args = parser.parse_args()
 
     from lumibot.backtesting import BacktestingBroker
     from lumibot.backtesting.interactive_brokers_rest_backtesting import InteractiveBrokersRESTBacktesting
@@ -196,7 +206,15 @@ def main() -> int:
             "Warm-cache benchmark requires the series to already exist in parquet cache."
         )
 
-    iterations = 200
+    iterations = int(args.iterations)
+
+    yappi = None
+    if args.profile_yappi_csv:
+        import yappi as _yappi
+
+        yappi = _yappi
+        yappi.set_clock_type("wall")
+        yappi.start()
 
     # Phase A: includes in-process prefetch reads (from warm disk cache) on first access.
     t0 = perf_counter()
@@ -216,6 +234,55 @@ def main() -> int:
 
     futures_s = t1 - t0
     crypto_s = t2 - t1
+
+    if yappi is not None:
+        try:
+            yappi.stop()
+            stats = yappi.get_func_stats()
+            stats.sort("ttot", "desc")
+
+            out_path = Path(args.profile_yappi_csv).expanduser()
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            import csv
+
+            with out_path.open("w", newline="") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(
+                    [
+                        "full_name",
+                        "module",
+                        "lineno",
+                        "name",
+                        "ncall",
+                        "nactualcall",
+                        "ttot_s",
+                        "tsub_s",
+                        "tavg_s",
+                        "ctx_name",
+                    ]
+                )
+                for entry in stats:
+                    writer.writerow(
+                        [
+                            getattr(entry, "full_name", ""),
+                            getattr(entry, "module", ""),
+                            getattr(entry, "lineno", ""),
+                            getattr(entry, "name", ""),
+                            getattr(entry, "ncall", ""),
+                            getattr(entry, "nactualcall", ""),
+                            getattr(entry, "ttot", ""),
+                            getattr(entry, "tsub", ""),
+                            getattr(entry, "tavg", ""),
+                            getattr(entry, "ctx_name", ""),
+                        ]
+                    )
+            print(f"profile: yappi csv={out_path}")
+        finally:
+            try:
+                yappi.clear_stats()
+            except Exception:
+                pass
+
     print("IBKR speed burner (warm-cache, cache-only)")
     print(f"futures: {iterations} iters in {futures_s:.3f}s ({iterations / max(futures_s, 1e-9):.1f} it/s)")
     print(f"crypto:  {iterations} iters in {crypto_s:.3f}s ({iterations / max(crypto_s, 1e-9):.1f} it/s)")

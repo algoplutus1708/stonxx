@@ -67,6 +67,17 @@ Record wall time and iterations/sec for each milestone. Keep results append-only
 | 2026-01-22 | Prefetch once → slice forever | TBD | TBD | Eliminates refetch/window thrash |
 | 2026-01-22 | DataFrame slice fast-path | TBD | TBD | Avoid per-call DataFrame rebuild |
 
+### Long-run sanity (iterations scaling)
+
+Backtests that feel “hours long” typically degrade with iteration count due to hidden O(n) / O(n log n)
+work (e.g., event list cleanup, growing order/position lists).
+
+This table uses a longer loop length to catch that early:
+
+| Date | Change | Iterations | Futures time (s) | Crypto time (s) | Notes |
+|------|--------|------------|------------------|-----------------|-------|
+| 2026-01-22 | Warm-cache (cache-only) benchmark | 2000 | 6.737 | 9.460 | `python3 scripts/bench_ibkr_speed_burner_warm_cache.py --iterations 2000` |
+
 ---
 
 ## Notes / invariants
