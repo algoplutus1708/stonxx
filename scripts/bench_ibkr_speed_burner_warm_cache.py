@@ -64,6 +64,18 @@ def main() -> int:
         default="",
         help="Optional path to write a yappi CSV profile (matches LumiBot *_profile_yappi.csv format).",
     )
+    parser.add_argument(
+        "--assert-futures-max-s",
+        type=float,
+        default=0.0,
+        help="If >0, exit non-zero when futures loop exceeds this wall time (seconds).",
+    )
+    parser.add_argument(
+        "--assert-crypto-max-s",
+        type=float,
+        default=0.0,
+        help="If >0, exit non-zero when crypto loop exceeds this wall time (seconds).",
+    )
     args = parser.parse_args()
 
     from lumibot.backtesting import BacktestingBroker
@@ -287,6 +299,16 @@ def main() -> int:
     print(f"futures: {iterations} iters in {futures_s:.3f}s ({iterations / max(futures_s, 1e-9):.1f} it/s)")
     print(f"crypto:  {iterations} iters in {crypto_s:.3f}s ({iterations / max(crypto_s, 1e-9):.1f} it/s)")
     print("note: this benchmark asserts queue-free behavior by monkeypatching queue_request to raise")
+
+    failed = False
+    if float(args.assert_futures_max_s or 0.0) > 0.0 and futures_s > float(args.assert_futures_max_s):
+        print(f"FAIL: futures wall time {futures_s:.3f}s exceeds max {float(args.assert_futures_max_s):.3f}s")
+        failed = True
+    if float(args.assert_crypto_max_s or 0.0) > 0.0 and crypto_s > float(args.assert_crypto_max_s):
+        print(f"FAIL: crypto wall time {crypto_s:.3f}s exceeds max {float(args.assert_crypto_max_s):.3f}s")
+        failed = True
+    if failed:
+        return 2
     return 0
 
 

@@ -86,3 +86,14 @@ This table uses a longer loop length to catch that early:
 - Do not create synthetic bars across gaps. See `docs/BACKTESTING_SESSION_GAPS_AND_DATA_GAPS.md`.
 - If the strategy clock lands in a futures session gap, orders may be accepted but must not fill until data resumes.
 - Prefer “warm-cache speed” as the primary metric; cold downloads are allowed once but must not repeat.
+
+## Speed gate (release check)
+
+Use the benchmark script’s built-in assertions as a conservative speed gate:
+
+```bash
+python3 scripts/bench_ibkr_speed_burner_warm_cache.py \
+  --iterations 2000 \
+  --assert-futures-max-s 10 \
+  --assert-crypto-max-s 15
+```
