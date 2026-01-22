@@ -68,8 +68,22 @@ def main() -> int:
 
     # Require downloader creds. This script is explicitly for warming caches.
     _load_repo_dotenv_if_needed()
-    _require_env("DATADOWNLOADER_BASE_URL")
-    _require_env("DATADOWNLOADER_API_KEY")
+    base_url = _require_env("DATADOWNLOADER_BASE_URL").rstrip("/")
+    api_key = _require_env("DATADOWNLOADER_API_KEY")
+    api_key_header = (os.environ.get("DATADOWNLOADER_API_KEY_HEADER") or "X-Downloader-Key").strip() or "X-Downloader-Key"
+
+    # Fail fast if the downloader is unreachable instead of stalling on queue waits.
+    try:
+        import requests
+
+        resp = requests.get(
+            f"{base_url}/healthz",
+            headers={api_key_header: api_key},
+            timeout=5,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        raise RuntimeError(f"Downloader not reachable/healthy (warm step aborted): {exc}") from exc
 
     from lumibot.entities import Asset
     import lumibot.tools.ibkr_helper as ibkr_helper
@@ -110,7 +124,10 @@ def main() -> int:
     ]
 
     for asset, timestep, start, end in assets:
-        print(f"WARM start asset={getattr(asset, 'symbol', asset)} type={getattr(asset, 'asset_type', '')} timestep={timestep}")
+        print(
+            f"WARM start asset={getattr(asset, 'symbol', asset)} type={getattr(asset, 'asset_type', '')} timestep={timestep}",
+            flush=True,
+        )
         df = ibkr_helper.get_price_data(
             asset=asset,
             quote=None,
@@ -123,7 +140,7 @@ def main() -> int:
         )
         if df is None or df.empty:
             raise RuntimeError(f"Failed to warm {asset} timestep={timestep}: empty dataframe")
-        print(f"WARM ok asset={getattr(asset, 'symbol', asset)} timestep={timestep} rows={len(df)}")
+        print(f"WARM ok asset={getattr(asset, 'symbol', asset)} timestep={timestep} rows={len(df)}", flush=True)
 
     print("IBKR speed burner warm: OK (parquet cache populated)")
     return 0
