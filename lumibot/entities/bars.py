@@ -237,11 +237,49 @@ class Bars:
             self._df = df
             # Calculate derived columns if needed
             if "dividend" in df.columns:
-                self._df["price_change"] = df["close"].pct_change()
-                self._df["dividend_yield"] = df["dividend"] / df["close"]
-                self._df["return"] = self._df["dividend_yield"] + self._df["price_change"]
+                # PERF: `pct_change()` allocates several intermediate Series/Index objects and is a
+                # dominant cost when strategies call `get_historical_prices()` frequently (minute
+                # backtests). Compute the same semantics with NumPy to reduce overhead.
+                close_series = df["close"]
+                try:
+                    close = close_series.to_numpy(dtype="float64", copy=False)
+                except Exception:
+                    close = pd.to_numeric(close_series, errors="coerce").to_numpy(dtype="float64", copy=False)
+
+                price_change = np.empty(len(close), dtype="float64")
+                price_change[:] = np.nan
+                if len(close) > 1:
+                    prev = close[:-1]
+                    curr = close[1:]
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        price_change[1:] = (curr - prev) / prev
+
+                div_series = df["dividend"]
+                try:
+                    div = div_series.to_numpy(dtype="float64", copy=False)
+                except Exception:
+                    div = pd.to_numeric(div_series, errors="coerce").to_numpy(dtype="float64", copy=False)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    dividend_yield = div / close
+
+                self._df["price_change"] = price_change
+                self._df["dividend_yield"] = dividend_yield
+                self._df["return"] = dividend_yield + price_change
             else:
-                self._df["return"] = df["close"].pct_change()
+                close_series = df["close"]
+                try:
+                    close = close_series.to_numpy(dtype="float64", copy=False)
+                except Exception:
+                    close = pd.to_numeric(close_series, errors="coerce").to_numpy(dtype="float64", copy=False)
+
+                returns = np.empty(len(close), dtype="float64")
+                returns[:] = np.nan
+                if len(close) > 1:
+                    prev = close[:-1]
+                    curr = close[1:]
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        returns[1:] = (curr - prev) / prev
+                self._df["return"] = returns
 
             self._apply_timezone()
             if self._return_polars:

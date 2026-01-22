@@ -66,6 +66,7 @@ Record wall time and iterations/sec for each milestone. Keep results append-only
 | 2026-01-22 | Remove synthetic bars across gaps | TBD | TBD | Correctness + avoids fake work |
 | 2026-01-22 | Prefetch once → slice forever | TBD | TBD | Eliminates refetch/window thrash |
 | 2026-01-22 | DataFrame slice fast-path | TBD | TBD | Avoid per-call DataFrame rebuild |
+| 2026-01-22 | Skip per-slice dropna/fillna + faster Bars derived cols | 3.797 | 5.305 | `Data.get_bars()` avoids redundant `dropna()`/`fillna()` when the dataset is already complete; `Bars` uses NumPy for derived columns |
 
 ### Long-run sanity (iterations scaling)
 
@@ -78,6 +79,8 @@ This table uses a longer loop length to catch that early:
 |------|--------|------------|------------------|-----------------|-------|
 | 2026-01-22 | Warm-cache (cache-only) benchmark | 2000 | 6.737 | 9.460 | `python3 scripts/bench_ibkr_speed_burner_warm_cache.py --iterations 2000` |
 | 2026-01-22 | Faster asof + avoid unused dataline dicts | 2000 | 6.069 | 9.137 | `Data.get_iter_count()` uses index searchsorted; `Data.get_bars()` slices native df before `_get_bars_dict()` |
+| 2026-01-22 | Skip per-slice dropna/fillna + faster Bars derived cols | 2000 | 3.797 | 5.305 | Same as above; also includes a benchmark guard to avoid accumulating unfillable orders when the clock exceeds the cached window |
+| 2026-01-22 | Same (scaling check) | 20000 | 26.296 | 34.779 | `python3 scripts/bench_ibkr_speed_burner_warm_cache.py --iterations 20000` |
 
 ---
 

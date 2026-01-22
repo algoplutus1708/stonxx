@@ -23,7 +23,7 @@ downloader (because warm-cache speed is the metric we care about).
 import os
 import sys
 import argparse
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from time import perf_counter
@@ -92,9 +92,10 @@ def main() -> int:
             self.include_cash_positions = True
 
         def _burn_one_asset(self, asset: Asset):
-            _ = self.get_last_price(asset)
+            last = self.get_last_price(asset)
             _ = self.get_historical_prices(asset, length=100, timestep="minute")
             _ = self.get_historical_prices(asset, length=20, timestep="day")
+            return last
 
     class _FuturesSpeedBurnerStrategy(_SpeedBurnerBase):
         def initialize(self, parameters=None):
@@ -102,11 +103,19 @@ def main() -> int:
             self.futs = list(parameters["futs"])
 
         def on_trading_iteration(self):
+            prices: dict[Asset, float | None] = {}
             for fut in self.futs:
-                self._burn_one_asset(fut)
+                prices[fut] = self._burn_one_asset(fut)
 
             side = Order.OrderSide.BUY if (self._i % 2 == 0) else Order.OrderSide.SELL
             for fut in self.futs:
+                # In a real strategy, you would not submit market orders when the market is closed
+                # or when the data source has no bar at the current timestamp. Keep the benchmark
+                # realistic so long-iteration runs don't accumulate unfillable orders and explode
+                # runtime (O(n^2) order scans).
+                px = prices.get(fut)
+                if px is None:
+                    continue
                 order = self.create_order(fut, Decimal("1"), side, order_type=Order.OrderType.MARKET)
                 self.submit_order(order)
             self._i += 1
@@ -117,11 +126,15 @@ def main() -> int:
             self.coins = list(parameters["coins"])
 
         def on_trading_iteration(self):
+            prices: dict[Asset, float | None] = {}
             for coin in self.coins:
-                self._burn_one_asset(coin)
+                prices[coin] = self._burn_one_asset(coin)
 
             side = Order.OrderSide.BUY if (self._i % 2 == 0) else Order.OrderSide.SELL
             for coin in self.coins:
+                px = prices.get(coin)
+                if px is None:
+                    continue
                 order = self.create_order(coin, Decimal("0.01"), side, order_type=Order.OrderType.MARKET)
                 self.submit_order(order)
             self._i += 1
@@ -166,6 +179,7 @@ def main() -> int:
     broker.initialize_market_calendars(data_source.get_trading_days_pandas())
     broker._first_iteration = False
     broker._update_datetime(start.replace(hour=12, minute=0))  # ensure some lookback exists
+    wrap_dt = start.replace(hour=12, minute=0)
 
     futures = _FuturesSpeedBurnerStrategy(
         broker=broker,
@@ -234,14 +248,20 @@ def main() -> int:
         futures.on_trading_iteration()
         broker.process_pending_orders(futures)
         futures._executor.process_queue()
-        broker._update_datetime(60)
+        next_dt = broker.datetime + timedelta(minutes=1)
+        if next_dt >= end:
+            next_dt = wrap_dt
+        broker._update_datetime(next_dt)
     t1 = perf_counter()
 
     for _ in range(iterations):
         crypto.on_trading_iteration()
         broker.process_pending_orders(crypto)
         crypto._executor.process_queue()
-        broker._update_datetime(60)
+        next_dt = broker.datetime + timedelta(minutes=1)
+        if next_dt >= end:
+            next_dt = wrap_dt
+        broker._update_datetime(next_dt)
     t2 = perf_counter()
 
     futures_s = t1 - t0

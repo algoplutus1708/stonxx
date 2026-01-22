@@ -227,6 +227,32 @@ class Data:
         self.datetime_start = self.df.index[0]
         self.datetime_end = self.df.index[-1]
 
+        # PERF: `get_bars()` is called extremely frequently in minute-level backtests.
+        # Avoid doing expensive pandas operations (dropna/fillna) on every slice when we can
+        # prove the underlying dataset is already complete.
+        #
+        # This keeps correctness: if the dataset contains NaNs in any OHLC column, we keep
+        # the legacy dropna path for every slice.
+        self._ohlc_has_nan = False
+        self._volume_has_nan = False
+        self._dividend_has_nan = False
+        try:
+            required = [c for c in ("open", "high", "low", "close") if c in self.df.columns]
+            if required:
+                try:
+                    values = self.df[required].to_numpy(copy=False)
+                except Exception:
+                    values = self.df[required].to_numpy()
+                self._ohlc_has_nan = bool(pd.isna(values).any())
+            if "volume" in self.df.columns:
+                self._volume_has_nan = bool(pd.isna(self.df["volume"].to_numpy(copy=False)).any())
+            if "dividend" in self.df.columns:
+                self._dividend_has_nan = bool(pd.isna(self.df["dividend"].to_numpy(copy=False)).any())
+        except Exception:
+            self._ohlc_has_nan = True
+            self._volume_has_nan = True
+            self._dividend_has_nan = True
+
     def set_times(self, trading_hours_start, trading_hours_end):
         """Set the start and end times for the data. The default is 0001 hrs to 2359 hrs.
 
@@ -910,13 +936,21 @@ class Data:
             cols = [c for c in cols if c in df.columns]
             df = df[cols]
 
-            if "volume" in df.columns:
-                df["volume"] = df["volume"].fillna(0)
-            if "dividend" in df.columns:
-                df["dividend"] = df["dividend"].fillna(0)
+            # PERF: avoid fillna on every slice unless the dataset actually contains NaNs.
+            needs_copy = False
+            if "volume" in df.columns and getattr(self, "_volume_has_nan", False):
+                needs_copy = True
+            if "dividend" in df.columns and getattr(self, "_dividend_has_nan", False):
+                needs_copy = True
+            if needs_copy:
+                df = df.copy()
+                if "volume" in df.columns and getattr(self, "_volume_has_nan", False):
+                    df["volume"] = df["volume"].fillna(0)
+                if "dividend" in df.columns and getattr(self, "_dividend_has_nan", False):
+                    df["dividend"] = df["dividend"].fillna(0)
 
             required = [c for c in ("open", "high", "low", "close") if c in df.columns]
-            if required:
+            if required and getattr(self, "_ohlc_has_nan", True):
                 df = df.dropna(subset=required)
 
             return df.tail(n=int(num_periods))
@@ -981,13 +1015,21 @@ class Data:
             cols = [c for c in cols if c in df.columns]
             df = df[cols]
 
-            if "volume" in df.columns:
-                df["volume"] = df["volume"].fillna(0)
-            if "dividend" in df.columns:
-                df["dividend"] = df["dividend"].fillna(0)
+            # PERF: avoid fillna on every slice unless the dataset actually contains NaNs.
+            needs_copy = False
+            if "volume" in df.columns and getattr(self, "_volume_has_nan", False):
+                needs_copy = True
+            if "dividend" in df.columns and getattr(self, "_dividend_has_nan", False):
+                needs_copy = True
+            if needs_copy:
+                df = df.copy()
+                if "volume" in df.columns and getattr(self, "_volume_has_nan", False):
+                    df["volume"] = df["volume"].fillna(0)
+                if "dividend" in df.columns and getattr(self, "_dividend_has_nan", False):
+                    df["dividend"] = df["dividend"].fillna(0)
 
             required = [c for c in ("open", "high", "low", "close") if c in df.columns]
-            if required:
+            if required and getattr(self, "_ohlc_has_nan", True):
                 df = df.dropna(subset=required)
 
             return df.tail(n=int(num_periods))

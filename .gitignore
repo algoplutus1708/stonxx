@@ -73,6 +73,10 @@ tests/backtest/_acceptance_warm_runs/
 tests/backtest/_parity_runs/
 tests/backtest/_manual_visual_runs/
 
+# Local benchmarks (cache + profiler outputs)
+tests/backtest/_ibkr_speed_burner_cache/
+tests/backtest/_speed_burner_profiles/
+
 # Prod-like local runner output
 backtest_runs/
 
