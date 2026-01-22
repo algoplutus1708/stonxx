@@ -1,4 +1,5 @@
 import datetime
+import inspect
 import logging
 import math
 import os
@@ -4050,16 +4051,34 @@ class Strategy(_Strategy):
         effective_return_polars = return_polars
         # Call through to the appropriate data source. Only pass `return_polars` if supported
         # to maintain compatibility with live data sources that don't yet accept it.
-        import inspect
+        #
+        # PERF: `inspect.signature()` is expensive and this method is called in tight loops
+        # during minute-level backtests. Cache support per data source type.
+        supports_cache = getattr(self, "_get_hist_supports_return_polars_by_ds_type", None)
+        if supports_cache is None:
+            supports_cache = {}
+            setattr(self, "_get_hist_supports_return_polars_by_ds_type", supports_cache)
+
+        def _supports_return_polars(ds) -> bool:
+            ds_type = type(ds)
+            cached = supports_cache.get(ds_type)
+            if cached is not None:
+                return bool(cached)
+            try:
+                params = inspect.signature(ds_type.get_historical_prices).parameters
+                supports = (
+                    "return_polars" in params
+                    or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+                )
+            except Exception:
+                # Conservative default: if we can't inspect, assume it does NOT support return_polars
+                # so we don't raise TypeError by passing an unknown kwarg.
+                supports = False
+            supports_cache[ds_type] = bool(supports)
+            return bool(supports)
 
         def _call_get_hist(ds):
             fn = ds.get_historical_prices
-            params = inspect.signature(fn).parameters
-            supports_return_polars = (
-                "return_polars" in params
-                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
-            )
-
             common_kwargs = dict(
                 timestep=actual_timestep,  # Use the actual timestep for fetching
                 timeshift=timeshift,
@@ -4067,19 +4086,18 @@ class Strategy(_Strategy):
                 include_after_hours=include_after_hours,
                 quote=quote,
             )
-            if supports_return_polars:
+            if _supports_return_polars(ds):
                 return fn(
                     asset,
                     actual_length,  # Use the actual length for fetching
                     return_polars=effective_return_polars,
                     **common_kwargs,
                 )
-            else:
-                return fn(
-                    asset,
-                    actual_length,  # Use the actual length for fetching
-                    **common_kwargs,
-                )
+            return fn(
+                asset,
+                actual_length,  # Use the actual length for fetching
+                **common_kwargs,
+            )
 
         # Get the raw data
         if self.broker.option_source and asset.asset_type == "option":

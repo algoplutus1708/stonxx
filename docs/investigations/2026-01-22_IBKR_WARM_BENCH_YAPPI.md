@@ -83,3 +83,17 @@ Top items from the 2000-iteration profile (self time focuses on “where CPU is 
 
 These changes should be measured after each commit using the canonical benchmark protocol in the speed report.
 
+## Milestones (profile deltas)
+
+### 2026-01-22 — Cache `Strategy.get_historical_prices()` signature check
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_inspectcache_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `pandas_numpy`: ~59%
+- `lumibot_other`: ~31%
+- `other`: ~8%
+
+Key delta vs baseline:
+- `inspect.*` functions (signature/parameter construction) no longer show up as a dominant hotspot, confirming the per-call introspection overhead was removed.
