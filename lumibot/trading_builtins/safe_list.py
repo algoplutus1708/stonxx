@@ -71,3 +71,21 @@ class SafeList:
         with self.__lock:
             for item in self.__items:
                 self.remove(item)
+
+    def trim_to_last(self, keep_last: int) -> int:
+        """Keep only the last `keep_last` items (drop the oldest).
+
+        This is a performance primitive used by backtesting to avoid O(n log n) sorts and repeated
+        `list.remove()` scans when enforcing simple retention policies on append-only event lists.
+        """
+        keep_last = int(keep_last or 0)
+        with self.__lock:
+            if keep_last <= 0:
+                removed = len(self.__items)
+                self.__items = []
+                return removed
+            if len(self.__items) <= keep_last:
+                return 0
+            removed = len(self.__items) - keep_last
+            self.__items = self.__items[-keep_last:]
+            return removed

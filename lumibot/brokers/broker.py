@@ -315,32 +315,77 @@ class Broker(ABC):
         if len(items) <= policy.get("min_keep", 0):
             return 0  # Don't clean up if below minimum threshold
         
-        items_to_remove = []
         max_age_days = policy.get("max_age_days")
         max_count = policy.get("max_count")
         min_keep = policy.get("min_keep", 0)
-        
-        # Sort items by age (newest first) to preserve recent items
+
+        # PERF (backtesting): these tracking lists are append-only in deterministic chronological
+        # order. Sorting (O(n log n)) and repeated `remove()` scans are major hot spots in long
+        # backtests, especially for strategies that trade frequently.
+        #
+        # In backtesting, prefer a cheap short-circuit when nothing could be removed, and use
+        # `trim_to_last()` for count-based retention.
+        if getattr(self, "IS_BACKTESTING_BROKER", False):
+            item_count = len(items)
+
+            # Short-circuit: under max_count AND oldest item within age window => nothing to do.
+            if max_count and item_count <= int(max_count or 0) and max_age_days:
+                try:
+                    oldest_ts = self._get_item_timestamp(items[0]) if items else None
+                    if oldest_ts is not None and (current_time - oldest_ts).days < int(max_age_days):
+                        return 0
+                except Exception:
+                    pass
+            if max_count and item_count <= int(max_count or 0) and not max_age_days:
+                return 0
+
+            removed_total = 0
+
+            # Age retention (when configured): drop oldest until cutoff, keeping `min_keep`.
+            if max_age_days:
+                cutoff = current_time - timedelta(days=int(max_age_days))
+                drop = 0
+                for item in items:
+                    try:
+                        ts = self._get_item_timestamp(item)
+                    except Exception:
+                        ts = None
+                    if ts is None or ts >= cutoff:
+                        break
+                    drop += 1
+                keep_last_age = max(int(min_keep or 0), item_count - drop)
+                removed_total += safe_list.trim_to_last(keep_last_age)
+
+            # Count retention (when configured): keep the most recent `max_count` items (but never
+            # fewer than `min_keep`).
+            if max_count:
+                keep_last_count = max(int(min_keep or 0), int(max_count or 0))
+                removed_total += safe_list.trim_to_last(keep_last_count)
+
+            return removed_total
+
+        # Default (live + unknown ordering): sort by age (newest first) to preserve recent items.
+        items_to_remove = []
         sorted_items = sorted(items, key=self._get_item_timestamp, reverse=True)
-        
+
         for i, item in enumerate(sorted_items):
             should_remove = False
-            
+
             # Always keep minimum number of recent items
             if i < min_keep:
                 continue
-                
+
             # Remove by age
             if max_age_days and self._is_item_too_old(item, current_time, max_age_days):
                 should_remove = True
-                
+
             # Remove by count (keep most recent)
             if max_count and i >= max_count:
                 should_remove = True
-                
+
             if should_remove:
                 items_to_remove.append(item)
-        
+
         # Remove items (thread-safe)
         for item in items_to_remove:
             try:
@@ -348,7 +393,7 @@ class Broker(ABC):
             except ValueError:
                 # Item might have been removed by another thread
                 pass
-        
+
         return len(items_to_remove)
 
     def _get_item_timestamp(self, item):
