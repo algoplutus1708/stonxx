@@ -927,7 +927,11 @@ def _fetch_history_between_dates(
     bar, bar_seconds, _cache_timestep = _timestep_to_ibkr_bar(timestep)
     period = _max_period_for_bar(bar)
     asset_type = str(getattr(asset, "asset_type", "") or "").lower()
-    continuous = bool(asset_type == "cont_future")
+    # IBKR's `continuous=true` is IBKR-specific roll behavior. For LumiBot `cont_future` assets
+    # we prefer our own synthetic roll (explicit contract series per expiration) so parity is
+    # stable across data providers. Only request IBKR "continuous" when we truly do not have an
+    # explicit expiration to anchor the contract.
+    continuous = bool(asset_type == "cont_future" and getattr(asset, "expiration", None) is None)
 
     cursor_end = _to_utc(end_dt)
     start_dt = _to_utc(start_dt)

@@ -346,6 +346,170 @@ def test_ibkr_rest_backtesting_futures_market_fill_uses_last_bar_open_across_lar
     assert buy.get_fill_price() == pytest.approx(6482.25, rel=1e-12)
 
 
+def test_ibkr_rest_backtesting_futures_stop_fill_uses_last_bar_across_intraday_gap(monkeypatch):
+    import lumibot.tools.ibkr_helper as ibkr_helper
+
+    # Same early-close shape as the market-fill test, but validate stop fills too.
+    idx = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2025-09-01 12:59:00", tz="America/New_York"),
+            pd.Timestamp("2025-09-01 18:00:00", tz="America/New_York"),
+        ]
+    )
+    df = pd.DataFrame(
+        {
+            "open": [6482.25, 6480.00],
+            "high": [6483.00, 6483.00],
+            "low": [6481.75, 6479.75],
+            "close": [6483.00, 6480.25],
+            "volume": [1000, 1000],
+        },
+        index=idx,
+    )
+
+    def fake_get_price_data(*, asset, quote, timestep, start_dt, end_dt, exchange=None, include_after_hours=True, source=None):
+        return df
+
+    monkeypatch.setattr(ibkr_helper, "get_price_data", fake_get_price_data)
+
+    data_source = InteractiveBrokersRESTBacktesting(
+        datetime_start=idx[0].to_pydatetime(),
+        datetime_end=(idx[-1] + pd.Timedelta(minutes=1)).to_pydatetime(),
+        market="24/7",
+        show_progress_bar=False,
+        log_backtest_progress_to_file=False,
+    )
+    data_source.load_data()
+
+    broker = BacktestingBroker(data_source=data_source)
+    broker.initialize_market_calendars(data_source.get_trading_days_pandas())
+    broker._first_iteration = False
+
+    strategy = _DummyIbkrFuturesStrategy(
+        broker=broker,
+        budget=10_000.0,
+        analyze_backtest=False,
+        parameters={},
+    )
+    strategy._first_iteration = False
+
+    fut = Asset("MES", asset_type=Asset.AssetType.CONT_FUTURE, multiplier=5)
+    setattr(fut, "min_tick", 0.25)
+
+    data_source.get_historical_prices_between_dates(
+        (fut, Asset("USD", asset_type=Asset.AssetType.FOREX)),
+        timestep="minute",
+        quote=None,
+        start_date=idx[0].to_pydatetime(),
+        end_date=idx[-1].to_pydatetime(),
+    )
+
+    # Create an open long position so we have a sell stop to trigger.
+    broker._update_datetime(pd.Timestamp("2025-09-01 12:59:00", tz="America/New_York").to_pydatetime())
+    buy = strategy.create_order(fut, Decimal("1"), Order.OrderSide.BUY, order_type=Order.OrderType.MARKET)
+    strategy.submit_order(buy)
+    broker.process_pending_orders(strategy)
+    strategy._executor.process_queue()
+    assert buy.is_filled()
+
+    # Evaluate in the gap (no bar at 17:55). Stop should fill using the last available bar, not the
+    # next session open.
+    broker._update_datetime(pd.Timestamp("2025-09-01 17:55:00", tz="America/New_York").to_pydatetime())
+    stop_exit = strategy.create_order(
+        fut,
+        Decimal("1"),
+        Order.OrderSide.SELL,
+        order_type=Order.OrderType.STOP,
+        stop_price=Decimal("999999"),
+    )
+    strategy.submit_order(stop_exit)
+    broker.process_pending_orders(strategy)
+    strategy._executor.process_queue()
+    assert stop_exit.is_filled()
+    assert stop_exit.get_fill_price() == pytest.approx(6482.25, rel=1e-12)
+
+
+def test_ibkr_rest_backtesting_futures_gap_one_bar_before_open_uses_next_bar(monkeypatch):
+    import lumibot.tools.ibkr_helper as ibkr_helper
+
+    idx = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2025-09-01 12:59:00", tz="America/New_York"),
+            pd.Timestamp("2025-09-01 18:00:00", tz="America/New_York"),
+        ]
+    )
+    df = pd.DataFrame(
+        {
+            "open": [6482.25, 6480.00],
+            "high": [6483.00, 6483.00],
+            "low": [6481.75, 6479.75],
+            "close": [6483.00, 6480.25],
+            "volume": [1000, 1000],
+        },
+        index=idx,
+    )
+
+    def fake_get_price_data(*, asset, quote, timestep, start_dt, end_dt, exchange=None, include_after_hours=True, source=None):
+        return df
+
+    monkeypatch.setattr(ibkr_helper, "get_price_data", fake_get_price_data)
+
+    data_source = InteractiveBrokersRESTBacktesting(
+        datetime_start=idx[0].to_pydatetime(),
+        datetime_end=(idx[-1] + pd.Timedelta(minutes=1)).to_pydatetime(),
+        market="24/7",
+        show_progress_bar=False,
+        log_backtest_progress_to_file=False,
+    )
+    data_source.load_data()
+
+    broker = BacktestingBroker(data_source=data_source)
+    broker.initialize_market_calendars(data_source.get_trading_days_pandas())
+    broker._first_iteration = False
+
+    strategy = _DummyIbkrFuturesStrategy(
+        broker=broker,
+        budget=10_000.0,
+        analyze_backtest=False,
+        parameters={},
+    )
+    strategy._first_iteration = False
+
+    fut = Asset("MES", asset_type=Asset.AssetType.CONT_FUTURE, multiplier=5)
+    setattr(fut, "min_tick", 0.25)
+
+    data_source.get_historical_prices_between_dates(
+        (fut, Asset("USD", asset_type=Asset.AssetType.FOREX)),
+        timestep="minute",
+        quote=None,
+        start_date=idx[0].to_pydatetime(),
+        end_date=idx[-1].to_pydatetime(),
+    )
+
+    broker._update_datetime(pd.Timestamp("2025-09-01 12:59:00", tz="America/New_York").to_pydatetime())
+    buy = strategy.create_order(fut, Decimal("1"), Order.OrderSide.BUY, order_type=Order.OrderType.MARKET)
+    strategy.submit_order(buy)
+    broker.process_pending_orders(strategy)
+    strategy._executor.process_queue()
+    assert buy.is_filled()
+
+    # One bar before the next session open (18:00). We should allow next-bar execution here
+    # so fills line up with the reopened session's open price.
+    broker._update_datetime(pd.Timestamp("2025-09-01 17:59:00", tz="America/New_York").to_pydatetime())
+    stop_exit = strategy.create_order(
+        fut,
+        Decimal("1"),
+        Order.OrderSide.SELL,
+        order_type=Order.OrderType.STOP,
+        stop_price=Decimal("999999"),
+    )
+    strategy.submit_order(stop_exit)
+    broker.process_pending_orders(strategy)
+    strategy._executor.process_queue()
+    assert stop_exit.is_filled()
+    assert stop_exit.get_fill_price() == pytest.approx(6480.00, rel=1e-12)
+
+
 def test_ibkr_rest_backtesting_futures_trailing_stop_triggers(monkeypatch):
     import lumibot.tools.ibkr_helper as ibkr_helper
 

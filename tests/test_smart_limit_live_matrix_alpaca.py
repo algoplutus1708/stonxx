@@ -5,7 +5,7 @@ import pytest
 
 from lumibot.brokers.alpaca import Alpaca
 from lumibot.components.options_helper import OptionsHelper
-from lumibot.credentials import ALPACA_TEST_CONFIG
+from lumibot.credentials import ALPACA_CONFIG, ALPACA_TEST_CONFIG
 from lumibot.entities import Asset, Order, SmartLimitConfig, SmartLimitPreset
 from lumibot.strategies.strategy import Strategy
 
@@ -23,11 +23,28 @@ class _HarnessStrategy(Strategy):
 
 
 def _alpaca() -> Alpaca:
-    api_key = ALPACA_TEST_CONFIG.get("API_KEY")
-    api_secret = ALPACA_TEST_CONFIG.get("API_SECRET")
-    if not api_key or not api_secret or api_key == "<your key here>" or api_secret == "<your key here>":
-        pytest.skip("Missing ALPACA_TEST_API_KEY / ALPACA_TEST_API_SECRET in .env")
-    return Alpaca(ALPACA_TEST_CONFIG, connect_stream=False)
+    configs = [
+        ("ALPACA_TEST_CONFIG", ALPACA_TEST_CONFIG),
+        ("ALPACA_CONFIG", ALPACA_CONFIG),
+    ]
+
+    for label, cfg in configs:
+        api_key = cfg.get("API_KEY")
+        api_secret = cfg.get("API_SECRET")
+        if not api_key or not api_secret or api_key == "<your key here>" or api_secret == "<your key here>":
+            continue
+
+        broker = Alpaca(cfg, connect_stream=False)
+        try:
+            broker.api.get_all_positions()
+            return broker
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "unauthorized" in msg or "401" in msg:
+                continue
+            raise RuntimeError(f"Alpaca API failed for {label}: {exc}") from exc
+
+    pytest.skip("Missing/invalid Alpaca credentials in .env (ALPACA_TEST_API_KEY/SECRET or ALPACA_API_KEY/SECRET)")
 
 
 def _poll_alpaca_order(broker: Alpaca, order: Order):

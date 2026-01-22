@@ -556,12 +556,10 @@ class BacktestingBroker(Broker):
         # Only advance time if there is positive time remaining.
         if time_to_close > 0:
             self._update_datetime(time_to_close)
-        # If the calculated time is non-positive, but the market was initially open (result > 0),
-        # advance by a minimal amount to prevent potential infinite loops if called repeatedly near close.
-        elif result > 0:  # Only if original result was strictly positive
-            logger.debug("Calculated time to close is non-positive. Advancing time by 1 second.")
-            self._update_datetime(1)
-        # Otherwise (result <= 0 initially), do nothing, market is already closed.
+        # If the calculated time is non-positive (e.g., exactly `minutes_before_closing` before
+        # the close), do nothing. Nudging by 1 second can shift the simulated timestamp off
+        # bar boundaries (e.g., 17:59:01), which breaks parity and can cause subtle lookups.
+        # Otherwise (result <= 0 initially), the market is already closed.
 
     # =========Positions functions==================
     def _pull_broker_position(self, asset):
@@ -938,14 +936,6 @@ class BacktestingBroker(Broker):
         except Exception:
             pass
 
-        # NOTE: This code is to address Tradier API requirements, they want is as "to_open" or "to_close" instead of just "buy" or "sell"
-        # If the order has a "buy_to_open" or "buy_to_close" side, then we should change it to "buy"
-        if order.is_buy_order():
-            order.side = Order.OrderSide.BUY
-        # If the order has a "sell_to_open" or "sell_to_close" side, then we should change it to "sell"
-        if order.is_sell_order():
-            order.side = Order.OrderSide.SELL
-
         # Submit regular and Bracket/OTO orders now.
         # OCO orders have no parent orders, so do not submit this "main" order. The children of an OCO will be
         # submitted below. Bracket/OTO orders will be submitted here, but their child orders will not be submitted
@@ -974,11 +964,6 @@ class BacktestingBroker(Broker):
                     self._audit_merge(child, self._audit_submit_fields(child), overwrite=False)
                 except Exception:
                     pass
-
-                if child.is_buy_order():
-                    child.side = Order.OrderSide.BUY
-                elif child.is_sell_order():
-                    child.side = Order.OrderSide.SELL
 
                 child.parent_identifier = order.identifier
                 child.update_raw(child)
@@ -2300,46 +2285,24 @@ class BacktestingBroker(Broker):
                         else:
                             next_dt = df_next.index[0]
 
-                            created_at = getattr(order, "_date_created", None)
-                            is_new_order = False
-                            if created_at is not None:
-                                try:
-                                    created_ts = pd.Timestamp(created_at)
-                                    now_ts = pd.Timestamp(self.datetime)
-                                    if created_ts.tz is None and now_ts.tz is not None:
-                                        created_ts = created_ts.tz_localize(now_ts.tz)
-                                    elif created_ts.tz is not None and now_ts.tz is None:
-                                        now_ts = now_ts.tz_localize(created_ts.tz)
-                                    is_new_order = created_ts >= now_ts
-                                except Exception:
-                                    is_new_order = False
-
-                            timestep = str(getattr(self.data_source, "_timestep", "minute"))
-                            expected_step = None
-                            if timestep in {"minute", "1m", "min"}:
-                                expected_step = pd.Timedelta(minutes=1)
-                            elif timestep in {"hour", "1h"}:
-                                expected_step = pd.Timedelta(hours=1)
-
-                            is_session_gap = False
-                            if expected_step is not None:
-                                try:
-                                    gap = pd.Timestamp(next_dt) - pd.Timestamp(self.datetime)
-                                    is_session_gap = gap > expected_step * 5
-                                except Exception:
-                                    is_session_gap = False
-
-                            # When the next bar is a large session gap (daily maintenance, holiday early
-                            # close, weekend), prefer filling from the last available bar (no jump to
-                            # the next session open).
+                            # IMPORTANT (no synthetic bars / no fills in gaps):
+                            # IBKR historical bars can include real gaps (maintenance windows,
+                            # holiday early closes, weekend). If the backtest clock lands on a
+                            # timestamp with no bar, we must not "fill using the next bar" while
+                            # keeping the older timestamp. The order should remain working and
+                            # only be eligible to fill once the clock reaches a timestamp where
+                            # actionable data exists.
                             #
-                            # This keeps IBKR futures backtests consistent with our stored baselines
-                            # (DataBento artifact runs) which were produced under the same
-                            # "current-bar fallback" semantics for gaps.
-                            if is_session_gap:
-                                df = df_original[df_original.index <= self.datetime].tail(1)
-                            else:
-                                df = df_next
+                            # See: docs/BACKTESTING_SESSION_GAPS_AND_DATA_GAPS.md
+                            on_bar_boundary = self.datetime in df_original.index
+
+                            if not on_bar_boundary:
+                                # No bar exists at the current timestamp -> no fill is possible.
+                                # Keep the order pending until the clock reaches `next_dt` (or
+                                # until it is cancelled by strategy logic / end-of-backtest).
+                                continue
+
+                            df = df_next
                     else:
                         df = df_original[df_original.index >= self.datetime]
 

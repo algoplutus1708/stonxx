@@ -1705,7 +1705,18 @@ class StrategyExecutor(Thread):
         """Execute the main backtesting iteration loop"""
         iteration_count = 0
 
-        while is_continuous_market or (time_to_close is not None and (time_to_close > self.strategy.minutes_before_closing * 60)):
+        buffer_seconds = int(max(0, (self.strategy.minutes_before_closing or 0) * 60))
+        # Include the exact buffer boundary for intraday strategies.
+        #
+        # Example (minutes_before_closing=1, close at 18:00):
+        # - time_to_close==60s corresponds to 17:59:00, which should still execute one final
+        #   on_trading_iteration() before we enter the close-handling lifecycle.
+        #
+        # Use a 1-second cushion so minutes_before_closing=0 preserves the legacy "stop at close"
+        # behavior (time_to_close must remain strictly positive).
+        threshold = max(0, buffer_seconds - 1)
+
+        while is_continuous_market or (time_to_close is not None and (time_to_close > threshold)):
             iteration_count += 1
 
             # Stop after we pass the backtesting end date

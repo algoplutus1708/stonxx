@@ -71,7 +71,7 @@ Artifact baselines selected by the user:
 
 Results snapshot:
 - MESFlipStrategy: trade parity PASS (fills match exactly); indicators max diff = 0.25; equity curve diff is small float noise.
-- MESMomentumSMA9: historically diverged starting at `2025-09-01 13:00 ET` due to a CME early-close gap (missing 13:00 bar; next bar at 18:00). A 4.4.36 fix adjusts IBKR futures session-gap fill handling and is locked in via a stubbed unit test. See:
+- MESMomentumSMA9: still FAIL (strict) due to CME early-close gap behavior interacting with ATR-based bracket stops (one-tick/14 ATR drift causing stop-price mismatch, cascading trade-sequence divergence). A 4.4.36 fix removed the worst symptom (“use 18:00 open while timestamp is 13:00”) and is locked in via a stubbed unit test; remaining mismatch is documented here:
   - `docs/investigations/2026-01-19_IBKR_FUTURES_MESMOMENTUM_SESSION_GAP_FIX_4.4.36.md`
 
 Operational note:

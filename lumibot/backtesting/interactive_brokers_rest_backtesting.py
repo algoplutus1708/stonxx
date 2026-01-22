@@ -268,7 +268,13 @@ class InteractiveBrokersRESTBacktesting(PandasData):
         # built so prices advance as the backtest clock advances. Normally this is done via
         # PandasData.load_data() -> Data.repair_times_and_fill(...), but IBKR loads data lazily.
         #
-        # Use the merged index as the iteration index (it should already be 1-minute bars).
+        # IMPORTANT (data gaps vs synthetic bars):
+        # IBKR futures/crypto history can contain *real* timestamp gaps (maintenance windows,
+        # holiday early closes, weekend gaps). We must not "repair" those gaps by expanding a
+        # minute-by-minute index and forward-filling, because that would create synthetic bars
+        # and enable fills at timestamps where the market was closed.
+        #
+        # See: docs/BACKTESTING_SESSION_GAPS_AND_DATA_GAPS.md
         try:
             if isinstance(merged.index, pd.DatetimeIndex) and len(merged.index) > 0:
                 data.repair_times_and_fill(merged.index)

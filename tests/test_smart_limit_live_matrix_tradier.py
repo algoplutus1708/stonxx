@@ -29,7 +29,7 @@ def _tradier() -> Tradier:
         account_number=TRADIER_TEST_CONFIG["ACCOUNT_NUMBER"],
         access_token=TRADIER_TEST_CONFIG["ACCESS_TOKEN"],
         paper=True,
-        connect_stream=True,
+        connect_stream=False,
     )
 
 

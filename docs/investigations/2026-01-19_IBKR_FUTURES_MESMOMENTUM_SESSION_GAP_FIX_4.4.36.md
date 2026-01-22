@@ -4,9 +4,11 @@
 
 The stored DataBento baseline `MESMomentumSMA9_2025-10-15_12-52_88xWTg_*` diverged from the IBKR REST re-run starting on **2025-09-01 13:00 ET** (Labor Day early close for CME Globex equity futures).
 
-The IBKR TRADES minute series had **no 13:00 bar** (last bar at 12:59, next bar at 18:00). The backtesting broker’s IBKR futures “next-bar” execution logic treated the 18:00 bar as the next executable bar and used its **open price** for MARKET fills, while the stored baseline artifacts filled using the **last available bar open** (12:59).
+The IBKR TRADES minute series had **no 13:00 bar** (last bar at 12:59, next bar at 18:00). Earlier IBKR futures “next-bar” execution logic could treat the 18:00 bar as the next executable bar and use its **open price** for MARKET fills, while the stored baseline artifacts filled using the **last available bar open** (12:59).
 
 This produced large, persistent trade-sequence divergence even though the plotted indicator price-line remained aligned.
+
+After the gap-handling fix in this branch, the “18:00 open used for 13:00 fills” symptom is addressed; the remaining `MESMomentumSMA9` divergence is now driven by a **stop-loss price mismatch** during the early-close gap (one rolling-ATR tick / 14 bars), which then cascades into different order paths (stop vs explicit market exit) and subsequent trade counts.
 
 ## Evidence
 
@@ -15,9 +17,11 @@ From the cached IBKR TRADES minute series (U5):
 - `2025-09-01 13:00 ET` is missing
 - `2025-09-01 18:00 ET` exists (open **6480.00**)
 
-The IBKR re-run filled repeated MARKET entries/exits at **6480.00**, matching the **18:00 open**, but logged the fill timestamps at 13:00/13:01/… (backtest clock), creating both:
-- parity mismatch vs stored baseline artifacts
-- confusing “fills during closed window” semantics
+Remaining divergence (current state, after gap-handling fix):
+- baseline stop fill at `2025-09-01 13:05 ET`: **6482.25**
+- IBKR stop fill at `2025-09-01 13:05 ET`: **6482.178571...**
+
+This is a one-tick / 14-bar ATR difference (0.25 / 14 ≈ 0.017857, and 4× that ≈ 0.071428), which is enough to change whether/when the bracket stop triggers inside the simulated gap bars. Once the stop fill price differs, the strategy’s subsequent state diverges (at `13:07 ET` IBKR chooses a direct MARKET exit), and the remainder of the trade stream no longer lines up by index.
 
 ## Root cause
 
@@ -51,3 +55,8 @@ When this occurs, parity runs should be executed using already-warmed caches (or
 
 - Consider a calendar-aware futures session model (e.g., `pandas_market_calendars` “CME Globex Equity”) so the backtest clock does not iterate through closed windows (13:00–18:00 early close, daily maintenance, etc.).
 - If we keep “hold order until reopen” semantics for gaps, we should also move the fill timestamp to the actual bar timestamp used for execution (not the submission timestamp).
+
+## Current parity status (local harness)
+
+- `MESFlipStrategy`: trades parity PASS (indicators overlap 1.0); minor stats drift only.
+- `MESMomentumSMA9`: still FAIL due to the early-close gap stop-loss mismatch described above.

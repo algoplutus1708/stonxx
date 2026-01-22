@@ -891,36 +891,55 @@ class Data:
                 or (timestep == "day" and self.timestep == "day")
             )
         ):
-            dt_values = data.get("datetime")
-            if dt_values is None:
+            # PERF: avoid reconstructing a DataFrame from datalines on every call.
+            # The underlying `self.df` is already indexed by datetime, so we can slice by
+            # row bounds in O(1) and return a stable OHLCV schema.
+            try:
+                iter_count = self.get_iter_count(dt)
+                if pd.isna(iter_count):
+                    iter_count = 0
+            except Exception:
+                iter_count = self.get_iter_count(dt)
+
+            if isinstance(timeshift, datetime.timedelta):
+                if self.timestep == "day":
+                    timeshift = int(timeshift.total_seconds() / (24 * 3600))
+                else:
+                    timeshift = int(timeshift.total_seconds() / 60)
+
+            if self.timestep == "day":
+                end_row = int(iter_count) + 1 - int(timeshift or 0)
+            else:
+                end_row = int(iter_count) - int(timeshift or 0)
+
+            data_len = len(self.df.index)
+            end_row = max(0, min(end_row, data_len))
+            start_row = max(0, end_row - int(length))
+            if start_row > end_row:
+                start_row = end_row
+            if start_row == end_row and end_row > 0:
+                start_row = max(0, end_row - 1)
+
+            df = self.df.iloc[start_row:end_row]
+            if df is None or df.empty:
                 return None
-            # Only apply the fast-path when this is true OHLCV data. Quote-like data (bid/ask/etc)
-            # historically flows through different APIs and may not have the required OHLC columns.
-            if all(key in data for key in ("open", "high", "low", "close")):
-                df = pd.DataFrame({k: v for k, v in data.items() if k != "datetime"})
-                df.index = pd.to_datetime(dt_values)
-                df.index.name = "datetime"
 
-                # Match legacy resample behaviour: the resample/agg path only returns OHLCV
-                # (+ dividend when present) and does not drop rows just because some *other*
-                # column is NaN. Keep the output schema stable and avoid over-dropping.
-                cols = list(agg_column_map.keys())
-                if "dividend" in df.columns:
-                    cols.append("dividend")
-                cols = [c for c in cols if c in df.columns]
-                df = df[cols]
+            cols = list(agg_column_map.keys())
+            if "dividend" in df.columns:
+                cols.append("dividend")
+            cols = [c for c in cols if c in df.columns]
+            df = df[cols]
 
-                # In the resample path, `sum` turns NaN volume/dividend into 0. Mirror that
-                # so we don't accidentally drop valid bars (common for index bars).
-                if "volume" in df.columns:
-                    df["volume"] = df["volume"].fillna(0)
-                if "dividend" in df.columns:
-                    df["dividend"] = df["dividend"].fillna(0)
+            if "volume" in df.columns:
+                df["volume"] = df["volume"].fillna(0)
+            if "dividend" in df.columns:
+                df["dividend"] = df["dividend"].fillna(0)
 
-                required = [c for c in ("open", "high", "low", "close") if c in df.columns]
-                if required:
-                    df = df.dropna(subset=required)
-                return df.tail(n=int(num_periods))
+            required = [c for c in ("open", "high", "low", "close") if c in df.columns]
+            if required:
+                df = df.dropna(subset=required)
+
+            return df.tail(n=int(num_periods))
 
         df = pd.DataFrame(data).assign(datetime=lambda df: pd.to_datetime(df['datetime'])).set_index('datetime')
         if "dividend" in df.columns:
