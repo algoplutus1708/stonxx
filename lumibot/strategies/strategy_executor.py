@@ -1136,7 +1136,13 @@ class StrategyExecutor(Thread):
         self.strategy.on_filled_order(position, order, price, quantity, multiplier)
 
         # Get the portfolio value
-        portfolio_value = self.strategy.portfolio_value
+        # NOTE: In backtesting/unit-test harnesses we can process fills before portfolio value has
+        # been computed (or with a zero/empty portfolio). This event should not crash the run just
+        # because the Discord message can't compute a percentage.
+        try:
+            portfolio_value = float(self.strategy.portfolio_value or 0.0)
+        except Exception:
+            portfolio_value = 0.0
 
         # Calculate the value of the position
         order_value = price * float(quantity)
@@ -1146,7 +1152,7 @@ class StrategyExecutor(Thread):
             order_value = order_value * multiplier
 
         # Calculate the percent of the portfolio that this position represents
-        percent_of_portfolio = order_value / portfolio_value
+        percent_of_portfolio = (order_value / portfolio_value) if portfolio_value else 0.0
 
         # Capitalize the side
         side = order.side.capitalize()
