@@ -422,7 +422,7 @@ class Order:
 
         # It is possible for crypto currencies to arrive as a tuple of
         # two assets.
-        if isinstance(asset, tuple) and asset[0].asset_type == "crypto":
+        if isinstance(asset, tuple) and "crypto" == asset[0].asset_type:
             self.asset = asset[0]
             self.quote = asset[1]
         else:
@@ -467,7 +467,7 @@ class Order:
         self.exchange = exchange
 
         # Cryptocurrency market.
-        if self.asset and self.asset.asset_type == "crypto":
+        if self.asset and "crypto" == self.asset.asset_type:
             self.pair = f"{self.asset.symbol}/{self.quote.symbol}"
         else:
             self.pair = pair
@@ -1081,11 +1081,11 @@ class Order:
         if self.asset is None:
             self.rep_asset = self.symbol
         else:
-            if self.asset.asset_type == "crypto":
+            if "crypto" == self.asset.asset_type:
                 self.rep_asset = f"{self.pair}"
-            elif self.asset.asset_type == "future":
+            elif "future" == self.asset.asset_type:
                 self.rep_asset = f"{self.symbol} {self.asset.expiration}"
-            elif self.asset.asset_type == "option":
+            elif "option" == self.asset.asset_type:
                 self.rep_asset = f"{self.symbol} {self.asset.expiration} " f"{self.asset.right} {self.asset.strike}"
             else:
                 self.rep_asset = self.symbol
@@ -1289,7 +1289,7 @@ class Order:
 
     def is_option(self):
         """Return true if this order is an option."""
-        return True if self.asset.asset_type == "option" else False
+        return True if "option" == self.asset.asset_type else False
 
     # ======Setting the events methods===========
 

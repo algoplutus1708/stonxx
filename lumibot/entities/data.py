@@ -165,7 +165,7 @@ class Data:
         self.asset = asset
         self.symbol = self.asset.symbol
 
-        if self.asset.asset_type == "crypto" and quote is None:
+        if "crypto" == self.asset.asset_type and quote is None:
             raise ValueError(
                 f"A crypto asset {self.symbol} was added to data without a corresponding"
                 f"`quote` asset. Please add the quote asset. For example, if trying to add "

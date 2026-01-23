@@ -739,7 +739,7 @@ class Broker(ABC):
         float or Decimal or None
             The last known price of the asset.
         """
-        if self.option_source and asset.asset_type == "option":
+        if self.option_source and "option" == asset.asset_type:
             return self.option_source.get_last_price(asset, quote=quote, exchange=exchange)
         else:
             return self.data_source.get_last_price(asset, quote=quote, exchange=exchange)
@@ -1100,7 +1100,7 @@ class Broker(ABC):
         """Returns the strikes for an option asset with right and expiry."""
         # If provided chains, use them. It is faster than querying the data source.
         if chains and "Chains" in chains:
-            if asset.asset_type == "option":
+            if "option" == asset.asset_type:
                 return chains["Chains"][asset.right][asset.expiration]
             else:
                 strikes = set()
@@ -1215,7 +1215,7 @@ class Broker(ABC):
             # Add the order to the already existing position
             position.add_order(order)
 
-        if order.asset.asset_type == "crypto":
+        if "crypto" == order.asset.asset_type:
             self._process_crypto_quote(order, quantity, price)
 
         return order, position
@@ -1241,7 +1241,7 @@ class Broker(ABC):
             # Add the order to the already existing position
             position.add_order(order)  # Don't update quantity here, it's handled by querying broker
 
-        if order.asset and order.asset.asset_type == "crypto":
+        if order.asset and "crypto" == order.asset.asset_type:
             self._process_crypto_quote(order, quantity, price)
 
         return position
