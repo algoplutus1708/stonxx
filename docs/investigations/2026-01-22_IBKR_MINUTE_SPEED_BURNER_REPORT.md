@@ -112,6 +112,7 @@ Environment (protocol baseline):
 | 2026-01-23 | Cache `Bars` `df.columns` flags (commit `00c96d43`) | 0.439 | 0.653 | median of 3; warm-cache; `--iterations 2000`; no profiler; removes repeated `Index.__contains__` probes in `Bars.__init__` |
 | 2026-01-23 | Use identity checks for remaining `OrderClass` comparisons (commit `e5102b68`) | 0.418 | 0.622 | median of 3; warm-cache; `--iterations 2000`; no profiler; speed change within noise, but reduces enum comparison overhead |
 | 2026-01-23 | Skip order price validation when inputs are `None` (commit `8b36ddec`) | 0.409 | 0.596 | median of 3; warm-cache; `--iterations 2000`; no profiler; removes unnecessary validator calls for common market orders |
+| 2026-01-23 | Make SafeLists lock-free in backtests (commit `9011aec2`) | 0.396 | 0.579 | median of 3; warm-cache; `--iterations 2000`; no profiler; reduces SafeList lock overhead in hot backtesting paths |
 
 ### Long-run sanity (iterations scaling)
 
@@ -152,6 +153,7 @@ This table uses a longer loop length to catch that early:
 | 2026-01-23 | Cache `Bars` `df.columns` flags (commit `00c96d43`) | 20000 | 2.077 | 1.718 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.795s (~16.6× vs 62.911s baseline) |
 | 2026-01-23 | Use identity checks for remaining `OrderClass` comparisons (commit `e5102b68`) | 20000 | 2.052 | 1.748 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.800s (~16.6× vs 62.911s baseline) |
 | 2026-01-23 | Skip order price validation when inputs are `None` (commit `8b36ddec`) | 20000 | 2.021 | 1.766 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.787s (~16.6× vs 62.911s baseline) |
+| 2026-01-23 | Make SafeLists lock-free in backtests (commit `9011aec2`) | 20000 | 1.974 | 1.731 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.705s (~17.0× vs 62.911s baseline) |
 
 ---
 

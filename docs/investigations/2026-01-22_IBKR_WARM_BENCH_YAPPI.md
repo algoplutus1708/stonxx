@@ -433,3 +433,25 @@ Key delta:
 - `check_price` no longer appears in the profile (0 calls) because `Order._set_prices()` now skips
   validator calls when price inputs are `None` (common for market orders).
 - Remaining dominant hotspots are unchanged: order/event pipeline + `Data.get_bars` / `Data.get_iter_count`.
+
+### 2026-01-23 — Make SafeLists lock-free in backtests (commit `9011aec2`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_9011aec2_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~89%
+- `pandas_numpy`: ~5%
+- `stdlib_wait`: ~3%
+- `other`: ~2%
+- `progress_logging`: ~1%
+
+Key delta:
+- SafeList lock overhead drops substantially in the profile (same call counts, lower self time):
+  - `SafeList.remove`: ~0.04s → ~0.028s (45k calls)
+  - `SafeList.__iter__`: ~0.029s → ~0.015s (50k calls)
+  - `SafeList.__contains__`: ~0.014s → ~0.004s (10k calls)
+- Remaining dominant hotspots are still in:
+  - `Order.__init__`
+  - `BacktestingBroker._process_trade_event`
+  - `Data.get_bars` / `Data.get_iter_count`
