@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import re
+import weakref
 from decimal import Decimal
 from typing import Union, Set
 import warnings
@@ -16,6 +17,11 @@ from lumibot.tools.lumibot_logger import get_logger
 from .bar import Bar
 
 logger = get_logger(__name__)
+
+# PERF: `Bars.__init__` is a hot path in minute-level backtests. Most calls receive slices that
+# share the same `df.columns` object; cache column presence flags to avoid repeated
+# `Index.__contains__` probes in tight loops.
+_PANDAS_COLUMNS_FLAGS_CACHE: dict[int, tuple[weakref.ReferenceType, tuple[bool, bool, bool, bool]]] = {}
 
 
 class PolarsConversionTracker:
@@ -234,17 +240,38 @@ class Bars:
                 self._pandas_cache = None
         else:
             # Already pandas, keep it as is
-            # PERF: most futures/crypto datasets never have dividends. Avoid extra `Index.__contains__`
-            # probes by only checking dividend-derived columns when the dividend column exists.
             columns = df.columns
-            has_dividend = "dividend" in columns
-            has_return = "return" in columns
-            if has_dividend:
-                has_price_change = "price_change" in columns
-                has_dividend_yield = "dividend_yield" in columns
-                needs_derived = (not has_return) or (not has_price_change) or (not has_dividend_yield)
-            else:
-                needs_derived = not has_return
+            cache_key = id(columns)
+            cached = _PANDAS_COLUMNS_FLAGS_CACHE.get(cache_key)
+            flags = None
+            if cached is not None:
+                ref, cached_flags = cached
+                if ref() is columns:
+                    flags = cached_flags
+                else:
+                    # Stale entry (id reused); overwrite below.
+                    flags = None
+
+            if flags is None:
+                # PERF: most futures/crypto datasets never have dividends. Avoid extra `Index.__contains__`
+                # probes by only checking dividend-derived columns when the dividend column exists.
+                has_dividend = "dividend" in columns
+                has_return = "return" in columns
+                if has_dividend:
+                    has_price_change = "price_change" in columns
+                    has_dividend_yield = "dividend_yield" in columns
+                else:
+                    has_price_change = False
+                    has_dividend_yield = False
+
+                flags = (has_dividend, has_return, has_price_change, has_dividend_yield)
+                _PANDAS_COLUMNS_FLAGS_CACHE[cache_key] = (weakref.ref(columns), flags)
+                # Keep the cache bounded to avoid unbounded growth in long-running processes.
+                if len(_PANDAS_COLUMNS_FLAGS_CACHE) > 2048:
+                    _PANDAS_COLUMNS_FLAGS_CACHE.clear()
+
+            has_dividend, has_return, has_price_change, has_dividend_yield = flags
+            needs_derived = (not has_return) or (has_dividend and ((not has_price_change) or (not has_dividend_yield)))
 
             # PERF/SAFETY: many backtesting paths slice from a larger DataFrame and pass the slice
             # through to `Bars`. We only detach from a parent view when we actually need to mutate
