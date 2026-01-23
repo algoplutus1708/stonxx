@@ -234,16 +234,23 @@ class Bars:
                 self._pandas_cache = None
         else:
             # Already pandas, keep it as is
+            has_dividend = "dividend" in df.columns
+            has_return = "return" in df.columns
+            has_price_change = "price_change" in df.columns
+            has_dividend_yield = "dividend_yield" in df.columns
+            needs_derived = (not has_return) or (has_dividend and (not has_price_change or not has_dividend_yield))
+
             # PERF/SAFETY: many backtesting paths slice from a larger DataFrame and pass the slice
-            # through to `Bars`. We legitimately add derived columns (e.g., `return`) below; avoid
-            # `SettingWithCopyWarning` (and potential non-deterministic writes) by detaching from
-            # any parent view when pandas marks the frame as a slice.
+            # through to `Bars`. We only detach from a parent view when we actually need to mutate
+            # the DataFrame (i.e., computing derived columns). If derived columns are already
+            # present, keep the view to avoid extra copies.
             try:
-                self._df = df.copy(deep=False) if getattr(df, "_is_copy", None) is not None else df
+                self._df = df.copy(deep=False) if (needs_derived and getattr(df, "_is_copy", None) is not None) else df
             except Exception:
                 self._df = df
-            # Calculate derived columns if needed
-            if "dividend" in df.columns:
+
+            # Calculate derived columns only when missing.
+            if needs_derived and has_dividend:
                 # PERF: `pct_change()` allocates several intermediate Series/Index objects and is a
                 # dominant cost when strategies call `get_historical_prices()` frequently (minute
                 # backtests). Compute the same semantics with NumPy to reduce overhead.
@@ -272,7 +279,7 @@ class Bars:
                 self._df["price_change"] = price_change
                 self._df["dividend_yield"] = dividend_yield
                 self._df["return"] = dividend_yield + price_change
-            else:
+            elif needs_derived:
                 close_series = df["close"]
                 try:
                     close = close_series.to_numpy(dtype="float64", copy=False)

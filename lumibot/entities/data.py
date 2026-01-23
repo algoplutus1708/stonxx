@@ -447,6 +447,62 @@ class Data:
                     except Exception as e:
                         logger.error(f"Error filling {col} column: {e}")
 
+        # PERF: `Bars.__init__` historically computed derived columns (notably `return`) on every
+        # slice returned by `get_historical_prices()`. In minute-level backtests this is a dominant
+        # cost because strategies often request historical windows every iteration. Precompute these
+        # derived columns once per underlying dataset so per-call work is mostly slicing.
+        #
+        # NOTE: This intentionally favors speed. When slices include `return`, the first row's
+        # `return` value reflects the prior row from the full series (not NaN as if computed on the
+        # slice). This is generally acceptable and avoids repeated DataFrame column insertions.
+        try:
+            if "dividend" in df.columns:
+                missing = any(c not in df.columns for c in ("price_change", "dividend_yield", "return"))
+                if missing and "close" in df.columns:
+                    close_series = df["close"]
+                    try:
+                        close = close_series.to_numpy(dtype="float64", copy=False)
+                    except Exception:
+                        close = pd.to_numeric(close_series, errors="coerce").to_numpy(dtype="float64", copy=False)
+
+                    price_change = np.empty(len(close), dtype="float64")
+                    price_change[:] = np.nan
+                    if len(close) > 1:
+                        prev = close[:-1]
+                        curr = close[1:]
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            price_change[1:] = (curr - prev) / prev
+
+                    div_series = df["dividend"]
+                    try:
+                        div = div_series.to_numpy(dtype="float64", copy=False)
+                    except Exception:
+                        div = pd.to_numeric(div_series, errors="coerce").to_numpy(dtype="float64", copy=False)
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        dividend_yield = div / close
+
+                    df["price_change"] = price_change
+                    df["dividend_yield"] = dividend_yield
+                    df["return"] = dividend_yield + price_change
+            else:
+                if "return" not in df.columns and "close" in df.columns:
+                    close_series = df["close"]
+                    try:
+                        close = close_series.to_numpy(dtype="float64", copy=False)
+                    except Exception:
+                        close = pd.to_numeric(close_series, errors="coerce").to_numpy(dtype="float64", copy=False)
+
+                    returns = np.empty(len(close), dtype="float64")
+                    returns[:] = np.nan
+                    if len(close) > 1:
+                        prev = close[:-1]
+                        curr = close[1:]
+                        with np.errstate(divide="ignore", invalid="ignore"):
+                            returns[1:] = (curr - prev) / prev
+                    df["return"] = returns
+        except Exception:
+            logger.debug("[DATA][REPAIR] failed to precompute derived columns", exc_info=True)
+
         self.df = df
 
         # Set up iter_index and iter_index_dict for later use.
@@ -467,12 +523,23 @@ class Data:
         # does not retain a stale pre-fill view (important for stubbed test fixtures that start
         # with NaNs in open/high/low but expect them to be filled from close).
         try:
-            bars_cols = getattr(self, "_bars_cols", None)
-            if bars_cols:
+            # Update cached column list if we added derived columns above.
+            bars_cols = ["open", "high", "low", "close", "volume"]
+            if "dividend" in self.df.columns:
+                bars_cols.append("dividend")
+                for col in ("price_change", "dividend_yield", "return"):
+                    if col in self.df.columns:
+                        bars_cols.append(col)
+            else:
+                if "return" in self.df.columns:
+                    bars_cols.append("return")
+
+            self._bars_cols = [c for c in bars_cols if c in self.df.columns]
+            if self._bars_cols:
                 # `df[cols]` can produce a view with `_is_copy` metadata; downstream `Bars` may
                 # legitimately add derived columns (e.g., `return`), which would otherwise emit
                 # SettingWithCopyWarning in tight backtest loops.
-                self._bars_df = self.df[bars_cols].copy(deep=False)
+                self._bars_df = self.df[self._bars_cols].copy(deep=False)
         except Exception:
             self._bars_df = None
 
