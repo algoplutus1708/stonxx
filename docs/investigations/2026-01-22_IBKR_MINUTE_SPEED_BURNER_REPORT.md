@@ -114,6 +114,7 @@ Environment (protocol baseline):
 | 2026-01-23 | Skip order price validation when inputs are `None` (commit `8b36ddec`) | 0.409 | 0.596 | median of 3; warm-cache; `--iterations 2000`; no profiler; removes unnecessary validator calls for common market orders |
 | 2026-01-23 | Make SafeLists lock-free in backtests (commit `9011aec2`) | 0.396 | 0.579 | median of 3; warm-cache; `--iterations 2000`; no profiler; reduces SafeList lock overhead in hot backtesting paths |
 | 2026-01-23 | Avoid StrEnum `asset_type` `__eq__` in hot paths (commit `df1d1524`) | 0.389 | 0.576 | median of 3; warm-cache; `--iterations 2000`; no profiler; flip to `"crypto" == asset.asset_type` style comparisons |
+| 2026-01-23 | Fast-path `_is_invalid_price()` for numeric types (commit `73a51aa4`) | 0.383 | 0.573 | median of 3; warm-cache; `--iterations 2000`; no profiler; avoids `pd.isna()`/`float()` in hot fill checks |
 
 ### Long-run sanity (iterations scaling)
 
@@ -156,6 +157,7 @@ This table uses a longer loop length to catch that early:
 | 2026-01-23 | Skip order price validation when inputs are `None` (commit `8b36ddec`) | 20000 | 2.021 | 1.766 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.787s (~16.6× vs 62.911s baseline) |
 | 2026-01-23 | Make SafeLists lock-free in backtests (commit `9011aec2`) | 20000 | 1.974 | 1.731 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.705s (~17.0× vs 62.911s baseline) |
 | 2026-01-23 | Avoid StrEnum `asset_type` `__eq__` in hot paths (commit `df1d1524`) | 20000 | 1.954 | 1.730 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.684s (~17.1× vs 62.911s baseline) |
+| 2026-01-23 | Fast-path `_is_invalid_price()` for numeric types (commit `73a51aa4`) | 20000 | 1.919 | 1.709 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.628s (~17.3× vs 62.911s baseline) |
 
 ---
 

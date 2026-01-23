@@ -466,3 +466,13 @@ Key delta:
   `"crypto" == asset.asset_type` so comparisons use C-level string equality instead of `StrEnum.__eq__`.
 - `AssetType.__eq__` remains a high-call hotspot overall (~176k calls per 2000-iter run), but self time
   drops slightly in this profile (see speed report + follow-on StrEnum work).
+
+### 2026-01-23 — Fast-path `_is_invalid_price()` for numeric types (commit `73a51aa4`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_73a51aa4_2000_profile_yappi.csv`
+
+Key delta:
+- `BacktestingBroker._is_invalid_price` self time drops roughly in half for the same call volume (~30k calls in the
+  2000-iteration profile) by handling common numeric types (float/int/NumPy scalars) without `pd.isna()` and without
+  repeated `float()` conversions.
