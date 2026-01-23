@@ -226,3 +226,17 @@ Key delta:
 - `DatetimeArray._validate_scalar` / `_unbox_scalar` and `DatetimeIndex.searchsorted` are no longer dominant.
   `check_data()` now uses the optimized `get_iter_count()` (dict hit → monotonic cursor → NumPy searchsorted),
   which avoids pandas datetime scalar validation on the common “dt not an exact bar timestamp” path.
+
+### 2026-01-23 — Avoid `.iloc` indexer overhead in `Data.get_bars()` (commit `51f8b575`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_df_slice_fastpath_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~70%
+- `pandas_numpy`: ~20%
+
+Key delta:
+- `_iLocIndexer.*` no longer appears as a dominant inclusive hotspot; `Data.get_bars()` now slices via
+  `DataFrame._slice()` which avoids the `.iloc` indexer stack for integer row bounds.
+- Warm-cache benchmark median improves (see `docs/investigations/2026-01-22_IBKR_MINUTE_SPEED_BURNER_REPORT.md`).

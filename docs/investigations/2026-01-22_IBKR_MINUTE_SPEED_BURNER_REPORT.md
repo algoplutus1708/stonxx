@@ -98,6 +98,7 @@ Environment (protocol baseline):
 | 2026-01-23 | Skip OrderClass enum conversion for non-parent (commit `f257fce7`) | 0.956 | 1.361 | median of 3; warm-cache; `--iterations 2000`; no profiler |
 | 2026-01-23 | Cache backtesting quiet-logs flag (commit `f40c3101`) | 0.932 | 1.338 | median of 3; warm-cache; `--iterations 2000`; no profiler |
 | 2026-01-23 | Speed up `get_iter_count()` cursor path (commit `41ffb849`) | 0.857 | 1.206 | median of 3; warm-cache; `--iterations 2000`; no profiler |
+| 2026-01-23 | Avoid `.iloc` overhead in `Data.get_bars()` (commit `51f8b575`) | 0.873 | 1.215 | median of 3; warm-cache; `--iterations 2000`; no profiler |
 
 ### Long-run sanity (iterations scaling)
 
@@ -124,6 +125,7 @@ This table uses a longer loop length to catch that early:
 | 2026-01-23 | Skip OrderClass enum conversion for non-parent (commit `f257fce7`) | 20000 | 5.318 | 5.875 | median of 3; warm-cache; `--iterations 20000`; no profiler |
 | 2026-01-23 | Cache backtesting quiet-logs flag (commit `f40c3101`) | 20000 | 5.283 | 5.901 | median of 3; warm-cache; `--iterations 20000`; no profiler |
 | 2026-01-23 | Speed up `get_iter_count()` cursor path (commit `41ffb849`) | 20000 | 4.810 | 5.329 | median of 3; warm-cache; `--iterations 20000`; no profiler |
+| 2026-01-23 | Avoid `.iloc` overhead in `Data.get_bars()` (commit `51f8b575`) | 20000 | 4.596 | 4.900 | median of 3; warm-cache; `--iterations 20000`; no profiler |
 
 ---
 
