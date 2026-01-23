@@ -2545,24 +2545,37 @@ class BacktestingBroker(Broker):
         """Determine whether a price is unusable (None, NaN, or non-positive)."""
         if value is None:
             return True
+
+        # PERF: Fast paths for common numeric primitives. This function is called extremely
+        # frequently during order fill evaluation; avoid `pd.isna()` and `float()` conversions
+        # in the hot path.
+        if isinstance(value, float):
+            return math.isnan(value) or value <= 0
+        if isinstance(value, int):
+            return value <= 0
+        if isinstance(value, np.floating):
+            return bool(np.isnan(value)) or value <= 0
+        if isinstance(value, np.integer):
+            return int(value) <= 0
+
         if isinstance(value, Decimal):
             try:
-                value = float(value)
+                numeric_value = float(value)
             except (ValueError, TypeError):
                 return True
-        if isinstance(value, float) and math.isnan(value):
-            return True
+            return math.isnan(numeric_value) or numeric_value <= 0
+
         try:
             if pd.isna(value):
                 return True
         except Exception:
             pass
+
         try:
             numeric_value = float(value)
         except (TypeError, ValueError):
             return False
         return numeric_value <= 0
-        return False
 
     def _bar_has_missing_prices(self, *values) -> bool:
         return any(self._is_invalid_price(val) for val in values)
