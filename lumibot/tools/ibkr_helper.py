@@ -1967,8 +1967,19 @@ def _downloader_base_url() -> str:
 
 
 def _to_utc(dt_value: datetime) -> datetime:
+    """Convert a datetime to UTC, treating naive datetimes as LumiBot local time.
+
+    IMPORTANT: LumiBot uses `pytz` timezones. For pytz, you must NOT attach tzinfo via
+    `datetime.replace(tzinfo=...)` because it can yield historical "LMT" offsets (e.g. -04:56
+    for America/New_York) and create multi-hour gaps/misalignment in paginated history fetches.
+    Use `tz.localize()` so DST rules apply correctly.
+    """
     if isinstance(dt_value, pd.Timestamp):
         dt_value = dt_value.to_pydatetime()
     if dt_value.tzinfo is None:
-        dt_value = dt_value.replace(tzinfo=LUMIBOT_DEFAULT_PYTZ)
+        try:
+            dt_value = LUMIBOT_DEFAULT_PYTZ.localize(dt_value)  # type: ignore[attr-defined]
+        except Exception:
+            # Fallback for non-pytz tzinfo implementations.
+            dt_value = dt_value.replace(tzinfo=LUMIBOT_DEFAULT_PYTZ)
     return dt_value.astimezone(timezone.utc)
