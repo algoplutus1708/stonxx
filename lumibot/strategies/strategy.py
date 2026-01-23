@@ -743,6 +743,14 @@ class Strategy(_Strategy):
         if smart_limit is not None and order_type is None and type is None:
             order_type = Order.OrderType.SMART_LIMIT
 
+        # PERF: uuid4() generation is a measurable hot path in high-churn backtests (1 order per bar per asset).
+        # Backtests only need identifiers to be unique within the run, so use a cheap monotonic counter.
+        identifier = None
+        if getattr(self.broker, "IS_BACKTESTING_BROKER", False):
+            seq = getattr(self.broker, "_backtest_order_seq", 0) + 1
+            setattr(self.broker, "_backtest_order_seq", seq)
+            identifier = f"bt_{seq}"
+
         order = Order(
             self.name,
             asset,
@@ -773,6 +781,7 @@ class Strategy(_Strategy):
             order_class=order_class,
             smart_limit=smart_limit,
             custom_params=custom_params,
+            identifier=identifier,
         )
 
         # Add debug logging for custom_params
