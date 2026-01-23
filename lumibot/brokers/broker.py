@@ -25,7 +25,7 @@ from lumibot.tools.lumibot_logger import get_logger, get_strategy_logger
 from ..data_sources import DataSource
 from ..entities import Asset, Order, Position, Quote
 from ..entities.chains import normalize_option_chains
-from ..trading_builtins import SafeList
+from ..trading_builtins import SafeList, SafeOrderDict
 
 DEFAULT_CLEANUP_CONFIG = {
     "enabled": True,
@@ -116,11 +116,19 @@ class Broker(ABC):
         # a measurable overhead in minute-level backtests. Use lock-free SafeLists in backtests
         # while keeping thread-safe lists for live brokers.
         safelist_lock = None if self.IS_BACKTESTING_BROKER else self._lock
-        self._unprocessed_orders = SafeList(safelist_lock)
-        self._placeholder_orders = SafeList(safelist_lock)
-        self._new_orders = SafeList(safelist_lock)
+        # PERF: Backtests remove orders by `identifier` extremely frequently as they move through
+        # the order-state buckets (unprocessed -> new -> partial -> filled/canceled/error). A
+        # list-backed container makes those removals O(n) scans and shows up as a dominant CPU
+        # cost in high-churn minute backtests.
+        #
+        # Use a dict-backed container for the "active" buckets in backtesting only (live brokers
+        # remain list-backed for compatibility and because their order counts are usually small).
+        order_bucket = SafeOrderDict if self.IS_BACKTESTING_BROKER else SafeList
+        self._unprocessed_orders = order_bucket(safelist_lock)
+        self._placeholder_orders = order_bucket(safelist_lock)
+        self._new_orders = order_bucket(safelist_lock)
         self._canceled_orders = SafeList(safelist_lock)
-        self._partially_filled_orders = SafeList(safelist_lock)
+        self._partially_filled_orders = order_bucket(safelist_lock)
         self._filled_orders = SafeList(safelist_lock)
         self._error_orders = SafeList(safelist_lock)
         self._filled_positions = SafeList(safelist_lock)
@@ -768,9 +776,15 @@ class Broker(ABC):
     # ================================ Common functions ================================
     @property
     def _tracked_orders(self):
-        return (self._unprocessed_orders.get_list() + self._new_orders.get_list() +
-                self._partially_filled_orders.get_list() + self._filled_orders.get_list() +
-                self._error_orders.get_list() + self._canceled_orders.get_list() + self._placeholder_orders.get_list())
+        orders: list[Order] = []
+        orders.extend(self._unprocessed_orders.get_list())
+        orders.extend(self._new_orders.get_list())
+        orders.extend(self._partially_filled_orders.get_list())
+        orders.extend(self._filled_orders.get_list())
+        orders.extend(self._error_orders.get_list())
+        orders.extend(self._canceled_orders.get_list())
+        orders.extend(self._placeholder_orders.get_list())
+        return orders
 
     def is_backtesting_broker(self):
         return self.IS_BACKTESTING_BROKER
@@ -1572,7 +1586,9 @@ class Broker(ABC):
 
     def get_tracked_order(self, identifier, use_placeholders=False):
         """get a tracked order given an identifier"""
-        tracked_orders = list(self._tracked_orders) + (self._placeholder_orders.get_list() if use_placeholders else [])
+        tracked_orders = list(self._tracked_orders)
+        if use_placeholders:
+            tracked_orders.extend(self._placeholder_orders.get_list())
         for order in tracked_orders:
             if order.identifier == identifier:
                 return order
@@ -1604,22 +1620,21 @@ class Broker(ABC):
         else:
             strategy_name = strategy
 
-        active_candidates = (
-            self._unprocessed_orders.get_list()
-            + self._new_orders.get_list()
-            + self._partially_filled_orders.get_list()
-            + self._placeholder_orders.get_list()
-        )
-
         result: list[Order] = []
-        for order in active_candidates:
-            if not order.is_active():
-                continue
-            if strategy_name is not None and order.strategy != strategy_name:
-                continue
-            if asset is not None and order.asset != asset:
-                continue
-            result.append(order)
+        for bucket in (
+            self._unprocessed_orders,
+            self._new_orders,
+            self._partially_filled_orders,
+            self._placeholder_orders,
+        ):
+            for order in bucket.get_list():
+                if not order.is_active():
+                    continue
+                if strategy_name is not None and order.strategy != strategy_name:
+                    continue
+                if asset is not None and order.asset != asset:
+                    continue
+                result.append(order)
         return result
 
     def get_all_orders(self) -> list[Order]:
@@ -1815,11 +1830,8 @@ class Broker(ABC):
         while max_loop > 0:
             outstanding_orders = [
                 order
-                for order in (
-                    self._unprocessed_orders.get_list()
-                    + self._new_orders.get_list()
-                    + self._partially_filled_orders.get_list()
-                )
+                for bucket in (self._unprocessed_orders, self._new_orders, self._partially_filled_orders)
+                for order in bucket.get_list()
                 if order.strategy == strategy
             ]
 
