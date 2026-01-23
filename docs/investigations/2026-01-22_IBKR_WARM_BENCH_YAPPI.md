@@ -355,3 +355,11 @@ Bucket summary (self time / `tsub_s`):
 Key delta:
 - `parse_timestep_qty_and_unit` drops from ~0.05s self time to ~0.01s self time for ~40k calls in the 2000-iteration profile.
 - This translates to a measurable warm-cache speed improvement in the long-run benchmark (see the speed report).
+
+### 2026-01-23 — Cache repeated `get_iter_count()` dt lookups (commit `9cdb91eb`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_9cdb91eb_2000_profile_yappi.csv`
+
+Key delta:
+- `Data.get_iter_count` self time drops to ~0.086s for ~50k calls in the 2000-iteration profile (down from ~0.10s).

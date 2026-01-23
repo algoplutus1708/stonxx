@@ -105,6 +105,7 @@ Environment (protocol baseline):
 | 2026-01-23 | Reduce backtesting order/event overhead (commit `b30f9cc2`) | 0.491 | 0.735 | median of 3; warm-cache; `--iterations 2000`; no profiler; micro-cuts: Order/Enum hot-paths + no-op events + skip backtest-only fee/discord work |
 | 2026-01-23 | Reduce backtest hot-loop overhead (commit `fdb172f6`) | 0.482 | 0.731 | median of 3; warm-cache; `--iterations 2000`; no profiler; prefers enum identity checks in backtesting hot paths |
 | 2026-01-23 | Cache timestep parsing (commit `cf4e9ea8`) | 0.472 | 0.713 | median of 3; warm-cache; `--iterations 2000`; no profiler; avoids repeated regex parsing for `"minute"`/`"day"` timesteps |
+| 2026-01-23 | Cache repeated `get_iter_count()` dt lookups (commit `9cdb91eb`) | 0.474 | 0.711 | median of 3; warm-cache; `--iterations 2000`; no profiler; reduces duplicate dt→index work inside a single iteration |
 
 ### Long-run sanity (iterations scaling)
 
@@ -138,6 +139,7 @@ This table uses a longer loop length to catch that early:
 | 2026-01-23 | Reduce backtesting order/event overhead (commit `b30f9cc2`) | 20000 | 2.439 | 2.234 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=4.675s (~13.5× vs 62.911s baseline) |
 | 2026-01-23 | Reduce backtest hot-loop overhead (commit `fdb172f6`) | 20000 | 2.483 | 2.237 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=4.719s (~13.3× vs 62.911s baseline) |
 | 2026-01-23 | Cache timestep parsing (commit `cf4e9ea8`) | 20000 | 2.341 | 2.065 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=4.410s (~14.3× vs 62.911s baseline) |
+| 2026-01-23 | Cache repeated `get_iter_count()` dt lookups (commit `9cdb91eb`) | 20000 | 2.345 | 2.088 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=4.442s (~14.2× vs 62.911s baseline) |
 
 ---
 
