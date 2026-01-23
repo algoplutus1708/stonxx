@@ -476,3 +476,27 @@ Key delta:
 - `BacktestingBroker._is_invalid_price` self time drops roughly in half for the same call volume (~30k calls in the
   2000-iteration profile) by handling common numeric types (float/int/NumPy scalars) without `pd.isna()` and without
   repeated `float()` conversions.
+
+### 2026-01-23 — Use `_identifier` directly in `Order.__hash__` / `Order.__eq__` (commit `1a62585d`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_1a62585d_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~89%
+- `pandas_numpy`: ~4%
+- `stdlib_wait`: ~3%
+- `other`: ~2%
+- `progress_logging`: ~1%
+
+Top hotspots (self time / `tsub_s`, 2000-iter profile):
+1) `lumibot/entities/order.py:181 Order.__init__` (~0.11s, 10k calls)  
+2) `lumibot/brokers/broker.py:2077 BacktestingBroker._process_trade_event` (~0.11s, 20k calls)  
+3) `lumibot/trading_builtins/safe_list.py:80 SafeList.remove` (~0.11s, 45k calls)  
+4) `lumibot/entities/data.py:1019 Data.get_bars` (~0.11s, 20k calls)  
+5) `lumibot/entities/data.py:600 Data.get_iter_count` (~0.09s, 50k calls)  
+
+Key delta:
+- `Order.__eq__` does not appear as a dominant hotspot in this profile, but the canonical warm-cache benchmark does
+  not improve vs `73a51aa4` (slight regression within noise). Remaining work is still dominated by order/event
+  pipeline costs and SafeList list operations.

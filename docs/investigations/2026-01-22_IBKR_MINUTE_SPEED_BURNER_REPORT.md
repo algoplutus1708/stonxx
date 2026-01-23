@@ -158,6 +158,7 @@ This table uses a longer loop length to catch that early:
 | 2026-01-23 | Make SafeLists lock-free in backtests (commit `9011aec2`) | 20000 | 1.974 | 1.731 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.705s (~17.0× vs 62.911s baseline) |
 | 2026-01-23 | Avoid StrEnum `asset_type` `__eq__` in hot paths (commit `df1d1524`) | 20000 | 1.954 | 1.730 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.684s (~17.1× vs 62.911s baseline) |
 | 2026-01-23 | Fast-path `_is_invalid_price()` for numeric types (commit `73a51aa4`) | 20000 | 1.919 | 1.709 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.628s (~17.3× vs 62.911s baseline) |
+| 2026-01-23 | Use `_identifier` directly in `Order.__hash__` / `Order.__eq__` (commit `1a62585d`) | 20000 | 1.940 | 1.715 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.655s (~17.2× vs 62.911s baseline); 2000-iter median: futures=0.385s crypto=0.576s |
 
 ---
 
