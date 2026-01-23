@@ -1065,7 +1065,8 @@ class Order:
                 child_order.quantity = quantity
 
     def __hash__(self):
-        return hash(self.identifier)
+        # PERF: `identifier` is a property; hashing uses the backing field directly.
+        return hash(self._identifier)
 
     # Compares two order objects to see if they are the same.
     def __eq__(self, other):
@@ -1075,7 +1076,8 @@ class Order:
 
         # Orders are uniquely identified by their identifier; comparing deeper fields is expensive
         # and can be inconsistent with `__hash__` which also hashes the identifier.
-        return self.identifier == other.identifier
+        # PERF: compare backing fields directly (avoid property getters).
+        return self._identifier == other._identifier
 
     def __repr__(self):
         if self.asset is None:
