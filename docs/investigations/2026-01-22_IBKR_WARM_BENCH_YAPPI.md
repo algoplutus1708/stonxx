@@ -342,3 +342,16 @@ Key delta:
   - `Bars.__init__` column checks (`Index.__contains__`)
   - timestep parsing (`parse_timestep_qty_and_unit`)
   - `Data.get_iter_count` / `Data.get_bars` call frequency and per-call overhead
+
+### 2026-01-23 — Cache timestep parsing (commit `cf4e9ea8`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_cf4e9ea8_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~86%
+- `pandas_numpy`: ~8%
+
+Key delta:
+- `parse_timestep_qty_and_unit` drops from ~0.05s self time to ~0.01s self time for ~40k calls in the 2000-iteration profile.
+- This translates to a measurable warm-cache speed improvement in the long-run benchmark (see the speed report).
