@@ -455,3 +455,14 @@ Key delta:
   - `Order.__init__`
   - `BacktestingBroker._process_trade_event`
   - `Data.get_bars` / `Data.get_iter_count`
+
+### 2026-01-23 — Avoid StrEnum `asset_type` `__eq__` in hot paths (commit `df1d1524`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_df1d1524_2000_profile_yappi.csv`
+
+Key delta:
+- `asset.asset_type == "crypto"` style checks in hot broker/order/data code paths are flipped to
+  `"crypto" == asset.asset_type` so comparisons use C-level string equality instead of `StrEnum.__eq__`.
+- `AssetType.__eq__` remains a high-call hotspot overall (~176k calls per 2000-iter run), but self time
+  drops slightly in this profile (see speed report + follow-on StrEnum work).
