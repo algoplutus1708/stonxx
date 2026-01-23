@@ -1385,13 +1385,19 @@ class BacktestingBroker(Broker):
         if hasattr(order, "asset") and getattr(order.asset, "multiplier", None):
             multiplier = order.asset.multiplier
 
+        # PERF: BacktestingBroker commonly uses `Decimal` quantities. Convert once at the dispatch
+        # boundary so the trade-event hot path doesn't re-cast on every fill event.
+        filled_quantity_f = filled_quantity
+        if filled_quantity_f is not None and not isinstance(filled_quantity_f, float):
+            filled_quantity_f = float(filled_quantity_f)
+
         self.stream.dispatch(
             self.FILLED_ORDER,
             wait_until_complete=True,
             order=order,
             price=price,
-            filled_quantity=filled_quantity,
-            quantity=filled_quantity,
+            filled_quantity=filled_quantity_f,
+            quantity=filled_quantity_f,
             multiplier=multiplier,
         )
 
@@ -1572,6 +1578,8 @@ class BacktestingBroker(Broker):
         # Prefetching: Track assets and schedule prefetch
         current_dt = self.datetime
         audit_enabled = self._audit_enabled()
+        # PERF: Used in multiple branches below; avoid recomputing per order.
+        data_source_name = str(getattr(self.data_source, "SOURCE", "") or "").upper()
 
         if self.hybrid_prefetcher:
             # Use advanced hybrid prefetcher
@@ -1714,6 +1722,8 @@ class BacktestingBroker(Broker):
             timeshift = None
             dt = None
             open = high = low = close = volume = None
+            fast_bid = None
+            fast_ask = None
 
             # PERF: MARKET orders dominate many warm-cache backtests (minute strategies, speed-burner).
             # When bid/ask are already present in the cached Data series, we can fill immediately
@@ -1743,14 +1753,32 @@ class BacktestingBroker(Broker):
                     )
                     continue
 
+            # PERF (IBKR futures/crypto, Trades history): When bid/ask are not available, calling
+            # `get_quote()` is pure overhead and eventually falls back to the OHLC model anyway.
+            # Detect that scenario and skip the quote path entirely.
+            skip_quote_fills = (
+                (not audit_enabled)
+                and data_source_name in {"INTERACTIVEBROKERSREST"}
+                and order.order_type == Order.OrderType.MARKET
+                and (order.is_buy_order() or order.is_sell_order())
+                and not self._is_option_asset(getattr(order, "asset", None))
+                and fast_bid is None
+                and fast_ask is None
+            )
+
             # PERFORMANCE: Prefer quote-based fills when bid/ask are present so we avoid
             # fetching trade-only OHLC bars (which can be sparse/missing, especially for
             # options). When bid/ask are unavailable we fall back to the OHLC-based model.
-            if order.order_type in (Order.OrderType.MARKET, Order.OrderType.LIMIT) and (order.is_buy_order() or order.is_sell_order()):
-                try:
-                    quote = self.get_quote(order.asset, quote=order.quote)
-                except Exception:
-                    quote = None
+            if (
+                order.order_type in (Order.OrderType.MARKET, Order.OrderType.LIMIT)
+                and (order.is_buy_order() or order.is_sell_order())
+            ):
+                quote = None
+                if not skip_quote_fills:
+                    try:
+                        quote = self.get_quote(order.asset, quote=order.quote)
+                    except Exception:
+                        quote = None
 
                 bid = self._coerce_price(getattr(quote, "bid", None)) if quote is not None else None
                 ask = self._coerce_price(getattr(quote, "ask", None)) if quote is not None else None
@@ -1882,7 +1910,6 @@ class BacktestingBroker(Broker):
             #############################
 
             # Get the OHLCV data for the asset if we're using the YAHOO, CCXT data source
-            data_source_name = self.data_source.SOURCE.upper()
             if data_source_name in ["CCXT", "YAHOO", "ALPACA", "DATABENTO", "DATABENTO_POLARS"]:
                 # Negative deltas here are intentional: _pull_source_symbol_bars subtracts the offset, so
                 # passing -1 minute yields an effective +1 minute guard that keeps us on the previously
@@ -1953,7 +1980,7 @@ class BacktestingBroker(Broker):
             elif self.data_source.SOURCE == "PANDAS" or data_source_name in {"INTERACTIVEBROKERSREST"}:
                 # Market orders: prefer quote-based fills when bid/ask are available to avoid
                 # expensive OHLC downloads and reflect real-world execution more closely.
-                if order.order_type == Order.OrderType.MARKET:
+                if order.order_type == Order.OrderType.MARKET and not skip_quote_fills:
                     quote_fill_price = self._try_fill_with_quote(order, strategy, None, None, None)
                     if quote_fill_price is not None:
                         self._execute_filled_order(
@@ -2619,7 +2646,9 @@ class BacktestingBroker(Broker):
             cache = {}
             setattr(self, "_fast_quote_data_cache", cache)
 
-        cache_key = (asset, quote, str(timestep))
+        # PERF: `Asset.__hash__`/`Asset.__eq__` are hot in high-churn backtests. Use `id()`-based
+        # keys for this internal cache to avoid repeated rich-comparison and hashing work.
+        cache_key = (id(asset), id(quote), str(timestep))
         if cache_key in cache:
             data_obj, bid_line, ask_line = cache[cache_key]
         else:

@@ -2089,13 +2089,17 @@ class Broker(ABC):
     def _process_trade_event(self, stored_order, type_event, price=None, filled_quantity=None, multiplier=1, error=None): # Add error parameter
         """process an occurred trading event and update the
         corresponding order"""
+        # PERF: This method is called once per broker event. In backtests, high-churn strategies
+        # can emit hundreds of thousands of events, so minimize per-call overhead in the common
+        # backtesting path.
+        is_backtesting = getattr(self, "IS_BACKTESTING_BROKER", False)
         if self.logger.isEnabledFor(logging.INFO):
             self.logger.info(
                 f"Processing trade event. Trade event received for {stored_order.strategy} strategy: {type_event} "
                 f"{stored_order.symbol} ID={stored_order.identifier}, processed by broker {self.name}"
             )
 
-        if self._hold_trade_events and not self.IS_BACKTESTING_BROKER:
+        if self._hold_trade_events and not is_backtesting:
             if self.logger.isEnabledFor(logging.INFO):
                 self.logger.info(
                     f"Trade event held for {stored_order.strategy} strategy: {type_event} {stored_order.symbol} "
@@ -2116,7 +2120,7 @@ class Broker(ABC):
             return
 
         # for fill and partial_fill events, price and filled_quantity must be specified
-        if (type_event in [self.FILLED_ORDER, self.PARTIALLY_FILLED_ORDER] and
+        if (type_event in (self.FILLED_ORDER, self.PARTIALLY_FILLED_ORDER) and
                 stored_order.order_class != Order.OrderClass.OCO and
                 (price is None or filled_quantity is None)):
             raise ValueError(
@@ -2125,14 +2129,13 @@ class Broker(ABC):
                 Received respectively {price} and {filled_quantity}"""
             )
 
-        if filled_quantity is not None:
-            error = ValueError(
-                f"filled_quantity must be an integer or float, received {filled_quantity} instead")
+        if filled_quantity is not None and not isinstance(filled_quantity, float):
             try:
-                if not isinstance(filled_quantity, float):
-                    filled_quantity = float(filled_quantity)
-            except ValueError:
-                raise error
+                filled_quantity = float(filled_quantity)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"filled_quantity must be an integer or float, received {filled_quantity} instead"
+                ) from None
 
         if price is not None and not isinstance(price, float):
             try:
@@ -2142,7 +2145,7 @@ class Broker(ABC):
 
         # PERF: Backtesting emits the canonical event types from Broker constants, so we can avoid
         # the expensive "equivalent status" normalization logic intended for live brokers.
-        if getattr(self, "IS_BACKTESTING_BROKER", False):
+        if is_backtesting:
             if type_event == self.NEW_ORDER:
                 order = self._process_new_order(stored_order)
                 if order:
@@ -2216,13 +2219,15 @@ class Broker(ABC):
             else:
                 self.logger.warning(f"Unknown trade event type: {type_event}")
 
-        current_dt = self.data_source.get_datetime()
+        # PERF: backtesting data sources store the current dt on `_datetime`. Avoid the extra
+        # method call overhead in the hot-path trade-event logger.
+        current_dt = self.data_source._datetime if is_backtesting else self.data_source.get_datetime()
         # Cache the audit-enabled flag when available (BacktestingBroker sets this in __init__).
         audit_enabled = getattr(self, "_backtest_audit_enabled", None)
         if audit_enabled is None:
             audit_enabled = self._truthy_env(os.environ.get("LUMIBOT_BACKTEST_AUDIT"))
 
-        asset = getattr(stored_order, "asset", None)
+        asset = stored_order.asset
         price_source = getattr(stored_order, "_price_source", None)
 
         if audit_enabled:
@@ -2250,15 +2255,17 @@ class Broker(ABC):
             if price_source:
                 new_row["price_source"] = price_source
         else:
+            # PERF: In backtests, trade events are appended in large volumes. Avoid property
+            # lookups where we can safely access the backing fields.
             new_row = (
                 current_dt,
                 stored_order.strategy,
                 stored_order.exchange,
-                stored_order.identifier,
+                stored_order._identifier,
                 stored_order.symbol,
                 stored_order.side,
                 stored_order.order_type,
-                stored_order.status,
+                stored_order._status,
                 price,
                 filled_quantity,
                 multiplier,

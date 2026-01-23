@@ -597,6 +597,28 @@ class Order:
             raise ValueError(f"Order: Invalid order_type {order_type}. Must be one of:"
                              f" {', '.join([str(t.value) for t in self.OrderType])}") from None
 
+        # PERF: Market orders are extremely common (especially in backtests/benchmarks). When all
+        # price modifiers are unset and the order is a simple MARKET, we already initialized the
+        # price fields to `None` above. Skip the additional helper calls/validation to reduce
+        # per-order overhead (this code path can run 100k+ times per backtest).
+        if (
+            self.order_class is self.OrderClass.SIMPLE
+            and self.order_type is self.OrderType.MARKET
+            and self.smart_limit is None
+            and limit_price
+            is stop_price
+            is stop_limit_price
+            is trail_price
+            is trail_percent
+            is secondary_limit_price
+            is secondary_stop_price
+            is secondary_stop_limit_price
+            is secondary_trail_price
+            is secondary_trail_percent
+            is None
+        ):
+            return
+
         self._set_prices(
             limit_price,
             stop_price,

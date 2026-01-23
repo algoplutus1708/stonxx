@@ -227,6 +227,12 @@ class Data:
             self.trading_hours_start,
             self.trading_hours_end,
         )
+        # PERF: `get_bars()` is called extremely frequently in minute-level backtests. Cache the
+        # current dataset length once so hot paths don't repeatedly call `len(DatetimeIndex)`.
+        try:
+            self._data_len = int(len(self.df.index))
+        except Exception:
+            self._data_len = None
         # PERF: `check_data` compares python datetimes against these bounds in tight loops.
         # Storing them as python datetimes avoids pandas scalar validation/conversion overhead.
         start_ts = self.df.index[0]
@@ -512,6 +518,10 @@ class Data:
             logger.debug("[DATA][REPAIR] failed to precompute derived columns", exc_info=True)
 
         self.df = df
+        try:
+            self._data_len = int(len(self.df.index))
+        except Exception:
+            self._data_len = None
 
         # Set up iter_index and iter_index_dict for later use.
         iter_index = pd.Series(df.index)
@@ -1082,7 +1092,10 @@ class Data:
                 timeshift = int(timeshift.total_seconds() / 60)
 
             end_row = int(iter_count) - int(timeshift or 0)
-            data_len = len(df_source.index)
+            data_len = getattr(self, "_data_len", None)
+            if data_len is None:
+                data_len = int(len(df_source.index))
+                self._data_len = data_len
             end_row = max(0, min(end_row, data_len))
             start_row = max(0, end_row - int(num_periods))
             if start_row > end_row:
@@ -1201,7 +1214,10 @@ class Data:
             else:
                 end_row = int(iter_count) - int(timeshift or 0)
 
-            data_len = len(df_source.index)
+            data_len = getattr(self, "_data_len", None)
+            if data_len is None:
+                data_len = int(len(df_source.index))
+                self._data_len = data_len
             end_row = max(0, min(end_row, data_len))
             start_row = max(0, end_row - int(length))
             if start_row > end_row:
