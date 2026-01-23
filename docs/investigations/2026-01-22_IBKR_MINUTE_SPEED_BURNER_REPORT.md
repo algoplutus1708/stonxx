@@ -115,6 +115,7 @@ Environment (protocol baseline):
 | 2026-01-23 | Make SafeLists lock-free in backtests (commit `9011aec2`) | 0.396 | 0.579 | median of 3; warm-cache; `--iterations 2000`; no profiler; reduces SafeList lock overhead in hot backtesting paths |
 | 2026-01-23 | Avoid StrEnum `asset_type` `__eq__` in hot paths (commit `df1d1524`) | 0.389 | 0.576 | median of 3; warm-cache; `--iterations 2000`; no profiler; flip to `"crypto" == asset.asset_type` style comparisons |
 | 2026-01-23 | Fast-path `_is_invalid_price()` for numeric types (commit `73a51aa4`) | 0.383 | 0.573 | median of 3; warm-cache; `--iterations 2000`; no profiler; avoids `pd.isna()`/`float()` in hot fill checks |
+| 2026-01-23 | Skip quote fills when bid/ask missing (commit `598ba96a`) | 0.325 | 0.478 | median of 3; warm-cache; `--iterations 2000`; no profiler; IBKR market orders skip expensive quote path when bid/ask are unavailable and fall back to OHLC |
 
 ### Long-run sanity (iterations scaling)
 
@@ -164,6 +165,7 @@ This table uses a longer loop length to catch that early:
 | 2026-01-23 | Speed up `Strategy.get_historical_prices` hot path (commit `03c6cc74`) | 20000 | 1.855 | 1.592 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.472s (~18.1× vs 62.911s baseline); 2000-iter median: futures=0.380s crypto=0.579s |
 | 2026-01-23 | Skip cancel-open-orders scan on normal liquidation (commit `9f1d0e14`) | 20000 | 1.838 | 1.583 | median of 3 (noisy); warm-cache; `--iterations 20000`; no profiler; total=3.421s (~18.4× vs 62.911s baseline) |
 | 2026-01-23 | Use monotonic order identifiers in backtests (commit `56e60140`) | 20000 | 1.749 | 1.582 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.360s (~18.7× vs 62.911s baseline); 2000-iter median: futures=0.346s crypto=0.539s |
+| 2026-01-23 | Skip quote fills when bid/ask missing (commit `598ba96a`) | 20000 | 1.655 | 1.477 | median of 3; warm-cache; `--iterations 20000`; no profiler; total=3.132s (~20.1× vs 62.911s baseline); 2000-iter median: futures=0.325s crypto=0.478s |
 
 ---
 

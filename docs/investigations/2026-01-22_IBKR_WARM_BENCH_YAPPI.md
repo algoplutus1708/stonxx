@@ -15,6 +15,8 @@ This investigation captures the **YAPPI** profile for the IBKR warm-run “speed
 **Important**
 - YAPPI adds substantial overhead. Use it to rank bottlenecks, but **do not compare** profiled wall times to non-profile benchmark runs.
 - The benchmark itself is documented in `docs/investigations/2026-01-22_IBKR_MINUTE_SPEED_BURNER_REPORT.md`.
+- This investigation discusses caching detection of an optional `return_polars` kwarg in `Strategy.get_historical_prices`.
+  This does **not** mean LumiBot is switching to Polars; it’s strictly about avoiding per-call introspection overhead.
 
 ## Environment
 
@@ -595,3 +597,34 @@ Key delta:
   - `BacktestingBroker._process_trade_event`
   - `SafeList.remove`
   - `Data.get_bars` / `Data.get_iter_count`
+
+### 2026-01-23 — Skip quote fills when bid/ask missing (commit `598ba96a`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_598ba96a_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~90.00%
+- `pandas_numpy`: ~4.62%
+- `stdlib_wait`: ~3.45%
+- `other`: ~1.19%
+- `progress_logging`: ~0.74%
+
+Top hotspots (self time / `tsub_s`, 2000-iter profile):
+1) `lumibot/entities/order.py:181 Order.__init__` (~0.094s, 10k calls)  
+2) `lumibot/entities/data.py:1029 Data.get_bars` (~0.094s, 20k calls)  
+3) `lumibot/brokers/broker.py:2089 BacktestingBroker._process_trade_event` (~0.082s, 20k calls)  
+4) `lumibot/entities/data.py:610 Data.get_iter_count` (~0.078s, 50k calls)  
+5) `lumibot/backtesting/backtesting_broker.py:1546 BacktestingBroker.process_pending_orders` (~0.069s, 4k calls)  
+6) `lumibot/entities/data.py:686 Data.checker` (~0.064s, 10k calls)  
+7) `lumibot/backtesting/backtesting_broker.py:1325 BacktestingBroker._execute_filled_order` (~0.063s, 10k calls)  
+8) `lumibot/strategies/strategy.py:3878 _FuturesSpeedBurnerStrategy.get_historical_prices` (~0.061s, 20k calls)  
+9) `lumibot/entities/bars.py:173 Bars.__init__` (~0.059s, 20k calls)  
+10) `lumibot/strategies/strategy.py:408 _FuturesSpeedBurnerStrategy.create_order` (~0.039s, 10k calls)  
+
+Key delta:
+- For IBKR backtests, MARKET orders skip the quote fill attempt path when bid/ask are unavailable (the quote path would
+  immediately fall back to OHLC anyway). This avoids expensive quote plumbing (`get_quote` / Quote object work) in the
+  warm-cache benchmark and is a major driver of the ~20× improvement recorded in the speed report.
+- When bid/ask exist, quote-based market fills remain enabled (BUY at ask / SELL at bid), preserving the semantics
+  exercised by the IBKR futures smoke stubbed tests.
