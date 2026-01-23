@@ -1,6 +1,9 @@
 from _thread import RLock as rlock_type
 
 
+_MISSING = object()
+
+
 class SafeList:
     def __init__(self, lock, initial=None):
         # PERF: backtesting is single-threaded; allow `lock=None` to skip lock overhead.
@@ -87,6 +90,16 @@ class SafeList:
                 raise ValueError(f"key must be a string, received {key} of type {type(key)}")
             # PERF: key-based removals are heavily used in backtesting order tracking lists
             # (e.g., `key="identifier"`). Avoid rebuilding the full list each time.
+            if key == "identifier":
+                for idx, item in enumerate(self.__items):
+                    item_identifier = getattr(item, "_identifier", _MISSING)
+                    if item_identifier is _MISSING:
+                        item_identifier = getattr(item, "identifier", _MISSING)
+                    if item_identifier == value:
+                        del self.__items[idx]
+                        break
+                return
+
             for idx, item in enumerate(self.__items):
                 if getattr(item, key) == value:
                     del self.__items[idx]
@@ -101,10 +114,19 @@ class SafeList:
                     raise ValueError(f"key must be a string, received {key} of type {type(key)}")
                 # PERF: key-based removals are heavily used in backtesting order tracking lists
                 # (e.g., `key=\"identifier\"`). Avoid rebuilding the full list each time.
-                for idx, item in enumerate(self.__items):
-                    if getattr(item, key) == value:
-                        del self.__items[idx]
-                        break
+                if key == "identifier":
+                    for idx, item in enumerate(self.__items):
+                        item_identifier = getattr(item, "_identifier", _MISSING)
+                        if item_identifier is _MISSING:
+                            item_identifier = getattr(item, "identifier", _MISSING)
+                        if item_identifier == value:
+                            del self.__items[idx]
+                            break
+                else:
+                    for idx, item in enumerate(self.__items):
+                        if getattr(item, key) == value:
+                            del self.__items[idx]
+                            break
 
     def extend(self, value):
         lock = self.__lock
