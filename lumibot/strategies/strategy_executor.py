@@ -196,7 +196,7 @@ class StrategyExecutor(Thread):
     def safe_sleep(self, sleeptime):
         # This method should only be run in back testing. If it's running during live, something has gone wrong.
 
-        if self.strategy.is_backtesting:
+        if self.broker.IS_BACKTESTING_BROKER:
             self.process_queue()
 
             # PERF: Serializing positions/orders every bar is expensive and becomes a major cost in
@@ -1139,7 +1139,7 @@ class StrategyExecutor(Thread):
         # PERF: In backtesting we never send Discord notifications (`Strategy.send_discord_message`
         # hard-returns), but building the formatted message is still non-trivial work and can
         # dominate high-churn backtests (100k+ fills). Skip the message construction entirely.
-        if self.strategy.is_backtesting:
+        if self.broker.IS_BACKTESTING_BROKER:
             # Let our listener know that an order has been filled (set in the callback)
             if hasattr(self.strategy, "_filled_order_callback") and callable(self.strategy._filled_order_callback):
                 self.strategy._filled_order_callback(self, position, order, price, quantity, multiplier)
