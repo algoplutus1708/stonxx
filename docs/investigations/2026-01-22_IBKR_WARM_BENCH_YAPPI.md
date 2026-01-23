@@ -416,3 +416,20 @@ Key delta:
   - `Data.get_bars` / `Data.get_iter_count`
   - `BacktestingBroker.process_pending_orders` / `_execute_filled_order`
   - `Bars.__init__`
+
+### 2026-01-23 — Skip order price validation when inputs are `None` (commit `8b36ddec`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_8b36ddec_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~89%
+- `pandas_numpy`: ~5%
+- `stdlib_wait`: ~3%
+- `other`: ~2%
+- `progress_logging`: ~1%
+
+Key delta:
+- `check_price` no longer appears in the profile (0 calls) because `Order._set_prices()` now skips
+  validator calls when price inputs are `None` (common for market orders).
+- Remaining dominant hotspots are unchanged: order/event pipeline + `Data.get_bars` / `Data.get_iter_count`.
