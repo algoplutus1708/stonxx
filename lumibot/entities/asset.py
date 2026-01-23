@@ -29,6 +29,10 @@ class StrEnum(str, Enum):
         if isinstance(other, str):
             # Avoid Enum.value property lookups; compare as plain strings.
             return str.__eq__(self, other)
+        # Fast-path: Enum equality is identity for same-class members. Avoid the Enum
+        # machinery on hot paths (AssetType comparisons are extremely frequent).
+        if isinstance(other, Enum):
+            return self is other
         return super().__eq__(other)
 
     def __hash__(self):

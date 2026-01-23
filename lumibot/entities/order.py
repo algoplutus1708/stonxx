@@ -84,6 +84,10 @@ class StrEnum(str, Enum):
         if isinstance(other, str):
             # Avoid Enum.value property lookups; compare as plain strings.
             return str.__eq__(self, other)
+        # Fast-path: Enum equality is identity for same-class members. Avoid the Enum
+        # machinery on hot paths (order processing performs many enum comparisons).
+        if isinstance(other, Enum):
+            return self is other
         return super().__eq__(other)
 
     def __hash__(self):
@@ -494,28 +498,38 @@ class Order:
                              f" {', '.join([str(oc.value) for oc in self.OrderClass])}") from None
 
         # Check - deprecated parameters and inform the user
-        deprecated_params = {
-            "take_profit_price": "limit_price",
-            "stop_loss_price": "stop_price",
-            "stop_loss_limit_price": "stop_limit_price",
-            "type": "order_type",
-        }
-        for param, new_param in deprecated_params.items():
-            if locals()[param] is not None:
-                # Get caller information for better debugging
-                import inspect
-                frame = inspect.currentframe().f_back
-                filename = frame.f_code.co_filename.split('/')[-1]  # Just the filename
-                lineno = frame.f_lineno
-                function_name = frame.f_code.co_name
+        #
+        # PERF: This constructor is a hot path in minute-level backtests that can create 100k+
+        # orders. Avoid building the deprecated-parameter map and calling `locals()` on every
+        # Order when none of the deprecated parameters are used (the common case).
+        if (
+            take_profit_price is not None
+            or stop_loss_price is not None
+            or stop_loss_limit_price is not None
+            or type is not None
+        ):
+            deprecated_params = {
+                "take_profit_price": "limit_price",
+                "stop_loss_price": "stop_price",
+                "stop_loss_limit_price": "stop_limit_price",
+                "type": "order_type",
+            }
+            for param, new_param in deprecated_params.items():
+                if locals()[param] is not None:
+                    # Get caller information for better debugging
+                    import inspect
+                    frame = inspect.currentframe().f_back
+                    filename = frame.f_code.co_filename.split('/')[-1]  # Just the filename
+                    lineno = frame.f_lineno
+                    function_name = frame.f_code.co_name
 
-                logger.warning(f"DEPRECATED in {filename}:{function_name}:{lineno} - "
-                             f"Order parameter '{param}' is deprecated. Use '{new_param}' instead.")
+                    logger.warning(f"DEPRECATED in {filename}:{function_name}:{lineno} - "
+                                 f"Order parameter '{param}' is deprecated. Use '{new_param}' instead.")
 
-                if locals()[new_param]:
-                    raise ValueError(f"You cannot set both {param} and {new_param}. "
-                                   f"This may cause unexpected behavior.")
-                locals()[new_param] = locals()[param]
+                    if locals()[new_param]:
+                        raise ValueError(f"You cannot set both {param} and {new_param}. "
+                                       f"This may cause unexpected behavior.")
+                    locals()[new_param] = locals()[param]
 
         # TODO: Remove when type//take_profit_price/stop_loss_price/stop_loss_limit_price are finally
         #  deprecated permanently
