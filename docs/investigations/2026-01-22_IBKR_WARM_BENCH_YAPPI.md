@@ -240,3 +240,16 @@ Key delta:
 - `_iLocIndexer.*` no longer appears as a dominant inclusive hotspot; `Data.get_bars()` now slices via
   `DataFrame._slice()` which avoids the `.iloc` indexer stack for integer row bounds.
 - Warm-cache benchmark median improves (see `docs/investigations/2026-01-22_IBKR_MINUTE_SPEED_BURNER_REPORT.md`).
+
+### 2026-01-23 — Faster backtest trade events (commit `37454be6`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_tradeevent_tuple_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~69%
+- `pandas_numpy`: ~23%
+
+Key delta:
+- Backtesting no longer runs `Order.is_equivalent_status()` chains for canonical broker events.
+- Trade-event rows are stored as compact tuples when audits are disabled (default), reducing per-event allocation.
