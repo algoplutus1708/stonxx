@@ -1105,14 +1105,14 @@ class Data:
             cached_key = getattr(self, "_get_bars_slice_cache_key", None)
             if cached_key == cache_key:
                 cached_df = getattr(self, "_get_bars_slice_cache_df", None)
-                if cached_df is not None and not cached_df.empty:
+                if cached_df is not None and cached_df.shape[0] != 0:
                     return cached_df
 
             # PERF: `.iloc[start:end]` goes through the indexer stack (`_iLocIndexer`) which
             # performs validation on every call. In backtesting we already operate on integer
             # row bounds; `_slice()` is the internal fast-path that avoids the indexer overhead.
             df = df_source._slice(slice(start_row, end_row))
-            if df is None or df.empty:
+            if df is None or df.shape[0] == 0:
                 return None
 
             # PERF: avoid `col in df.columns` membership checks (`Index.__contains__`) on every call.
@@ -1223,14 +1223,14 @@ class Data:
             cached_key = getattr(self, "_get_bars_slice_cache_key", None)
             if cached_key == cache_key:
                 cached_df = getattr(self, "_get_bars_slice_cache_df", None)
-                if cached_df is not None and not cached_df.empty:
+                if cached_df is not None and cached_df.shape[0] != 0:
                     return cached_df
 
             # PERF: `.iloc[start:end]` goes through the indexer stack (`_iLocIndexer`) which
             # performs validation on every call. In backtesting we already operate on integer
             # row bounds; `_slice()` is the internal fast-path that avoids the indexer overhead.
             df = df_source._slice(slice(start_row, end_row))
-            if df is None or df.empty:
+            if df is None or df.shape[0] == 0:
                 return None
 
             # PERF: avoid `col in df.columns` membership checks (`Index.__contains__`) on every call.
