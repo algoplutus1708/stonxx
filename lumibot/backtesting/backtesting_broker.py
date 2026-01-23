@@ -612,7 +612,7 @@ class BacktestingBroker(Broker):
         # OCO order does not include the main parent (entry) order becuase that has been placed earlier. Only the
         # child (exit) orders are included in the list
         orders = []
-        if order.order_class != Order.OrderClass.OCO:
+        if order.order_class is not Order.OrderClass.OCO:
             orders.append(order)
 
         if order.is_parent():
@@ -653,7 +653,7 @@ class BacktestingBroker(Broker):
                     stop_loss_order = self._parse_broker_order(stop_loss_order, order.strategy)
                     orders.append(stop_loss_order)
 
-            elif order.order_class == Order.OrderClass.OCO:
+            elif order.order_class is Order.OrderClass.OCO:
                 stop_limit_price = getattr(order, "stop_limit_price", None)
                 stop_child_type = Order.OrderType.STOP_LIMIT if stop_limit_price else Order.OrderType.STOP
                 stop_loss_order = Order(
@@ -684,8 +684,8 @@ class BacktestingBroker(Broker):
 
             elif order.order_class in [Order.OrderClass.BRACKET, Order.OrderClass.OTO]:
                 side = Order.OrderSide.SELL if order.is_buy_order() else Order.OrderSide.BUY
-                if (order.order_class == Order.OrderClass.BRACKET or
-                        (order.order_class == Order.OrderClass.OTO and order.secondary_stop_price)):
+                if (order.order_class is Order.OrderClass.BRACKET or
+                        (order.order_class is Order.OrderClass.OTO and order.secondary_stop_price)):
                     secondary_stop_limit_price = getattr(order, "secondary_stop_limit_price", None)
                     secondary_trail_price = getattr(order, "secondary_trail_price", None)
                     secondary_trail_percent = getattr(order, "secondary_trail_percent", None)
@@ -711,8 +711,8 @@ class BacktestingBroker(Broker):
                     )
                     orders.append(stop_loss_order)
 
-                if (order.order_class == Order.OrderClass.BRACKET or
-                        (order.order_class == Order.OrderClass.OTO and order.secondary_limit_price)):
+                if (order.order_class is Order.OrderClass.BRACKET or
+                        (order.order_class is Order.OrderClass.OTO and order.secondary_limit_price)):
                     limit_order = Order(
                         order.strategy,
                         order.asset,
@@ -724,7 +724,7 @@ class BacktestingBroker(Broker):
                     )
                     orders.append(limit_order)
 
-                if order.order_class == Order.OrderClass.BRACKET:
+                if order.order_class is Order.OrderClass.BRACKET:
                     stop_loss_order.dependent_order = limit_order
                     limit_order.dependent_order = stop_loss_order
 
@@ -942,7 +942,7 @@ class BacktestingBroker(Broker):
         # OCO orders have no parent orders, so do not submit this "main" order. The children of an OCO will be
         # submitted below. Bracket/OTO orders will be submitted here, but their child orders will not be submitted
         # until the parent order is filled
-        if order.order_class != Order.OrderClass.OCO:
+        if order.order_class is not Order.OrderClass.OCO:
             order.update_raw(order)
             self.stream.dispatch(
                 self.NEW_ORDER,
@@ -1343,7 +1343,7 @@ class BacktestingBroker(Broker):
                 )
                 self._new_orders.append(child_order)
 
-        is_multileg_parent = order.is_parent() and order.order_class == Order.OrderClass.MULTILEG
+        is_multileg_parent = order.is_parent() and order.order_class is Order.OrderClass.MULTILEG
 
         trade_cost = Decimal("0") if is_multileg_parent else self.calculate_trade_cost(order, strategy, price)
         order.trade_cost = float(trade_cost)
@@ -1407,7 +1407,7 @@ class BacktestingBroker(Broker):
         # fill is recorded so legacy ordering expectations remain stable.
         if parent_identifier:
             parent_order = self.get_tracked_order(parent_identifier, use_placeholders=True)
-            if parent_order is not None and parent_order.order_class == Order.OrderClass.OCO and not parent_order.is_filled():
+            if parent_order is not None and parent_order.order_class is Order.OrderClass.OCO and not parent_order.is_filled():
                 try:
                     self._placeholder_orders.remove(parent_order.identifier, key="identifier")
                 except Exception:
@@ -1647,8 +1647,9 @@ class BacktestingBroker(Broker):
                 continue
             # No need to check status since we already filtered for pending orders only
 
-            # OCO parent orders do not get filled
-            if order.order_class == Order.OrderClass.OCO:
+            # OCO parent orders do not get filled.
+            # PERF: `OrderClass` is a StrEnum; use identity comparisons in backtesting hot loops.
+            if order.order_class is Order.OrderClass.OCO:
                 continue
 
             # SMART_LIMIT multileg children should be filled atomically by their parent order.
@@ -1657,7 +1658,7 @@ class BacktestingBroker(Broker):
 
             # Multileg parent orders are placeholders unless they are explicitly
             # configured as a package SMART_LIMIT (i.e. have a SmartLimitConfig).
-            if order.order_class == Order.OrderClass.MULTILEG and getattr(order, "smart_limit", None) is None:
+            if order.order_class is Order.OrderClass.MULTILEG and getattr(order, "smart_limit", None) is None:
                 # If this is the final fill for a multileg order, mark the parent order as filled
                 if all([o.is_filled() for o in order.child_orders]):
                     parent_qty = sum([abs(o.quantity) for o in order.child_orders])
@@ -2033,7 +2034,7 @@ class BacktestingBroker(Broker):
                 # SMART_LIMIT orders, we fill from the child legs' quotes instead of attempting
                 # to fetch OHLC for the parent.
                 if (
-                    order.order_class == Order.OrderClass.MULTILEG
+                    order.order_class is Order.OrderClass.MULTILEG
                     and order.child_orders
                     and getattr(order, "smart_limit", None) is not None
                 ):
@@ -2125,7 +2126,7 @@ class BacktestingBroker(Broker):
                         # When OHLC is missing (common for placeholder multileg assets), use quotes to
                         # fill the child legs atomically and then mark the parent filled for logging.
                         if (
-                            order.order_class == Order.OrderClass.MULTILEG
+                            order.order_class is Order.OrderClass.MULTILEG
                             and order.child_orders
                             and getattr(order, "smart_limit", None) is not None
                         ):
@@ -2375,7 +2376,7 @@ class BacktestingBroker(Broker):
                 # (parent filled, legs not filled) and prevents the strategy from seeing the
                 # actual leg fills in `on_filled_order()`.
                 if (
-                    order.order_class == Order.OrderClass.MULTILEG
+                    order.order_class is Order.OrderClass.MULTILEG
                     and order.child_orders
                     and getattr(order, "smart_limit", None) is not None
                 ):
@@ -3170,7 +3171,7 @@ class BacktestingBroker(Broker):
                 return None, True
 
         bid = ask = None
-        if order.order_class == Order.OrderClass.MULTILEG and order.child_orders:
+        if order.order_class is Order.OrderClass.MULTILEG and order.child_orders:
             net_bid = 0.0
             net_ask = 0.0
             order_side = "buy" if order.is_buy_order() else "sell"
@@ -3234,7 +3235,7 @@ class BacktestingBroker(Broker):
             if not state.get("missing_quote_warned", False):
                 if strategy is not None:
                     missing_target = order.asset
-                    if order.order_class == Order.OrderClass.MULTILEG and order.child_orders:
+                    if order.order_class is Order.OrderClass.MULTILEG and order.child_orders:
                         missing_target = "one or more multileg legs"
                     strategy.log_message(
                         f"[SMART_LIMIT] Missing bid/ask for {missing_target}; downgrading to market.",
@@ -3258,7 +3259,7 @@ class BacktestingBroker(Broker):
 
         side = "buy" if order.is_buy_order() else "sell"
         tick = None
-        if order.order_class != Order.OrderClass.MULTILEG:
+        if order.order_class is not Order.OrderClass.MULTILEG:
             try:
                 asset_tick = getattr(order.asset, "min_tick", None)
                 if asset_tick is not None and float(asset_tick) > 0:
@@ -3292,14 +3293,14 @@ class BacktestingBroker(Broker):
 
         multiplier = (
             getattr(order.child_orders[0].asset, "multiplier", 1)
-            if order.order_class == Order.OrderClass.MULTILEG and order.child_orders
+            if order.order_class is Order.OrderClass.MULTILEG and order.child_orders
             else getattr(order.asset, "multiplier", 1)
         ) or 1
         order.trade_slippage = abs(fill_price - mid) * float(order.quantity) * multiplier
         setattr(order, "_price_source", "smart_limit")
         if audit_enabled:
             payload: dict[str, Any] = {
-                "fill.model": "smart_limit_net" if order.order_class == Order.OrderClass.MULTILEG else "smart_limit",
+                "fill.model": "smart_limit_net" if order.order_class is Order.OrderClass.MULTILEG else "smart_limit",
                 "fill.price": float(fill_price),
                 "smart_limit.bid": bid,
                 "smart_limit.ask": ask,
@@ -3309,7 +3310,7 @@ class BacktestingBroker(Broker):
                 "smart_limit.final_price_pct": getattr(smart_limit, "final_price_pct", None),
                 "smart_limit.slippage_amount": slippage_amount,
             }
-            if order.order_class == Order.OrderClass.MULTILEG and order.child_orders:
+            if order.order_class is Order.OrderClass.MULTILEG and order.child_orders:
                 payload["smart_limit.legs"] = legs_audit
             self._audit_merge(order, payload, overwrite=False)
             self._audit_merge(order, self._audit_underlying_quote_fields(order), overwrite=False)

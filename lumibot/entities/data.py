@@ -1106,9 +1106,11 @@ class Data:
             has_volume = getattr(self, "_bars_has_volume", _MISSING)
             if has_volume is _MISSING:
                 has_volume = "volume" in df.columns
+                self._bars_has_volume = has_volume
             has_dividend = getattr(self, "_bars_has_dividend", _MISSING)
             if has_dividend is _MISSING:
                 has_dividend = "dividend" in df.columns
+                self._bars_has_dividend = has_dividend
 
             # PERF: avoid fillna on every slice unless the dataset actually contains NaNs.
             needs_copy = False
@@ -1126,6 +1128,7 @@ class Data:
             required = getattr(self, "_bars_required_cols", None)
             if required is None:
                 required = [c for c in ("open", "high", "low", "close") if c in df.columns]
+                self._bars_required_cols = required
             if required and getattr(self, "_ohlc_has_nan", True):
                 df = df.dropna(subset=required)
 
@@ -1221,9 +1224,11 @@ class Data:
             has_volume = getattr(self, "_bars_has_volume", _MISSING)
             if has_volume is _MISSING:
                 has_volume = "volume" in df.columns
+                self._bars_has_volume = has_volume
             has_dividend = getattr(self, "_bars_has_dividend", _MISSING)
             if has_dividend is _MISSING:
                 has_dividend = "dividend" in df.columns
+                self._bars_has_dividend = has_dividend
 
             # PERF: avoid fillna on every slice unless the dataset actually contains NaNs.
             needs_copy = False
@@ -1241,6 +1246,7 @@ class Data:
             required = getattr(self, "_bars_required_cols", None)
             if required is None:
                 required = [c for c in ("open", "high", "low", "close") if c in df.columns]
+                self._bars_required_cols = required
             if required and getattr(self, "_ohlc_has_nan", True):
                 df = df.dropna(subset=required)
 
