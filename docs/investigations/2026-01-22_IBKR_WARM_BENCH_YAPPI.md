@@ -18,7 +18,7 @@ This investigation captures the **YAPPI** profile for the IBKR warm-run “speed
 
 ## Environment
 
-- commit: `f257fce7`
+- commit: `f40c3101`
 - python: `3.11.8`
 - pandas: `2.2.1`
 - platform: `macOS-26.1-arm64-arm-64bit`
@@ -193,3 +193,19 @@ Key delta:
   - reduce order-status equivalence checks (`Order.is_equivalent_status`) and enum comparisons (`OrderClass.__eq__`)
   - eliminate repeated `Index.__contains__` probes in tight loops
   - reduce per-iteration logger overhead (`StrategyLoggerAdapter.isEnabledFor`) and repeated `os.environ` lookups
+
+### 2026-01-23 — Cache quiet-logs mode (remove per-call env lookups)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_quietlogs_cache_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~59%
+- `pandas_numpy`: ~32%
+- `stdlib_wait`: ~4%
+- `other`: ~3%
+- `progress_logging`: ~1%
+
+Key delta:
+- `StrategyLoggerAdapter.isEnabledFor` and `os.environ` lookups no longer appear as dominant hotspots; quiet-logs mode
+  is now cached during logger setup.
