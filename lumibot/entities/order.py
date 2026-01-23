@@ -785,21 +785,46 @@ class Order:
             secondary_trail_price,
             secondary_trail_percent,
     ):
-        self.limit_price = check_price(limit_price, "limit_price must be float.", nullable=True)
-        self.stop_price = check_price(stop_price, "stop_price must be float.", nullable=True)
-        self.stop_limit_price = check_price(stop_limit_price, "stop_limit_price must be float.",
-                                            nullable=True)
-        self.trail_price = check_price(trail_price, "trail_price must be positive float.", nullable=True)
-        self.trail_percent = check_positive(trail_percent, float, "trail_percent must be positive float.")
-        self.secondary_limit_price = check_price(secondary_limit_price, "secondary_limit_price must be float.",
-                                                 nullable=True)
-        self.secondary_stop_price = check_price(secondary_stop_price, "secondary_stop_price must be float.",
-                                                nullable=True)
-        self.secondary_stop_limit_price = check_price(secondary_stop_limit_price,
-                                                      "secondary_stop_limit_price must be float.", nullable=True)
-        self.secondary_trail_price = check_price(secondary_trail_price, "secondary_trail_price must be positive float.",
-                                                 nullable=True)
-        self.secondary_trail_percent = check_positive(secondary_trail_percent, float, "secondary_trail_percent must be positive float.")
+        # PERF: these helpers are called for every Order, but most Orders are market orders
+        # (all price inputs are `None`). Avoid the function call overhead in that common case.
+        cp = check_price
+        cpos = check_positive
+
+        self.limit_price = None if limit_price is None else cp(limit_price, "limit_price must be float.", nullable=True)
+        self.stop_price = None if stop_price is None else cp(stop_price, "stop_price must be float.", nullable=True)
+        self.stop_limit_price = (
+            None
+            if stop_limit_price is None
+            else cp(stop_limit_price, "stop_limit_price must be float.", nullable=True)
+        )
+        self.trail_price = None if trail_price is None else cp(trail_price, "trail_price must be positive float.", nullable=True)
+        self.trail_percent = None if trail_percent is None else cpos(trail_percent, float, "trail_percent must be positive float.")
+
+        self.secondary_limit_price = (
+            None
+            if secondary_limit_price is None
+            else cp(secondary_limit_price, "secondary_limit_price must be float.", nullable=True)
+        )
+        self.secondary_stop_price = (
+            None
+            if secondary_stop_price is None
+            else cp(secondary_stop_price, "secondary_stop_price must be float.", nullable=True)
+        )
+        self.secondary_stop_limit_price = (
+            None
+            if secondary_stop_limit_price is None
+            else cp(secondary_stop_limit_price, "secondary_stop_limit_price must be float.", nullable=True)
+        )
+        self.secondary_trail_price = (
+            None
+            if secondary_trail_price is None
+            else cp(secondary_trail_price, "secondary_trail_price must be positive float.", nullable=True)
+        )
+        self.secondary_trail_percent = (
+            None
+            if secondary_trail_percent is None
+            else cpos(secondary_trail_percent, float, "secondary_trail_percent must be positive float.")
+        )
 
     def _set_type_and_prices(
         self,
