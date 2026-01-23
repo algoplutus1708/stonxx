@@ -543,3 +543,55 @@ Key delta:
   - `SafeList.remove`
   - `Order.__init__`
   - broker order/event pipeline (`BacktestingBroker._process_trade_event`, `process_pending_orders`)
+
+### 2026-01-23 — Speed up `Strategy.get_historical_prices` hot path (commit `03c6cc74`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_03c6cc74_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~89%
+- `pandas_numpy`: ~4%
+- `stdlib_wait`: ~3%
+- `other`: ~2%
+- `progress_logging`: ~1%
+
+Key delta:
+- Removes per-call nested function creation and per-call dict allocations inside `Strategy.get_historical_prices()`,
+  keeping the `return_polars`-support detection cached but making the hot path cheaper.
+- Remaining dominant hotspots are still in the broker/order pipeline and `Data.get_bars` / `Data.get_iter_count`.
+
+### 2026-01-23 — Skip cancel-open-orders scan on normal liquidation (commit `9f1d0e14`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_9f1d0e14_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~89%
+- `pandas_numpy`: ~5%
+- `stdlib_wait`: ~3%
+- `other`: ~2%
+- `progress_logging`: ~1%
+
+Key delta:
+- Removes `BacktestingBroker.get_active_tracked_orders()` from the speed burner hot loop by no longer scanning/canceling
+  unrelated open orders when a position reaches zero in normal fills.
+
+### 2026-01-23 — Use monotonic order identifiers in backtests (commit `56e60140`)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_56e60140_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~90%
+- `pandas_numpy`: ~5%
+- `stdlib_wait`: ~3%
+- `other`: ~1%
+- `progress_logging`: ~1%
+
+Key delta:
+- Removes `uuid.UUID.__init__` from the profile entirely by using a cheap monotonic counter for backtest order identifiers.
+- `Order.__init__` self time drops, but the benchmark is still dominated by:
+  - `BacktestingBroker._process_trade_event`
+  - `SafeList.remove`
+  - `Data.get_bars` / `Data.get_iter_count`
