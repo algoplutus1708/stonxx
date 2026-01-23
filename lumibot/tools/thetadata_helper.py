@@ -4012,6 +4012,36 @@ def get_missing_dates(df_all, asset, start, end):
                 missing_dates = [d for d in missing_dates if d not in suppress_tail]
 
     if placeholder_dates and missing_dates:
+        # Backtesting correctness + performance invariant:
+        # - Acceptance backtests (and warm-cache backtests in general) must be deterministic and
+        #   queue-free once S3/local caches are populated.
+        #
+        # ThetaData caches record "missing=True" placeholder rows to mark trading days where the
+        # provider returned no data. For options we already treat these placeholders as stable
+        # negative caches to avoid endless refetch loops.
+        #
+        # For indices/stocks, repeatedly trying to "heal" placeholder days during backtests breaks
+        # the warm-cache invariant by causing downloader submissions even when S3 is warm. In
+        # backtests we instead treat placeholder-only days as "known unavailable" and do not
+        # refetch them automatically. (If users want to heal placeholder coverage, they can wipe
+        # caches or run an explicit re-warm/cold run.)
+        is_backtesting = str(os.environ.get("IS_BACKTESTING", "false")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+        if is_backtesting and str(getattr(asset, "asset_type", "") or "").lower() in {"stock", "index"}:
+            suppress_placeholder_days = placeholder_dates & set(missing_dates)
+            if suppress_placeholder_days:
+                logger.info(
+                    "[THETA][CACHE][PLACEHOLDER_SUPPRESS] asset=%s | suppressing %d placeholder trading day(s) to preserve warm-cache determinism",
+                    asset.symbol if hasattr(asset, "symbol") else str(asset),
+                    len(suppress_placeholder_days),
+                )
+                missing_dates = [d for d in missing_dates if d not in suppress_placeholder_days]
+
         today_utc = datetime.now(pytz.UTC).date()
         suppress_dates = {d for d in placeholder_dates if d > today_utc}
         # If the cache begins with placeholder coverage before the first real date, treat those dates
