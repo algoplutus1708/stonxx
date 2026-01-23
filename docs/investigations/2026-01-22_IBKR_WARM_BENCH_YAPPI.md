@@ -18,7 +18,7 @@ This investigation captures the **YAPPI** profile for the IBKR warm-run “speed
 
 ## Environment
 
-- commit: `f40c3101`
+- commit: `41ffb849`
 - python: `3.11.8`
 - pandas: `2.2.1`
 - platform: `macOS-26.1-arm64-arm-64bit`
@@ -209,3 +209,20 @@ Bucket summary (self time / `tsub_s`):
 Key delta:
 - `StrategyLoggerAdapter.isEnabledFor` and `os.environ` lookups no longer appear as dominant hotspots; quiet-logs mode
   is now cached during logger setup.
+
+### 2026-01-23 — Speed up `get_iter_count()` (cursor + NumPy search)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_itercount_cursor_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~68%
+- `pandas_numpy`: ~22%
+- `stdlib_wait`: ~5%
+- `other`: ~4%
+- `progress_logging`: ~1%
+
+Key delta:
+- `DatetimeArray._validate_scalar` / `_unbox_scalar` and `DatetimeIndex.searchsorted` are no longer dominant.
+  `check_data()` now uses the optimized `get_iter_count()` (dict hit → monotonic cursor → NumPy searchsorted),
+  which avoids pandas datetime scalar validation on the common “dt not an exact bar timestamp” path.
