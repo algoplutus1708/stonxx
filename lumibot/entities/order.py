@@ -173,6 +173,11 @@ class Order:
         ERROR = "error"
         EXPIRED = "expired"
 
+    # PERF: avoid iterating Enum classes in every `Order.__init__` call (hot path in backtests).
+    _ORDER_CLASS_BY_VALUE = {oc.value: oc for oc in OrderClass}
+    _ORDER_CLASS_VALUES_STR = ", ".join(oc.value for oc in OrderClass)
+    _ORDER_TYPE_VALUES_STR = ", ".join(ot.value for ot in OrderType)
+
     def __init__(
         self,
         strategy,
@@ -544,25 +549,39 @@ class Order:
         # Check - only provide a single stoploss modifier like trail_price, trail_percent, stop_limit_price, etc.
         unique_sl_modifiers = ["stop_limit_price", "trail_price", "trail_percent"]
         unique_secondary_modifiers = ["secondary_stop_limit_price", "secondary_trail_price", "secondary_trail_percent"]
-        local_vars = locals()
-        for unique_mods in [unique_sl_modifiers, unique_secondary_modifiers]:
-            unique_count = sum([1 for unique_mod in unique_mods
-                                if unique_mod in local_vars and local_vars[unique_mod] is not None])
-            if unique_count > 1:
-                raise ValueError(f"Order: You can only specify one of {', '.join(unique_mods)}. "
-                                 f"{unique_count} were given.")
+
+        # PERF: avoid `locals()` + list scanning in the common case where these modifiers are unset.
+        unique_count = int(stop_limit_price is not None) + int(trail_price is not None) + int(trail_percent is not None)
+        if unique_count > 1:
+            raise ValueError(
+                f"Order: You can only specify one of {', '.join(unique_sl_modifiers)}. {unique_count} were given."
+            )
+        secondary_unique_count = (
+            int(secondary_stop_limit_price is not None)
+            + int(secondary_trail_price is not None)
+            + int(secondary_trail_percent is not None)
+        )
+        if secondary_unique_count > 1:
+            raise ValueError(
+                f"Order: You can only specify one of {', '.join(unique_secondary_modifiers)}. "
+                f"{secondary_unique_count} were given."
+            )
 
         # Check - Order Class values passed in the 'type' parameter is depricated. OTO/Bracket/etc should
         # be passed in the 'order_class' parameter. The 'type' parameter should only be used for order types like
         # market, limit, stop, etc.
-        valid_order_classes = [order_class for order_class in Order.OrderClass]
-        valid_order_types = [order_type for order_type in Order.OrderType]
-        if order_type in valid_order_classes:
+        deprecated_order_class = None
+        if isinstance(order_type, self.OrderClass):
+            deprecated_order_class = order_type
+        elif isinstance(order_type, str):
+            deprecated_order_class = self._ORDER_CLASS_BY_VALUE.get(order_type.strip().lower())
+
+        if deprecated_order_class is not None:
             logger.warning(f"Order: Passing Advanced order class ({self.order_type}) in 'order_type' field is "
                             f"deprecated. Please use 'order_class' instead. "
-                            f"Valid Classes: {', '.join(valid_order_classes)} | "
-                            f"Valid Types: {', '.join(valid_order_types)}")
-            self.order_class = order_type
+                            f"Valid Classes: {self._ORDER_CLASS_VALUES_STR} | "
+                            f"Valid Types: {self._ORDER_TYPE_VALUES_STR}")
+            self.order_class = deprecated_order_class
             self.order_type = None
             order_type = None
 
