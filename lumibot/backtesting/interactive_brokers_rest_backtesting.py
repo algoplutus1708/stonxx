@@ -250,13 +250,21 @@ class InteractiveBrokersRESTBacktesting(PandasData):
         self,
         asset: Asset,
         quote: Optional[Asset],
-        dataset_key: str,
-        start_dt: datetime,
-        end_dt: datetime,
+        dataset_key: str | None = None,
+        start_dt: datetime | None = None,
+        end_dt: datetime | None = None,
         *,
+        # Backwards-compatible alias for older call sites/tests that use `timestep=...`.
+        timestep: str | None = None,
         exchange: Optional[str],
         include_after_hours: bool,
     ) -> None:
+        if timestep is not None:
+            dataset_key = timestep
+        if dataset_key is None:
+            raise TypeError("InteractiveBrokersRESTBacktesting._update_pandas_data missing required 'timestep'/'dataset_key'")
+        if start_dt is None or end_dt is None:
+            raise TypeError("InteractiveBrokersRESTBacktesting._update_pandas_data requires 'start_dt' and 'end_dt'")
         canonical_key, legacy_key = self._build_dataset_keys(asset, quote, dataset_key)
         existing = self._data_store.get(canonical_key)
         existing_df = getattr(existing, "df", None) if existing is not None else None

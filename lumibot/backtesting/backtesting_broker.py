@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Optional, Union
 
+import numpy as np
 import pandas as pd
 import polars as pl
 import pytz
