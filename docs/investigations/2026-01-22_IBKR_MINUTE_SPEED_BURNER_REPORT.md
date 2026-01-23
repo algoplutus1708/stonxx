@@ -95,6 +95,7 @@ Environment (protocol baseline):
 | 2026-01-23 | Cache `_data_store` key lookups (commit `12dc32e5`) | 1.471 | 2.289 | median of 3; warm-cache; `--iterations 2000`; no profiler |
 | 2026-01-23 | Skip submit-time audit work when disabled (commit `eee1c670`) | 1.135 | 1.807 | median of 3; warm-cache; `--iterations 2000`; no profiler |
 | 2026-01-23 | Lazy order events (commit `1e7ab862`) | 1.063 | 1.540 | median of 3; warm-cache; `--iterations 2000`; no profiler |
+| 2026-01-23 | Skip OrderClass enum conversion for non-parent (commit `f257fce7`) | 0.956 | 1.361 | median of 3; warm-cache; `--iterations 2000`; no profiler |
 
 ### Long-run sanity (iterations scaling)
 
@@ -118,6 +119,7 @@ This table uses a longer loop length to catch that early:
 | 2026-01-23 | Cache `_data_store` key lookups (commit `12dc32e5`) | 20000 | 7.071 | 6.483 | median of 3; warm-cache; `--iterations 20000`; no profiler |
 | 2026-01-23 | Skip submit-time audit work when disabled (commit `eee1c670`) | 20000 | 6.302 | 6.838 | median of 3; warm-cache; `--iterations 20000`; no profiler |
 | 2026-01-23 | Lazy order events (commit `1e7ab862`) | 20000 | 5.639 | 6.289 | median of 3; warm-cache; `--iterations 20000`; no profiler |
+| 2026-01-23 | Skip OrderClass enum conversion for non-parent (commit `f257fce7`) | 20000 | 5.318 | 5.875 | median of 3; warm-cache; `--iterations 20000`; no profiler |
 
 ---
 

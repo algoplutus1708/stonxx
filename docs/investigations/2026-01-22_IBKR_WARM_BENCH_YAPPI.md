@@ -18,7 +18,7 @@ This investigation captures the **YAPPI** profile for the IBKR warm-run “speed
 
 ## Environment
 
-- commit: `34599dfb`
+- commit: `f257fce7`
 - python: `3.11.8`
 - pandas: `2.2.1`
 - platform: `macOS-26.1-arm64-arm-64bit`
@@ -173,3 +173,23 @@ Bucket summary (self time / `tsub_s`):
 Key delta:
 - `Order.__init__` no longer allocates multiple `threading.Event()` objects per order (lazy allocation). This removes
   large numbers of internal `threading.Condition` allocations and reduces per-order overhead in high-churn backtests.
+
+### 2026-01-23 — Skip OrderClass enum conversion for non-parent (small hot-path cut)
+
+Capture:
+- `tests/backtest/_ibkr_speed_burner_cache/_profiles/ibkr_warmcache_f257fce7_2000_profile_yappi.csv`
+
+Bucket summary (self time / `tsub_s`):
+- `lumibot_other`: ~57%
+- `pandas_numpy`: ~31%
+- `other`: ~7%
+- `stdlib_wait`: ~4%
+- `progress_logging`: ~1%
+
+Key delta:
+- Profile confirms we are now dominated by **LumiBot order + event pipeline** and **pandas datetime scalar validation**
+  rather than the earlier bars-construction hotspots.
+- Next likely wins are:
+  - reduce order-status equivalence checks (`Order.is_equivalent_status`) and enum comparisons (`OrderClass.__eq__`)
+  - eliminate repeated `Index.__contains__` probes in tight loops
+  - reduce per-iteration logger overhead (`StrategyLoggerAdapter.isEnabledFor`) and repeated `os.environ` lookups
