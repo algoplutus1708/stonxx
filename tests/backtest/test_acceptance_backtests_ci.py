@@ -386,9 +386,13 @@ def _run_script(case: _BaselineCase) -> tuple[Path, dict[str, int]]:
             submit_requests = 0
         if submit_requests:
             first_path = queue.get("first_request_path")
+            first_param_keys = queue.get("first_request_param_keys")
+            first_params = queue.get("first_request_params")
             raise AssertionError(
                 f"{case.slug} attempted {submit_requests} downloader queue submission(s) "
-                f"(first_request_path={first_path!r}). Expected fully warm S3 cache.\n"
+                f"(first_request_path={first_path!r}, "
+                f"first_request_param_keys={first_param_keys!r}, "
+                f"first_request_params={first_params!r}). Expected fully warm S3 cache.\n"
                 f"settings={settings}\nrun_dir={run_dir}"
             )
 
