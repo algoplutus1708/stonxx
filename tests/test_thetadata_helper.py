@@ -1985,6 +1985,208 @@ def test_get_request_exception_handling(mock_queue_request, monkeypatch):
     assert mock_queue_request.called
 
 
+@patch("lumibot.tools.thetadata_queue_client.queue_request")
+def test_get_request_coerces_v3_row_style_payload(mock_queue_request, monkeypatch):
+    """Downloader-mode get_request must handle v3 row-style payloads (no header/format).
+
+    Some ThetaTerminal versions return history endpoints as:
+      {"response": [{"timestamp": "...", ...}, ...]}
+
+    LumiBot expects to normalize that into a v2-style envelope so downstream parsing
+    can build a DataFrame with explicit columns.
+    """
+    monkeypatch.setenv("DATADOWNLOADER_BASE_URL", "http://test-server:8080")
+    monkeypatch.setenv("DATADOWNLOADER_API_KEY", "test-api-key")
+
+    mock_queue_request.return_value = {
+        "response": [
+            {
+                "timestamp": "2025-04-11T09:30:00",
+                "open": 444.65,
+                "high": 446.27,
+                "low": 444.65,
+                "close": 445.60,
+                "volume": 123,
+                "count": 1,
+            }
+        ]
+    }
+
+    result = thetadata_helper.get_request(
+        "http://test-server:8080/v3/stock/history/ohlc",
+        headers={"Accept": "application/json"},
+        querystring={"symbol": "QQQ", "date": "2025-04-11", "interval": "1m", "format": "json"},
+    )
+
+    assert isinstance(result, dict)
+    assert "header" in result and "response" in result
+    assert isinstance(result["header"], dict)
+    assert isinstance(result["response"], list) and result["response"]
+    assert isinstance(result["response"][0], list)
+
+    fmt = result["header"].get("format")
+    assert isinstance(fmt, list)
+    assert fmt != ["response"]
+    assert "timestamp" in fmt
+    assert "open" in fmt
+
+    timestamp_idx = fmt.index("timestamp")
+    assert result["response"][0][timestamp_idx] == "2025-04-11T09:30:00"
+
+
+@patch("lumibot.tools.thetadata_queue_client.queue_request")
+def test_get_historical_data_accepts_v3_row_style_payload(mock_queue_request, monkeypatch):
+    """End-to-end: v3 row-style payloads must flow into a datetime-indexed DataFrame."""
+    import datetime as dt
+
+    monkeypatch.setenv("DATADOWNLOADER_BASE_URL", "http://test-server:8080")
+    monkeypatch.setenv("DATADOWNLOADER_API_KEY", "test-api-key")
+
+    # Avoid market calendar dependencies in this unit test; force a single trading day.
+    monkeypatch.setattr(
+        thetadata_helper,
+        "get_trading_dates",
+        lambda *_args, **_kwargs: [dt.date(2025, 4, 11)],
+    )
+
+    mock_queue_request.return_value = {
+        "response": [
+            {"timestamp": "2025-04-11T09:30:00", "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1, "count": 1},
+            {"timestamp": "2025-04-11T09:31:00", "open": 1.1, "high": 1.1, "low": 1.1, "close": 1.1, "volume": 1, "count": 1},
+        ]
+    }
+
+    asset = Asset("QQQ", asset_type="stock")
+    start = dt.datetime(2025, 4, 11, 13, 0, tzinfo=dt.timezone.utc)
+    end = dt.datetime(2025, 4, 11, 20, 0, tzinfo=dt.timezone.utc)
+
+    out = thetadata_helper.get_historical_data(
+        asset,
+        start_dt=start,
+        end_dt=end,
+        ivl=60000,
+        datastyle="ohlc",
+        include_after_hours=True,
+    )
+
+    assert out is not None
+    assert not out.empty
+    assert out.index.name == "datetime"
+    assert "open" in out.columns
+
+
+@patch("lumibot.tools.thetadata_queue_client.queue_request")
+def test_get_historical_data_flattens_v3_nested_option_quote_payload(mock_queue_request, monkeypatch):
+    """Theta v3 option quote history can return a nested response: [{contract, data:[...]}]."""
+    import datetime as dt
+
+    monkeypatch.setenv("DATADOWNLOADER_BASE_URL", "http://test-server:8080")
+    monkeypatch.setenv("DATADOWNLOADER_API_KEY", "test-api-key")
+
+    monkeypatch.setattr(
+        thetadata_helper,
+        "get_trading_dates",
+        lambda *_args, **_kwargs: [dt.date(2024, 6, 3)],
+    )
+
+    mock_queue_request.return_value = {
+        "response": [
+            {
+                "contract": {"expiration": "2024-06-21", "symbol": "NDX", "strike": 18250.0, "right": "CALL"},
+                "data": [
+                    {"timestamp": "2024-06-03T13:55:00", "bid": 10.0, "ask": 10.5, "bid_size": 1, "ask_size": 2},
+                    {"timestamp": "2024-06-03T13:56:00", "bid": 10.1, "ask": 10.6, "bid_size": 1, "ask_size": 2},
+                ],
+            }
+        ]
+    }
+
+    asset = Asset("NDX", asset_type=Asset.AssetType.OPTION, expiration=dt.date(2024, 6, 21), strike=18250.0, right="call")
+    start = dt.datetime(2024, 6, 3, 17, 55, tzinfo=dt.timezone.utc)
+    end = dt.datetime(2024, 6, 3, 17, 57, tzinfo=dt.timezone.utc)
+
+    out = thetadata_helper.get_historical_data(
+        asset,
+        start_dt=start,
+        end_dt=end,
+        ivl=60000,
+        datastyle="quote",
+        include_after_hours=True,
+    )
+
+    assert out is not None
+    assert not out.empty
+    assert out.index.name == "datetime"
+    assert "bid" in out.columns
+    assert "ask" in out.columns
+
+
+def test_normalize_strike_value_does_not_scale_valid_high_strike():
+    # NDX strikes are legitimately > 10,000 in dollars; they must not be divided by 1000.
+    assert thetadata_helper._normalize_strike_value(16800.0) == 16800.0
+    assert thetadata_helper._normalize_strike_value("18250.000") == 18250.0
+
+
+def test_normalize_strike_value_scales_thousandths_encoded_strike():
+    # Historical payloads can encode strikes in thousandths of a dollar (e.g. 4500000 => 4500.0).
+    assert thetadata_helper._normalize_strike_value(4500000) == 4500.0
+
+
+def test_build_historical_chain_accepts_v3_row_style_strikes(monkeypatch):
+    """build_historical_chain must accept v3 row-style strike payloads (list[dict])."""
+    import datetime as dt
+
+    # Keep this test purely in-memory: patch the expiration fetch and queue client.
+    monkeypatch.setattr(
+        thetadata_helper,
+        "get_request",
+        lambda *_args, **_kwargs: {
+            "header": {"format": ["symbol", "expiration"]},
+            "response": [["NDX", "2024-06-21"]],
+        },
+    )
+
+    class FakeQueueClient:
+        max_concurrent = 8
+
+        def check_or_submit(self, *_, **__):
+            return ("req-1", "submitted", True)
+
+        def wait_for_result(self, *_, **__):
+            return (
+                {
+                    "response": [
+                        {"symbol": "NDX", "strike": 16800.0},
+                        {"symbol": "NDX", "strike": 18250.0},
+                    ]
+                },
+                200,
+            )
+
+    monkeypatch.setattr(
+        "lumibot.tools.thetadata_queue_client.get_queue_client",
+        lambda: FakeQueueClient(),
+    )
+
+    asset = Asset("NDX", asset_type=Asset.AssetType.INDEX)
+    out = thetadata_helper.build_historical_chain(
+        asset=asset,
+        as_of_date=dt.date(2024, 6, 3),
+        max_expirations=1,
+        max_consecutive_misses=1,
+        chain_constraints={
+            "min_expiration_date": dt.date(2024, 6, 3),
+            "max_expiration_date": dt.date(2024, 6, 25),
+        },
+    )
+
+    assert out is not None
+    calls = out["Chains"]["CALL"]
+    assert "2024-06-21" in calls
+    assert 16800.0 in calls["2024-06-21"]
+    assert 18250.0 in calls["2024-06-21"]
+
+
 # NOTE (2025-12-07): The tests below (test_get_request_raises_theta_request_error_after_transient_status,
 # etc.) are now obsolete because get_request ONLY uses queue mode. The queue system handles
 # retries and error handling internally. These tests can be removed in a future cleanup.

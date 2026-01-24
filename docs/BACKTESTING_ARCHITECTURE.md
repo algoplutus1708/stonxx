@@ -403,6 +403,18 @@ In practice, `v3/index/history/*` requests for `NDX` can return placeholder all-
 - The scaling factor is a stable heuristic (ETF fees/dividend timing can cause slow drift over long horizons).
 - If you need higher-fidelity calibration, add a daily factor calibration path derived from NDX options EOD (still Theta-only).
 
+## ThetaData v3 Payload Variants (Downloader Mode)
+
+When routed through the BotSpot Data Downloader, Theta v3 responses are not fully stable across terminal versions:
+- **v2-style envelope:** `{"header":{"format":[...]}, "response":[[...], ...]}`
+- **row-style:** `{"response":[{"timestamp": "...", ...}, ...]}` (no `header`)
+- **nested option history:** `{"response":[{"contract": {...}, "data":[{...}, ...]}]}`
+
+LumiBot normalizes these shapes in `lumibot/tools/thetadata_helper.py` so downstream history parsing:
+- builds `DataFrame`s with explicit columns,
+- produces a `datetime` index consistently, and
+- avoids “NO_DATA”/472 loops caused by mis-parsed quote payloads (especially for NDX options backtests).
+
 **Split Handling (FIXED - Nov 28, 2025)**
 
 ✅ **ThetaData split handling is now working correctly.**
