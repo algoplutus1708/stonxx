@@ -1,6 +1,14 @@
 # Changelog
 
-## 4.4.36 - Unreleased
+## 4.4.37 - Unreleased
+
+### Added
+
+### Changed
+
+### Fixed
+
+## 4.4.36 - 2026-01-24
 
 ### Changed
 - IBKR futures backtesting: accelerate intraday resampling paths to avoid repeated per-iteration recomputation for timesteps like 5minute/15minute/30minute.
