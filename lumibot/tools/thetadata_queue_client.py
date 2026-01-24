@@ -158,6 +158,28 @@ def _normalize_downloader_base_url(base_url: str) -> str:
     return normalized_with_scheme
 
 
+def _redact_downloader_base_url_for_logs(base_url: str) -> str:
+    """Redact non-local downloader base URLs for logs.
+
+    We intentionally treat the Data Downloader host as infrastructure-private: it should never be
+    written into docs or logs (especially in CI/prod where logs may be exported).
+
+    Local development URLs remain readable (localhost/127.0.0.1/0.0.0.0).
+    """
+    normalized = _normalize_downloader_base_url(base_url)
+    if not normalized:
+        return normalized
+
+    parsed = urlparse(normalized)
+    host = (parsed.hostname or "").lower()
+    if host in {"localhost", "127.0.0.1", "0.0.0.0"}:
+        return normalized
+
+    port = f":{parsed.port}" if parsed.port else ""
+    scheme = parsed.scheme or "http"
+    return f"{scheme}://<redacted>{port}"
+
+
 @dataclass
 class QueuedRequestInfo:
     """Information about a request in the queue."""
@@ -1070,9 +1092,10 @@ def get_queue_client(client_id: Optional[str] = None) -> QueueClient:
                 api_key_header=api_key_header,
                 client_id=effective_client_id,
             )
+            base_url_log = _redact_downloader_base_url_for_logs(base_url)
             logger.info(
                 "Queue client initialized: base_url=%s poll_interval=%.3fs timeout=%.1fs client_id=%s",
-                base_url,
+                base_url_log,
                 _queue_client.poll_interval,
                 _queue_client.timeout,
                 _queue_client.client_id,
