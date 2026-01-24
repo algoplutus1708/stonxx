@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timedelta, timezone
 import pandas as pd
+import pytest
 
 from lumibot.tools import databento_helper
 from lumibot.tools.databento_helper import DataBentoClient
@@ -136,6 +137,7 @@ class TestDataBentoHelper(unittest.TestCase):
         self.assertEqual(client.timeout, 30)
         self.assertEqual(client.max_retries, 3)
 
+    @pytest.mark.apitest
     def test_get_price_data_from_databento_success(self):
         """Test successful data retrieval using real DataBento API"""
         import os
@@ -225,6 +227,7 @@ class TestDataBentoHelper(unittest.TestCase):
         expected_name = "ES_minute_202501010000_202501310000.parquet"
         self.assertEqual(filename.name, expected_name)
 
+    @pytest.mark.apitest
     def test_no_retry_logic_for_correct_symbol(self):
         """Test that the function uses correct symbol/dataset without retry logic - using real API"""
         import os
