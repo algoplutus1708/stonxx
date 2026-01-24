@@ -208,9 +208,21 @@ def cagr(_df):
     df = df.sort_index(ascending=True)
     df["cum_return"] = (1 + df["return"]).cumprod()
     total_ret = df["cum_return"].iloc[-1]
-    start = datetime.fromtimestamp(df.index.values[0].astype("O") / 1e9, pytz.UTC)
-    end = datetime.fromtimestamp(df.index.values[-1].astype("O") / 1e9, pytz.UTC)
-    period_years = (end - start).days / 365.25
+    try:
+        start = pd.Timestamp(df.index[0])
+        end = pd.Timestamp(df.index[-1])
+        if start.tzinfo is None:
+            start = start.tz_localize(pytz.UTC)
+        else:
+            start = start.tz_convert(pytz.UTC)
+        if end.tzinfo is None:
+            end = end.tz_localize(pytz.UTC)
+        else:
+            end = end.tz_convert(pytz.UTC)
+        period_years = (end - start).days / 365.25
+    except Exception:
+        # Avoid tearing down backtests during end-of-run stats generation; return neutral CAGR.
+        return 0
     if period_years == 0:
         return 0
     CAGR = (total_ret) ** (1 / period_years) - 1
@@ -223,9 +235,21 @@ def volatility(_df):
     has the return for that time period (eg. daily)
     """
     df = _df.copy()
-    start = datetime.fromtimestamp(df.index.values[0].astype("O") / 1e9, pytz.UTC)
-    end = datetime.fromtimestamp(df.index.values[-1].astype("O") / 1e9, pytz.UTC)
-    period_years = (end - start).days / 365.25
+    try:
+        start = pd.Timestamp(df.index[0])
+        end = pd.Timestamp(df.index[-1])
+        if start.tzinfo is None:
+            start = start.tz_localize(pytz.UTC)
+        else:
+            start = start.tz_convert(pytz.UTC)
+        if end.tzinfo is None:
+            end = end.tz_localize(pytz.UTC)
+        else:
+            end = end.tz_convert(pytz.UTC)
+        period_years = (end - start).days / 365.25
+    except Exception:
+        # Avoid tearing down backtests during end-of-run stats generation; return neutral volatility.
+        return 0
     if period_years == 0:
         return 0
     ratio_to_annual = df["return"].count() / period_years

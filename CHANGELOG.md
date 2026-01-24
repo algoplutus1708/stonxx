@@ -7,6 +7,7 @@
 ### Changed
 
 ### Fixed
+- Backtesting stats: fix `cagr()`/`volatility()` crash during end-of-run stats generation when returns index uses non-nanosecond datetime dtypes (e.g., `datetime64[us]`/`datetime64[s]`).
 
 ## 4.4.36 - 2026-01-24
 
