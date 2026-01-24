@@ -380,6 +380,28 @@ For example, SPX index minute OHLC typically yields ~391 bars/day and ends at th
 See:
 - `docs/investigations/2026-01-13_SPX_INTRADAY_STALE_LOOP_FIX.md`
 
+## ThetaData Coverage Gap: NDX Underlying (CRITICAL)
+
+ThetaData provides **NDX options** history, but does **not** provide the **NDX index underlying** (price/OHLC) history.
+In practice, `v3/index/history/*` requests for `NDX` can return placeholder all-zero OHLC rows or `NO_DATA`.
+
+**Failure mode:**
+- Strategies that trade NDX options still require an underlying price series for:
+  - signals / indicators,
+  - moneyness checks,
+  - strike selection heuristics,
+  - portfolio valuation / cash settlement.
+- When NDX underlying history is empty/placeholder-only, the backtest can repeatedly refetch and never progress.
+
+**Platform fix (ThetaDataBacktesting only):**
+- LumiBot proxies `Asset("NDX", asset_type=INDEX)` underlying bars/quotes via `QQQ` and scales into NDX “points” units.
+- This keeps **NDX options** as the traded root while supplying a fast, usable underlying proxy.
+- The proxy is **explicit**: logs include a `[THETA][INDEX_PROXY]` warning (once per run).
+
+**Limitations / drift:**
+- The scaling factor is a stable heuristic (ETF fees/dividend timing can cause slow drift over long horizons).
+- If you need higher-fidelity calibration, add a daily factor calibration path derived from NDX options EOD (still Theta-only).
+
 **Split Handling (FIXED - Nov 28, 2025)**
 
 ✅ **ThetaData split handling is now working correctly.**

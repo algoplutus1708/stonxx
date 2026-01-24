@@ -1608,9 +1608,79 @@ class ThetaDataBacktestingPandas(PandasData):
         # refreshing cached daily data).
         preserve_full_history = bool(is_option_asset or ts_unit == "day")
 
+        # -------------------------------------------------------------------------------------
+        # NDX UNDERLYING PROXY (ThetaData coverage gap)
+        # -------------------------------------------------------------------------------------
+        # ThetaData support confirmed they do not provide NDX index/underlying history (only NDX options).
+        # In practice, /v3/index/history/* for NDX can return placeholder all-zero OHLC or NO_DATA, which
+        # makes backtests thrash (empty dataset → repeated refetch attempts).
+        #
+        # Strategy code must continue to trade NDX options, but the platform needs a usable underlying
+        # price series for `Asset("NDX", asset_type=INDEX)` (signals, moneyness, valuation, etc).
+        #
+        # Solution: proxy NDX underlying bars/quotes via a liquid Theta-covered instrument (QQQ),
+        # scaled into NDX "points" units. This is explicit (logged once per run) and scoped to the
+        # ThetaData backtesting path so other providers remain unaffected.
+        ndx_proxy_symbol: Optional[str] = None
+        ndx_proxy_factor: Optional[float] = None
+        # IMPORTANT: Do not infer "index-ness" from the symbol alone.
+        # `Asset("NDX")` defaults to a stock by design; only explicit `asset_type=INDEX` should be proxied.
+        if (
+            not is_option_asset
+            and getattr(asset_separated, "asset_type", None) == Asset.AssetType.INDEX
+        ):
+            symbol_upper = str(getattr(asset_separated, "symbol", "") or "").upper()
+            if symbol_upper in {"NDX", "NDXP"}:
+                ndx_proxy_symbol = "QQQ"
+                # Heuristic: NDX is an index level while QQQ is an ETF price. The ratio moves slowly
+                # over time (fees/dividend timing), but is stable enough to serve as a fast proxy.
+                # If we later add a low-cost daily calibration path from NDX options EOD, it can
+                # override this constant factor without changing call sites.
+                ndx_proxy_factor = 41.0
+
+        def _log_ndx_proxy_once() -> None:
+            if not ndx_proxy_symbol:
+                return
+            notices = getattr(self, "_thetadata_index_proxy_notices", None)
+            if notices is None:
+                notices = set()
+                setattr(self, "_thetadata_index_proxy_notices", notices)
+            key = f"{getattr(asset_separated, 'symbol', asset_separated)}->{ndx_proxy_symbol}"
+            if key in notices:
+                return
+            notices.add(key)
+            logger.warning(
+                "[THETA][INDEX_PROXY] %s underlying is not available from ThetaData; proxying via %s (factor=%s).",
+                getattr(asset_separated, "symbol", asset_separated),
+                ndx_proxy_symbol,
+                ndx_proxy_factor,
+            )
+
+        def _apply_ndx_proxy_scaling(frame: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+            if frame is None or getattr(frame, "empty", True) or not ndx_proxy_symbol or not ndx_proxy_factor:
+                return frame
+            # Shallow copy: keep memory stable for multi-year cached frames.
+            frame = frame.copy(deep=False)
+            price_columns = ("open", "high", "low", "close", "bid", "ask", "mid_price", "price")
+            for col in price_columns:
+                if col in frame.columns:
+                    frame[col] = pd.to_numeric(frame[col], errors="coerce") * float(ndx_proxy_factor)
+            # Index underlyings do not have meaningful share volume/splits/dividends in our backtests.
+            if "volume" in frame.columns:
+                frame["volume"] = 0.0
+            if "dividend" in frame.columns:
+                frame["dividend"] = 0.0
+            if "stock_splits" in frame.columns:
+                frame["stock_splits"] = 0.0
+            return frame
+
         def _fetch_ohlc():
-            return thetadata_helper.get_price_data(
-                asset_separated,
+            fetch_asset = asset_separated
+            if ndx_proxy_symbol:
+                _log_ndx_proxy_once()
+                fetch_asset = Asset(symbol=ndx_proxy_symbol, asset_type="stock")
+            frame = thetadata_helper.get_price_data(
+                fetch_asset,
                 start_for_fetch,
                 end_requirement,
                 timespan=ts_unit,
@@ -1628,10 +1698,15 @@ class ThetaDataBacktestingPandas(PandasData):
                     and getattr(asset_separated, "asset_type", None) == "option"
                 ),
             )
+            return _apply_ndx_proxy_scaling(frame)
 
         def _fetch_quote():
-            return thetadata_helper.get_price_data(
-                asset_separated,
+            fetch_asset = asset_separated
+            if ndx_proxy_symbol:
+                _log_ndx_proxy_once()
+                fetch_asset = Asset(symbol=ndx_proxy_symbol, asset_type="stock")
+            frame = thetadata_helper.get_price_data(
+                fetch_asset,
                 start_for_fetch,
                 end_requirement,
                 timespan=ts_unit,
@@ -1641,6 +1716,7 @@ class ThetaDataBacktestingPandas(PandasData):
                 include_after_hours=True,  # Default to True for extended hours data
                 preserve_full_history=preserve_full_history,
             )
+            return _apply_ndx_proxy_scaling(frame)
 
         df_ohlc = None
         if wants_ohlc:
