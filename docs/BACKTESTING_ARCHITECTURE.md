@@ -397,6 +397,7 @@ In practice, `v3/index/history/*` requests for `NDX` can return placeholder all-
 - LumiBot proxies `Asset("NDX", asset_type=INDEX)` underlying bars/quotes via `QQQ` and scales into NDX “points” units.
 - This keeps **NDX options** as the traded root while supplying a fast, usable underlying proxy.
 - The proxy is **explicit**: logs include a `[THETA][INDEX_PROXY]` warning (once per run).
+- **Invariant:** `Asset("NDX")` defaults to `stock` by design and is **not** treated as an index. Only explicit `asset_type=INDEX` triggers the proxy.
 
 **Limitations / drift:**
 - The scaling factor is a stable heuristic (ETF fees/dividend timing can cause slow drift over long horizons).

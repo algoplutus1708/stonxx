@@ -83,6 +83,54 @@ def test_ndx_stock_symbol_is_not_proxied(monkeypatch):
     assert calls and calls[0] == "NDX"
 
 
+def test_ndx_default_asset_type_is_stock_and_not_proxied(monkeypatch):
+    monkeypatch.setenv("DATADOWNLOADER_BASE_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("DATADOWNLOADER_API_KEY", "test")
+
+    calls: list[str] = []
+
+    def fake_get_price_data(asset, *_args, **_kwargs):
+        calls.append(asset.symbol)
+        return _make_df({"open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0], "close": [1.0, 1.0]})
+
+    monkeypatch.setattr(tdp_module.thetadata_helper, "get_price_data", fake_get_price_data)
+
+    start = datetime(2025, 1, 2, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2025, 1, 3, 0, 0, tzinfo=timezone.utc)
+    ds = ThetaDataBacktestingPandas(datetime_start=start, datetime_end=end, use_quote_data=False)
+    ds._datetime = start
+
+    # Asset() defaults to STOCK by design; it must not be proxied as an index.
+    ndx = Asset("NDX")
+    assert ndx.asset_type == Asset.AssetType.STOCK
+    ds._update_pandas_data(ndx, quote=None, length=2, timestep="minute", start_dt=start)
+
+    assert calls and calls[0] == "NDX"
+
+
+def test_ndxp_index_is_proxied_via_qqq(monkeypatch):
+    monkeypatch.setenv("DATADOWNLOADER_BASE_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("DATADOWNLOADER_API_KEY", "test")
+
+    calls: list[str] = []
+
+    def fake_get_price_data(asset, *_args, **_kwargs):
+        calls.append(asset.symbol)
+        return _make_df({"open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0], "close": [1.0, 1.0]})
+
+    monkeypatch.setattr(tdp_module.thetadata_helper, "get_price_data", fake_get_price_data)
+
+    start = datetime(2025, 1, 2, 0, 0, tzinfo=timezone.utc)
+    end = datetime(2025, 1, 3, 0, 0, tzinfo=timezone.utc)
+    ds = ThetaDataBacktestingPandas(datetime_start=start, datetime_end=end, use_quote_data=False)
+    ds._datetime = start
+
+    ndxp = Asset("NDXP", asset_type="index")
+    ds._update_pandas_data(ndxp, quote=None, length=2, timestep="minute", start_dt=start)
+
+    assert calls and calls[0] == "QQQ"
+
+
 def test_ndx_quote_is_proxied_and_scaled(monkeypatch):
     monkeypatch.setenv("DATADOWNLOADER_BASE_URL", "http://127.0.0.1:1")
     monkeypatch.setenv("DATADOWNLOADER_API_KEY", "test")
