@@ -187,7 +187,6 @@ class Asset:
         precision: str = None,
         underlying_asset: "Asset" = None,
         auto_expiry: str = None,
-        exchange: str = None,
     ):
         """
         Parameters
@@ -236,9 +235,6 @@ class Asset:
         self.multiplier = multiplier
         self.precision = precision
         self.underlying_asset = underlying_asset
-        # Optional exchange / venue identifier (e.g., "CME", "NYMEX", "NYSE").
-        # This is used to disambiguate symbols that can trade on multiple venues.
-        self.exchange = str(exchange).upper() if exchange else None
 
         # Leverage for futures assets (ignored for other asset types)
         self.leverage = leverage if asset_type == self.AssetType.FUTURE else 1
@@ -276,7 +272,7 @@ class Asset:
         # Cache the hash: Asset objects are used heavily as dict keys during backtests (quotes, bars,
         # chains, positions). Recomputing tuple hashes millions of times dominates CPU in option-heavy
         # strategies; caching preserves correctness as long as identity fields remain unchanged.
-        self._cached_hash = hash((self.symbol, self.asset_type, self.expiration, self.strike, self.right, self.exchange))
+        self._cached_hash = hash((self.symbol, self.asset_type, self.expiration, self.strike, self.right))
 
     @classmethod
     def symbol2asset(cls, symbol: str):
@@ -344,10 +340,6 @@ class Asset:
         # Optimize: Check symbol first as it's most likely to differ
         # This avoids expensive enum comparisons when symbols don't match
         if self.symbol != other.symbol:
-            return False
-
-        # Exchange is a cheap string compare and often differs for ambiguous tickers.
-        if self.exchange != other.exchange:
             return False
 
         # Only check other attributes if symbols match
@@ -440,8 +432,6 @@ class Asset:
             "symbol": self.symbol,
             "type": str(self.asset_type) if self.asset_type else "stock",
         }
-        if self.exchange:
-            result["exchange"] = self.exchange
 
         # Add option-specific fields
         if self.asset_type in (self.AssetType.OPTION, "option"):
@@ -468,7 +458,6 @@ class Asset:
         return {
             "symbol": self.symbol,
             "asset_type": self.asset_type,
-            "exchange": self.exchange,
             "expiration": self.expiration.strftime("%Y-%m-%d") if self.expiration else None,
             "strike": self.strike,
             "right": self.right,
@@ -483,7 +472,6 @@ class Asset:
         return cls(
             symbol=data["symbol"],
             asset_type=data["asset_type"],
-            exchange=data.get("exchange"),
             expiration=datetime.strptime(data["expiration"], "%Y-%m-%d").date() if data["expiration"] else None,
             strike=data["strike"],
             right=data["right"],

@@ -7,7 +7,6 @@
 ### Changed
 
 ### Fixed
-- Asset: accept `exchange=` kwarg (e.g., `Asset("NQ", CONT_FUTURE, exchange="CME")`) to prevent strategy crashes; include exchange in hashing/serialization for correct caching and round-trips.
 
 ## 4.4.36 - 2026-01-24
 
