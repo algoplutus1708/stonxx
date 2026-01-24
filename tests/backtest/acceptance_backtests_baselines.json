@@ -152,14 +152,14 @@
       "lumibot_version": "4.4.36",
       "max_backtest_time_seconds": 900,
       "metrics_centipercent": {
-        "cagr": -1468,
-        "max_drawdown": -3080,
-        "total_return": -1423
+        "cagr": -1018,
+        "max_drawdown": -2771,
+        "total_return": -985
       },
       "metrics_raw": {
-        "cagr": "-14.68%",
-        "max_drawdown": "-30.80%",
-        "total_return": "-14.23%"
+        "cagr": "-10.18%",
+        "max_drawdown": "-27.71%",
+        "total_return": "-9.85%"
       },
       "script_filename": "SPX Short Straddle Intraday (Copy).py",
       "settings_backtesting_end": "2025-12-25 23:59:00-05:00",
