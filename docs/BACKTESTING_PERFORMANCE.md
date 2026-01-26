@@ -2,7 +2,7 @@
 
 > A practical, evidence-driven guide to **measuring**, **debugging**, and **improving** backtesting performance end‑to‑end (strategy → data → cache → artifacts → UI), while preserving broker‑like correctness.
 
-**Last Updated:** 2026-01-07  
+**Last Updated:** 2026-01-26  
 **Status:** Active  
 **Audience:** Developers, AI Agents (engineering docs)  
 
@@ -19,6 +19,11 @@
 - **Tier 3 (gold):** **live replay baseline** — replay an interval that was traded live and reproduce broker fills + realized PnL within tolerances.
 
 **Speed:** warm-cache runs are queue-free and complete in bounded wall time, with evidence (request counts, cache hit rate, iterations/sec, and wall-time split: data wait vs compute vs artifacts).
+
+**Resilience:** backtests should not “fail” solely because post-processing (stats/tearsheets/plots) crashed. When post-processing fails, the run should still:
+- preserve the trade stream (`trades.csv`) and portfolio stats (`stats.csv`) when available,
+- classify the failure (simulation vs postprocess vs upload),
+- and emit actionable diagnostics rather than silently omitting artifacts.
 
 ## Overview
 

@@ -16,6 +16,8 @@ LumiBot is a trading and backtesting framework. This document focuses on the **b
 
 **Speed:** warm-cache runs are queue-free and complete in bounded wall time, with evidence (request counts, cache hit rate, iterations/sec, and wall-time split: data wait vs compute vs artifacts).
 
+**Resilience:** simulation completion must not be masked by post-processing failures (stats/tearsheets/plots). When post-processing fails, the run should still produce as many artifacts as possible and classify the failure (simulation vs postprocess vs upload), so operators can trust the trade stream even when reporting breaks.
+
 If the backtest execution model (data semantics, fill model, order handling, fees, pricing) diverges meaningfully from how real brokers behave, the backtest is not trustworthy.
 
 We optimize for:
@@ -27,7 +29,7 @@ We optimize for:
 - Handoffs: `docs/handoffs/`
 - Investigations: `docs/investigations/`
 - Performance + parity + startup: `docs/BACKTESTING_PERFORMANCE.md`
-- Latest session handoff: `docs/handoffs/2025-12-26_THETADATA_SESSION_HANDOFF.md`
+- Latest session handoff (IBKR speed + resilience): `docs/handoffs/2026-01-26_IBKR_SPEED_RESILIENCE_MASTER_HANDOFF.md`
 
 ## Directory Structure
 
