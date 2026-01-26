@@ -1,12 +1,26 @@
 # Changelog
 
-## 4.4.38 - Unreleased
+## 4.4.39 - Unreleased
 
 ### Added
 
 ### Changed
 
 ### Fixed
+
+## 4.4.38 - 2026-01-26
+
+### Added
+- IBKR futures: automatic exchange resolution for futures and continuous futures (via downloader secdef search) with persisted root→exchange cache.
+- IBKR futures: regression/unit coverage for exchange routing, per-call exchange overrides, and conid registry bulk updates.
+
+### Changed
+- Backtesting router: accept `futures`/`cont_futures` route-key aliases for convenience (maps to `future`/`cont_future`).
+
+### Fixed
+- IBKR futures: honor call-time `exchange=` overrides consistently for `get_historical_prices`, `get_last_price`, and `get_quote` (live + backtesting), and include exchange in cache keys to avoid cross-exchange contamination.
+- IBKR futures conid registry: bulk-ingest `trsrv/futures` responses and harden S3 persistence with merge-before-upload retry to avoid lost updates under concurrent backtests.
+- Continuous futures: add roll rules for COMEX micro gold (`MGC`) and NYMEX crude oil (`CL`/`MCL`) and fix monthly roll selection to avoid hanging on already-rolled contract months.
 
 ## 4.4.37 - 2026-01-24
 

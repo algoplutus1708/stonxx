@@ -11,6 +11,10 @@ from termcolor import colored
 
 from lumibot.constants import LUMIBOT_DEFAULT_PYTZ
 from lumibot.tools.lumibot_logger import get_logger
+from lumibot.tools.ibkr_secdef import (
+    IbkrFuturesExchangeAmbiguousError,
+    select_futures_exchange_from_secdef_search_payload,
+)
 
 from ..entities import Asset, Bars
 from .data_source import DataSource
@@ -54,6 +58,8 @@ class InteractiveBrokersRESTData(DataSource):
 
         self.account_id = config["IB_ACCOUNT_ID"] if "IB_ACCOUNT_ID" in config else None
         self.temp_conf_path = None # Added for temporary conf.yaml path
+        # Cache of futures root -> exchange (best-effort).
+        self._futures_exchange_cache: dict[str, str] = {}
 
         # Check if we are running on a server
         running_on_server = (
@@ -742,12 +748,33 @@ class InteractiveBrokersRESTData(DataSource):
 
         return chains
 
-    def _get_earliest_future_conid(self, symbol: str, exchange: str = "CME"):
+    def _resolve_futures_exchange(self, symbol: str) -> str:
+        """Resolve the best IBKR futures exchange for a root symbol.
+
+        Uses `iserver/secdef/search` and applies the same tie-break rules as IBKR REST backtesting:
+        - prefer USD + US venues (CME/CBOT/COMEX/NYMEX) when ambiguous
+        - require explicit `exchange=` when still ambiguous
+        """
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            raise ValueError("Futures exchange resolution requires a non-empty symbol")
+        cached = self._futures_exchange_cache.get(sym)
+        if cached:
+            return cached
+        self.ping_iserver()
+        url = f"{self.base_url}/iserver/secdef/search?symbol={sym}&secType=FUT"
+        response = self.get_from_endpoint(url, "Resolving futures exchange")
+        exchange = select_futures_exchange_from_secdef_search_payload(sym, response)
+        self._futures_exchange_cache[sym] = exchange
+        return exchange
+
+    def _get_earliest_future_conid(self, symbol: str, exchange: str = None):
         """
         Fetch the conid for the earliest-expiring continuous future for a given symbol and exchange.
         """
         url = f"{self.base_url}/trsrv/futures"
-        params = {"symbols": symbol, "secType": "CONTFUT", "exchange": exchange}
+        exchange_val = str(exchange or "").strip().upper() or self._resolve_futures_exchange(symbol)
+        params = {"symbols": symbol, "secType": "CONTFUT", "exchange": exchange_val}
         try:
             response = requests.get(url, params=params, verify=False)
             if response.status_code != 200:
@@ -755,7 +782,7 @@ class InteractiveBrokersRESTData(DataSource):
                 return None
             contracts = response.json().get(symbol, [])
             if not contracts:
-                logger.error(colored(f"No contracts found for {symbol} on {exchange}", "red"))
+                logger.error(colored(f"No contracts found for {symbol} on {exchange_val}", "red"))
                 return None
             # Pick the earliest expiration
             earliest = min(contracts, key=lambda d: int(d["expirationDate"]))
@@ -764,7 +791,7 @@ class InteractiveBrokersRESTData(DataSource):
             logger.error(colored(f"Error fetching continuous future conid: {e}", "red"))
             return None
 
-    def _get_futures_conid(self, asset: Asset, exchange: str = "CME"):
+    def _get_futures_conid(self, asset: Asset, exchange: str = None):
         """
         Returns the correct conid for a futures asset.
         If expiration is set, returns the specific contract conid.
@@ -774,18 +801,20 @@ class InteractiveBrokersRESTData(DataSource):
             Asset.AssetType.FUTURE,
             Asset.AssetType.CONT_FUTURE
         }:
+            if not exchange:
+                exchange = self._resolve_futures_exchange(asset.symbol)
             if getattr(asset, "expiration", None) is None:
                 return self._get_earliest_future_conid(asset.symbol, exchange)
             else:
                 return self._get_specific_future_conid(asset, exchange)
         return None
 
-    def _get_specific_future_conid(self, asset: Asset, exchange: str = "CME"):
+    def _get_specific_future_conid(self, asset: Asset, exchange: str = None):
         """
         Returns the conid for a specific futures contract (with expiration).
         """
         self.ping_iserver()
-        url = f"{self.base_url}/iserver/secdef/search?symbol={asset.symbol}"
+        url = f"{self.base_url}/iserver/secdef/search?symbol={asset.symbol}&secType=FUT"
         response = self.get_from_endpoint(url, "Getting Underlying conid")
         if (
             isinstance(response, list)
@@ -803,10 +832,15 @@ class InteractiveBrokersRESTData(DataSource):
             )
             logger.error(colored(f"Response: {response}", "red"))
             return None
-        exchange_val = next(
-            (section["exchange"] for section in response[0]["sections"] if section["secType"] == "FUT"),
-            exchange,
-        )
+        try:
+            exchange_val = select_futures_exchange_from_secdef_search_payload(asset.symbol, response)
+        except IbkrFuturesExchangeAmbiguousError as exc:
+            if exchange:
+                exchange_val = exchange
+            else:
+                raise ValueError(
+                    f"Ambiguous IBKR FUT exchange for {asset.symbol}; pass exchange=... explicitly."
+                ) from exc
         return self._get_conid_for_derivative(
             underlying_conid,
             asset,
@@ -866,7 +900,9 @@ class InteractiveBrokersRESTData(DataSource):
                 Asset.AssetType.FUTURE,
                 Asset.AssetType.CONT_FUTURE,
         }:
-            conid = self._get_futures_conid(asset, exchange or "CME")
+            if not exchange:
+                exchange = self._resolve_futures_exchange(asset.symbol)
+            conid = self._get_futures_conid(asset, exchange)
         else:
             conid = self.get_conid_from_asset(asset=asset)
 
@@ -991,7 +1027,7 @@ class InteractiveBrokersRESTData(DataSource):
         For futures, always use get_market_snapshot (the official IBKR endpoint for all asset types).
         """
         field = "last_price"
-        response = self.get_market_snapshot(asset, [field])  # Always use this for all asset types
+        response = self.get_market_snapshot(asset, [field], exchange=exchange)  # Always use this for all asset types
 
         if response is None or field not in response:
             if getattr(asset, "asset_type", None) in ["option", "future"]:
@@ -1012,10 +1048,10 @@ class InteractiveBrokersRESTData(DataSource):
 
         return float(price)
 
-    def get_conid_from_asset(self, asset: Asset):
+    def get_conid_from_asset(self, asset: Asset, exchange: str = None):
         # --- Use helper for futures conid ---
-        if getattr(asset, "asset_type", None) == Asset.AssetType.FUTURE:
-            return self._get_futures_conid(asset, "CME")
+        if getattr(asset, "asset_type", None) in {Asset.AssetType.FUTURE, Asset.AssetType.CONT_FUTURE}:
+            return self._get_futures_conid(asset, exchange)
         self.ping_iserver()
         # Get conid of underlying
         url = f"{self.base_url}/iserver/secdef/search?symbol={asset.symbol}"
@@ -1124,7 +1160,7 @@ class InteractiveBrokersRESTData(DataSource):
         greeks = self.get_market_snapshot(asset, ["vega", "theta", "gamma", "delta"])
         return greeks if greeks is not None else {}
 
-    def get_market_snapshot(self, asset: Asset, fields: list):
+    def get_market_snapshot(self, asset: Asset, fields: list, exchange: str = None):
         all_fields = {
             "84": "bid",
             "85": "ask_size",
@@ -1140,7 +1176,7 @@ class InteractiveBrokersRESTData(DataSource):
         }
         self.ping_iserver()
 
-        conId = self.get_conid_from_asset(asset)
+        conId = self.get_conid_from_asset(asset, exchange=exchange)
         if conId is None:
             return None
 
@@ -1216,7 +1252,9 @@ class InteractiveBrokersRESTData(DataSource):
            Quote object containing bid, ask, price and other information.
         """
         result = self.get_market_snapshot(
-            asset, ["last_price", "bid", "ask", "bid_size", "ask_size"]
+            asset,
+            ["last_price", "bid", "ask", "bid_size", "ask_size"],
+            exchange=exchange,
         )
         if not result:
             return None

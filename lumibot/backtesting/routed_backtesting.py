@@ -570,6 +570,13 @@ class RoutedBacktestingPandas(ThetaDataBacktestingPandas):
             asset_type = str(key).strip().lower()
             normalized[asset_type] = "" if value is None else str(value).strip()
 
+        # Convenience aliases for common user typos/plurals.
+        # Keep the canonical keys in singular form: "future", "cont_future".
+        if "futures" in normalized and "future" not in normalized:
+            normalized["future"] = normalized["futures"]
+        if "cont_futures" in normalized and "cont_future" not in normalized:
+            normalized["cont_future"] = normalized["cont_futures"]
+
         normalized.setdefault("default", "thetadata")
         return normalized
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,7 +13,12 @@ import pandas as pd
 
 from lumibot.constants import LUMIBOT_CACHE_FOLDER, LUMIBOT_DEFAULT_PYTZ
 from lumibot.entities import Asset
-from lumibot.tools.backtest_cache import get_backtest_cache
+from lumibot.tools.backtest_cache import CacheMode, get_backtest_cache
+from lumibot.tools.ibkr_secdef import (
+    IBKR_US_FUTURES_EXCHANGES,
+    IbkrFuturesExchangeAmbiguousError,
+    select_futures_exchange_from_secdef_search_payload,
+)
 from lumibot.tools.parquet_series_cache import ParquetSeriesCache
 from lumibot.tools.thetadata_queue_client import queue_request
 
@@ -24,6 +30,11 @@ CACHE_SUBFOLDER = "ibkr"
 IBKR_HISTORY_MAX_POINTS = 1000
 IBKR_DEFAULT_CRYPTO_VENUE = "ZEROHASH"
 IBKR_DEFAULT_HISTORY_SOURCE = "Trades"
+IBKR_DEFAULT_FUTURES_EXCHANGE_FALLBACK = "CME"
+
+
+_FUTURES_EXCHANGE_CACHE: Dict[str, str] = {}
+_FUTURES_EXCHANGE_CACHE_LOADED = False
 
 def _enable_futures_bid_ask_derivation() -> bool:
     """Whether to derive bid/ask quotes for futures from Bid_Ask + Midpoint history.
@@ -39,6 +50,65 @@ def _enable_futures_bid_ask_derivation() -> bool:
         "y",
         "on",
     }
+
+def _futures_exchange_cache_file() -> Path:
+    return Path(LUMIBOT_CACHE_FOLDER) / CACHE_SUBFOLDER / "futures_exchanges.json"
+
+
+def _load_futures_exchange_cache() -> None:
+    global _FUTURES_EXCHANGE_CACHE_LOADED
+    if _FUTURES_EXCHANGE_CACHE_LOADED:
+        return
+    _FUTURES_EXCHANGE_CACHE_LOADED = True
+    path = _futures_exchange_cache_file()
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    if isinstance(payload, dict):
+        for k, v in payload.items():
+            if not k or not v:
+                continue
+            _FUTURES_EXCHANGE_CACHE[str(k).strip().upper()] = str(v).strip().upper()
+
+
+def _persist_futures_exchange_cache() -> None:
+    path = _futures_exchange_cache_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(_FUTURES_EXCHANGE_CACHE, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception:
+        return
+    try:
+        cache = get_backtest_cache()
+        cache.on_local_update(path, payload={"provider": "ibkr", "type": "futures_exchanges"})
+    except Exception:
+        pass
+
+
+def _resolve_futures_exchange(symbol: str) -> str:
+    symbol_upper = str(symbol or "").strip().upper()
+    if not symbol_upper:
+        raise RuntimeError("IBKR futures exchange resolution requires a non-empty symbol")
+
+    _load_futures_exchange_cache()
+    cached = _FUTURES_EXCHANGE_CACHE.get(symbol_upper)
+    if cached:
+        return cached
+
+    base_url = _downloader_base_url()
+    url = f"{base_url}/ibkr/iserver/secdef/search"
+    payload = queue_request(url=url, querystring={"symbol": symbol_upper, "secType": "FUT"}, headers=None, timeout=None)
+    if payload is None:
+        raise RuntimeError(f"IBKR secdef/search returned no payload for FUT symbol={symbol_upper!r}")
+
+    exchange = select_futures_exchange_from_secdef_search_payload(symbol_upper, payload)
+    _FUTURES_EXCHANGE_CACHE[symbol_upper] = exchange
+    _persist_futures_exchange_cache()
+    return exchange
+
 
 def _us_futures_closed_interval(start_local: datetime, end_local: datetime) -> bool:
     """Return True if US futures are fully closed in [start_local, end_local).
@@ -146,15 +216,27 @@ def get_price_data(
         )
     effective_exchange = exchange
     if asset_type in {"future", "cont_future"} and not effective_exchange:
-        effective_exchange = (os.environ.get("IBKR_FUTURES_EXCHANGE") or "CME").strip().upper()
+        try:
+            effective_exchange = _resolve_futures_exchange(getattr(asset, "symbol", ""))
+        except IbkrFuturesExchangeAmbiguousError:
+            raise
+        except Exception as exc:
+            fallback = (os.environ.get("IBKR_FUTURES_EXCHANGE") or IBKR_DEFAULT_FUTURES_EXCHANGE_FALLBACK).strip().upper()
+            logger.warning(
+                "IBKR futures exchange auto-resolution failed for %s: %s. Falling back to %s",
+                getattr(asset, "symbol", None),
+                exc,
+                fallback,
+            )
+            effective_exchange = fallback
     if asset_type == "crypto" and not effective_exchange:
         effective_exchange = (os.environ.get("IBKR_CRYPTO_VENUE") or IBKR_DEFAULT_CRYPTO_VENUE).strip().upper()
 
     # Treat the env var as explicit too.
     #
-    # WHY (parity harness): For IBKR-vs-DataBento parity runs we set `IBKR_HISTORY_SOURCE=Trades`
-    # and need to treat that as an explicit choice so we do NOT augment the Trades series with
-    # derived bid/ask columns (which would otherwise change fill semantics in the backtester).
+    # WHY: If the user explicitly chooses a history source via env vars (for example `Trades`),
+    # we must not silently derive/augment bid/ask from other sources because that would change
+    # execution semantics in backtests.
     env_source_raw = os.environ.get("IBKR_HISTORY_SOURCE")
     env_source_was_explicit = False
     if env_source_raw is not None:
@@ -571,8 +653,7 @@ def _resolve_cont_future_segments(*, asset: Asset, start_dt: datetime, end_dt: d
     """Resolve a `cont_future` asset into a list of explicit futures contract segments.
 
     This follows LumiBot's roll schedule (`lumibot.tools.futures_roll`) so that backtests
-    match live broker semantics (Tradovate/ProjectX) and are comparable across providers
-    (e.g., DataBento vs IBKR).
+    match live broker semantics and remain consistent across backtesting environments.
     """
     try:
         from lumibot.tools import futures_roll
@@ -603,8 +684,9 @@ def _resolve_cont_future_segments(*, asset: Asset, start_dt: datetime, end_dt: d
             raise RuntimeError(
                 f"IBKR cont_future requires conids for explicit contract months (e.g., {contract_symbol}). "
                 "If this is an expired contract, IBKR Client Portal cannot discover its conid. "
-                "Run the one-time TWS conid backfill (scripts/backfill_ibkr_futures_conids_tws.py) "
-                "to populate ibkr/conids.json."
+                "Ensure the IBKR conid registry (`<cache>/ibkr/conids.json`, S3-mirrored) contains the "
+                "missing expiration. New contracts are expected to auto-populate via REST as backtests "
+                "run; only older historical gaps require a one-time TWS backfill."
             ) from exc
         segments.append((contract_asset, _to_utc(seg_start), _to_utc(seg_end)))
     return segments
@@ -649,6 +731,10 @@ def _contract_expiration_date(root_symbol: str, *, year: int, month: int):
 
         if anchor == "third_last_business_day":
             expiry = futures_roll._third_last_business_day(year, month)
+        elif anchor == "cl_last_trade":
+            expiry = futures_roll._cl_last_trade_date(year, month)
+        elif anchor == "mcl_last_trade":
+            expiry = futures_roll._mcl_last_trade_date(year, month)
         else:
             # Default anchor for CME equity index futures is third Friday.
             expiry = futures_roll._third_friday(year, month)
@@ -1535,12 +1621,16 @@ def _resolve_conid(*, asset: Asset, quote: Optional[Asset], exchange: Optional[s
         except Exception:
             mapping = {}
 
+    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    effective_exchange = exchange
+    if asset_type in {"future", "cont_future"} and not effective_exchange:
+        effective_exchange = _resolve_futures_exchange(getattr(asset, "symbol", ""))
+
     # Conid keying is not fully uniform across historical caches (some runs key futures with
     # quote_symbol="USD", others omit it). For robustness (and to avoid unnecessary remote
     # lookups), try a small set of equivalent keys before falling back to the downloader.
-    primary = _conid_key(asset=asset, quote=quote, exchange=exchange)
+    primary = _conid_key(asset=asset, quote=quote, exchange=effective_exchange)
     candidates = [primary.to_key()]
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
     if asset_type in {"future", "cont_future"}:
         if primary.quote_symbol:
             candidates.append(IbkrConidKey(primary.asset_type, primary.symbol, "", primary.exchange, primary.expiration).to_key())
@@ -1552,19 +1642,179 @@ def _resolve_conid(*, asset: Asset, quote: Optional[Asset], exchange: Optional[s
         if isinstance(cached, int) and cached > 0:
             return cached
 
-    conid = _lookup_conid_remote(asset=asset, quote=quote, exchange=exchange)
+    keys_added: set[str] = set()
+    conid = _lookup_conid_remote(asset=asset, quote=quote, exchange=effective_exchange, mapping=mapping, keys_added=keys_added)
     # Always persist under the primary key for forward consistency.
-    mapping[primary.to_key()] = int(conid)
+    primary_key = primary.to_key()
+    conid_int = int(conid)
+    prior_primary = mapping.get(primary_key)
+    mapping[primary_key] = conid_int
+    if prior_primary != conid_int:
+        keys_added.add(primary_key)
+    if asset_type in {"future", "cont_future"}:
+        # Mirror the primary conid under both quote_symbol variants for compatibility with
+        # historical caches and older in-flight backtests.
+        if primary.quote_symbol:
+            alt_key = IbkrConidKey(primary.asset_type, primary.symbol, "", primary.exchange, primary.expiration).to_key()
+        else:
+            alt_key = IbkrConidKey(primary.asset_type, primary.symbol, "USD", primary.exchange, primary.expiration).to_key()
+        prior_alt = mapping.get(alt_key)
+        mapping[alt_key] = conid_int
+        if prior_alt != conid_int:
+            keys_added.add(alt_key)
+
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     cache_file.write_text(json.dumps(mapping, indent=2, sort_keys=True), encoding="utf-8")
     try:
-        cache_manager.on_local_update(cache_file, payload={"provider": "ibkr", "type": "conids"})
+        _merge_upload_conids_json(cache_manager, cache_file, mapping=mapping, required_keys=keys_added)
     except Exception:
         pass
     return int(conid)
 
 
-def _lookup_conid_remote(*, asset: Asset, quote: Optional[Asset], exchange: Optional[str]) -> int:
+def _is_not_found_error(cache_manager, exc: Exception) -> bool:
+    try:
+        fn = getattr(cache_manager, "_is_not_found_error", None)
+        if callable(fn):
+            return bool(fn(exc))
+    except Exception:
+        pass
+    msg = str(exc).lower()
+    return any(token in msg for token in ("nosuchkey", "not found", "404", "no such key"))
+
+
+def _download_remote_conids_json(cache_manager, *, bucket: str, key: str) -> Dict[str, int]:
+    client = getattr(cache_manager, "_get_client", None)
+    if not callable(client):
+        return {}
+    s3 = client()
+    if not hasattr(s3, "get_object"):
+        return {}
+    response = s3.get_object(Bucket=bucket, Key=key)
+    body = response.get("Body")
+    raw = b""
+    if body is not None:
+        raw = body.read()
+        try:
+            body.close()
+        except Exception:
+            pass
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except Exception:
+        parsed = {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: Dict[str, int] = {}
+    for k, v in parsed.items():
+        try:
+            iv = int(v)
+        except Exception:
+            continue
+        if iv > 0:
+            out[str(k)] = iv
+    return out
+
+
+def _persist_s3_marker(*, local_path: Path, remote_key: str) -> None:
+    try:
+        marker_path = local_path.with_suffix(local_path.suffix + ".s3key")
+        marker_tmp = marker_path.with_suffix(marker_path.suffix + ".tmp")
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_tmp.write_text(remote_key, encoding="utf-8")
+        os.replace(marker_tmp, marker_path)
+    except Exception:
+        pass
+
+
+def _merge_upload_conids_json(
+    cache_manager,
+    local_path: Path,
+    *,
+    mapping: Dict[str, int],
+    required_keys: set[str],
+    max_attempts: int = 3,
+) -> None:
+    """Upload `ibkr/conids.json` with a merge-before-upload retry to reduce lost updates."""
+    if not cache_manager.enabled or cache_manager.mode != CacheMode.S3_READWRITE:
+        cache_manager.on_local_update(local_path, payload={"provider": "ibkr", "type": "conids"})
+        return
+
+    settings = getattr(cache_manager, "_settings", None)
+    if settings is None or getattr(settings, "backend", None) != "s3":
+        cache_manager.on_local_update(local_path, payload={"provider": "ibkr", "type": "conids"})
+        return
+
+    remote_key = cache_manager.remote_key_for(local_path, payload={"provider": "ibkr", "type": "conids"})
+    if not remote_key:
+        cache_manager.on_local_update(local_path, payload={"provider": "ibkr", "type": "conids"})
+        return
+
+    bucket = str(getattr(settings, "bucket", "") or "")
+    if not bucket:
+        cache_manager.on_local_update(local_path, payload={"provider": "ibkr", "type": "conids"})
+        return
+
+    client_fn = getattr(cache_manager, "_get_client", None)
+    if not callable(client_fn):
+        cache_manager.on_local_update(local_path, payload={"provider": "ibkr", "type": "conids"})
+        return
+    s3 = client_fn()
+    if not hasattr(s3, "upload_file") or not hasattr(s3, "get_object"):
+        cache_manager.on_local_update(local_path, payload={"provider": "ibkr", "type": "conids"})
+        return
+
+    # If this update didn't add anything new, a plain upload is fine.
+    if not required_keys:
+        s3.upload_file(str(local_path), bucket, remote_key)
+        _persist_s3_marker(local_path=local_path, remote_key=remote_key)
+        return
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            # Pull the freshest remote, union, then upload.
+            try:
+                remote = _download_remote_conids_json(cache_manager, bucket=bucket, key=remote_key)
+            except Exception as exc:
+                if _is_not_found_error(cache_manager, exc):
+                    remote = {}
+                else:
+                    raise
+            merged = dict(remote)
+            merged.update(mapping)
+            if merged != mapping:
+                mapping.clear()
+                mapping.update(merged)
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                local_path.write_text(json.dumps(mapping, indent=2, sort_keys=True), encoding="utf-8")
+
+            s3.upload_file(str(local_path), bucket, remote_key)
+
+            # Verify: ensure the keys we just added are present remotely.
+            verified = _download_remote_conids_json(cache_manager, bucket=bucket, key=remote_key)
+            if required_keys.issubset(set(verified.keys())):
+                _persist_s3_marker(local_path=local_path, remote_key=remote_key)
+                return
+
+            # Lost update: retry after a short backoff.
+            time.sleep(0.15 * (attempt + 1))
+        except Exception as exc:
+            last_exc = exc
+            time.sleep(0.15 * (attempt + 1))
+
+    if last_exc is not None:
+        logger.warning("IBKR conids.json merge-upload failed after retries: %s", last_exc)
+
+
+def _lookup_conid_remote(
+    *,
+    asset: Asset,
+    quote: Optional[Asset],
+    exchange: Optional[str],
+    mapping: Optional[Dict[str, int]] = None,
+    keys_added: Optional[set[str]] = None,
+) -> int:
     asset_type = str(getattr(asset, "asset_type", "") or "").lower()
     if asset_type in {"future", "cont_future"}:
         if getattr(asset, "expiration", None) is None and asset_type != "cont_future":
@@ -1572,7 +1822,7 @@ def _lookup_conid_remote(*, asset: Asset, quote: Optional[Asset], exchange: Opti
                 "IBKR futures require an explicit expiration on Asset(asset_type='future'). "
                 "Use asset_type='cont_future' for continuous futures."
             )
-        return _lookup_conid_future(asset=asset, exchange=exchange)
+        return _lookup_conid_future(asset=asset, exchange=exchange, mapping=mapping, keys_added=keys_added)
     if asset_type in {"crypto"}:
         return _lookup_conid_crypto(asset=asset, quote=quote)
 
@@ -1642,10 +1892,24 @@ def _lookup_conid_crypto(*, asset: Asset, quote: Optional[Asset]) -> int:
     )
 
 
-def _lookup_conid_future(*, asset: Asset, exchange: Optional[str]) -> int:
+def _lookup_conid_future(
+    *,
+    asset: Asset,
+    exchange: Optional[str],
+    mapping: Optional[Dict[str, int]] = None,
+    keys_added: Optional[set[str]] = None,
+) -> int:
     base_url = _downloader_base_url()
     url = f"{base_url}/ibkr/trsrv/futures"
-    desired_exchange = exchange or "CME"
+    desired_exchange = (exchange or "").strip().upper()
+    if not desired_exchange:
+        try:
+            desired_exchange = _resolve_futures_exchange(getattr(asset, "symbol", ""))
+        except IbkrFuturesExchangeAmbiguousError:
+            raise
+        except Exception:
+            desired_exchange = (os.environ.get("IBKR_FUTURES_EXCHANGE") or IBKR_DEFAULT_FUTURES_EXCHANGE_FALLBACK).strip().upper()
+
     query = {"symbols": asset.symbol, "exchange": desired_exchange, "secType": "FUT"}
     payload = queue_request(url=url, querystring=query, headers=None, timeout=None)
     # Response shape: { "<symbol>": [ {conid, expirationDate, ...}, ... ] }
@@ -1663,6 +1927,36 @@ def _lookup_conid_future(*, asset: Asset, exchange: Optional[str]) -> int:
     if not isinstance(contracts, list) or not contracts:
         raise RuntimeError(f"No futures contracts returned for {asset.symbol} on {desired_exchange}")
 
+    # Bulk-refresh: update conids.json with *all* returned contract months for this root+exchange.
+    # This keeps the registry current via REST so we rarely/never need a new TWS backfill.
+    if mapping is not None:
+        symbol_upper = str(getattr(asset, "symbol", "") or "").strip().upper()
+        for contract in contracts:
+            if not isinstance(contract, dict):
+                continue
+            exp = contract.get("expirationDate")
+            conid = contract.get("conid")
+            if exp is None or conid is None:
+                continue
+            exp_str = str(exp).strip()
+            if not (exp_str.isdigit() and len(exp_str) == 8):
+                continue
+            try:
+                conid_int = int(conid)
+            except Exception:
+                continue
+            if conid_int <= 0:
+                continue
+
+            key_blank = IbkrConidKey("future", symbol_upper, "", desired_exchange, exp_str).to_key()
+            key_usd = IbkrConidKey("future", symbol_upper, "USD", desired_exchange, exp_str).to_key()
+            for k in (key_blank, key_usd):
+                prior = mapping.get(k)
+                if prior != conid_int:
+                    mapping[k] = conid_int
+                    if keys_added is not None:
+                        keys_added.add(k)
+
     expiration = getattr(asset, "expiration", None)
     if expiration is not None:
         target = expiration.strftime("%Y%m%d")
@@ -1672,7 +1966,9 @@ def _lookup_conid_future(*, asset: Asset, exchange: Optional[str]) -> int:
         raise RuntimeError(
             f"IBKR did not return a conid for {asset.symbol} expiring {target} on {desired_exchange}. "
             "If this is an expired contract, IBKR Client Portal cannot reliably discover it. "
-            "Populate ibkr/conids.json via the one-time TWS conid backfill."
+            "Ensure the IBKR conid registry (`<cache>/ibkr/conids.json`, S3-mirrored) contains the "
+            "missing expiration. New contracts are expected to auto-populate via REST; only older "
+            "historical gaps require a one-time TWS backfill."
         )
 
     # Default: earliest expiration (front month) – used for smoke tests like MES.

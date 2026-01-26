@@ -58,3 +58,42 @@ def test_comex_gold_symbol_sequence_uses_even_month_cycle():
 
     symbols = futures_roll.resolve_symbols_for_range(asset, start, end, year_digits=1)
     assert symbols == ["GCG5", "GCJ5", "GCM5", "GCQ5"], symbols
+
+
+def test_comex_micro_gold_rolls_on_third_last_business_day_offset():
+    asset_symbol = "MGC"
+
+    year, month = futures_roll.determine_contract_year_month(asset_symbol, _dt(2025, 2, 14))
+    assert (year, month) == (2025, 2)
+
+    year, month = futures_roll.determine_contract_year_month(asset_symbol, _dt(2025, 2, 17, 0, 6))
+    assert (year, month) == (2025, 4)
+
+
+def test_comex_micro_gold_symbol_sequence_uses_even_month_cycle():
+    asset = Asset("MGC", asset_type=Asset.AssetType.CONT_FUTURE)
+    start = _dt(2025, 1, 1)
+    end = _dt(2025, 8, 1)
+
+    symbols = futures_roll.resolve_symbols_for_range(asset, start, end, year_digits=1)
+    assert symbols == ["MGCG5", "MGCJ5", "MGCM5", "MGCQ5"], symbols
+
+
+def test_nymex_crude_oil_rolls_before_last_trade_date():
+    asset_symbol = "CL"
+
+    year, month = futures_roll.determine_contract_year_month(asset_symbol, _dt(2025, 2, 10))
+    assert (year, month) == (2025, 3)
+
+    year, month = futures_roll.determine_contract_year_month(asset_symbol, _dt(2025, 2, 13, 0, 6))
+    assert (year, month) == (2025, 4)
+
+
+def test_nymex_micro_crude_oil_rolls_before_last_trade_date():
+    asset_symbol = "MCL"
+
+    year, month = futures_roll.determine_contract_year_month(asset_symbol, _dt(2025, 2, 10))
+    assert (year, month) == (2025, 3)
+
+    year, month = futures_roll.determine_contract_year_month(asset_symbol, _dt(2025, 2, 12, 0, 6))
+    assert (year, month) == (2025, 4)

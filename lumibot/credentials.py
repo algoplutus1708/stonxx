@@ -29,6 +29,15 @@ def find_and_load_dotenv(base_dir) -> bool:
             # Create a colored message for the log using termcolor
             colored_message = termcolor.colored(f".env file loaded from: {dotenv_path}", "green")
             logger.info(colored_message)
+
+            # Optional local override file. This is intentionally loaded *after* `.env` so it can
+            # override settings without requiring edits to the primary file (which may contain
+            # shared or sensitive values).
+            dotenv_local_path = os.path.join(root, ".env.local")
+            if os.path.exists(dotenv_local_path):
+                load_dotenv(dotenv_local_path, override=True)
+                colored_message = termcolor.colored(f".env.local file loaded from: {dotenv_local_path}", "green")
+                logger.info(colored_message)
             return True
 
     return False

@@ -43,9 +43,12 @@ BACKTESTING_DATA_SOURCE
   - ``ibkr`` / ``interactivebrokersrest`` / ``interactive_brokers_rest`` (IBKR Client Portal REST)
   - ``router`` (multi-provider routing; defaults to Theta for stock/option/index and IBKR for futures/crypto)
   - JSON mapping (multi-provider routing by asset type), e.g. ``{"default":"thetadata","stock":"thetadata","option":"thetadata","index":"thetadata","future":"ibkr","crypto":"ibkr"}``
+
     - Provider values are case/whitespace/_/- insensitive.
     - Supported values include ``thetadata``, ``ibkr``, ``polygon``, ``alpaca``, and ``ccxt``.
     - For CCXT, you may use ``ccxt`` (auto-select exchange from existing env/credentials) **or** specify a CCXT exchange id directly (for example: ``coinbase``, ``kraken``, ``binance``, ``kucoin``).
+    - Routing keys are the canonical asset types (``future``, ``cont_future``, ``crypto``, etc.). Common plural aliases like ``futures``/``cont_futures`` are accepted.
+
   - ``none`` to disable the env override and rely on code.
 
 Testing / CI guardrails
@@ -390,21 +393,21 @@ IBKR_HISTORY_SOURCE
 - Default: ``Trades``.
 
 IBKR_FUTURES_EXCHANGE
-^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^
 
-- Purpose: Default futures exchange for IBKR REST backtesting when ``exchange=`` is not provided.
-- Values: Exchange code string (for example: ``CME``).
+- Purpose: Fallback futures exchange for IBKR REST when ``exchange=`` is not provided and automatic exchange routing cannot resolve a unique venue.
+- Values: Exchange code string (for example: ``CME``, ``CBOT``, ``COMEX``, ``NYMEX``).
 - Default: ``CME``.
 
 IBKR_CRYPTO_VENUE
-^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^
 
 - Purpose: Default IBKR crypto venue when backtesting spot crypto via IBKR REST.
 - Values: Venue/exchange string (for example: ``ZEROHASH``).
 - Default: ``ZEROHASH``.
 
 LUMIBOT_IBKR_ENABLE_FUTURES_BID_ASK
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 - Purpose: Opt-in derivation of per-bar futures bid/ask quotes using IBKR ``Bid_Ask`` + ``Midpoint`` history sources.
 - Values: ``true``/``false`` (or ``1``/``0``).
@@ -606,7 +609,7 @@ LUMIWEALTH_API_KEY
 - Values: Obtain from LumiWealth (**do not hardcode**).
 
 Runtime telemetry (memory/health)
---------------------------------
+---------------------------------
 
 LUMIBOT_TELEMETRY
 ^^^^^^^^^^^^^^^^^

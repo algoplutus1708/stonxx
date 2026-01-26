@@ -29,8 +29,21 @@ Select IBKR as the backtesting data source:
 Supported Data
 --------------
 
-- **Futures**: contract bars via IBKR historical endpoints (1-minute+ bars).
+- **Futures**: US futures across CME/CBOT/COMEX/NYMEX via IBKR historical endpoints (1-minute+ bars).
 - **Spot crypto**: IBKR crypto bars (availability depends on region and IBKR product support).
+
+Futures Exchange Routing (auto + override)
+------------------------------------------
+
+For futures and continuous futures (``asset_type="future"`` / ``asset_type="cont_future"``), LumiBot supports an
+optional ``exchange=...`` parameter on the Strategy data methods:
+
+- ``get_historical_prices(..., exchange=...)``
+- ``get_last_price(..., exchange=...)``
+- ``get_quote(..., exchange=...)``
+
+When ``exchange`` is omitted, LumiBot attempts to resolve the correct futures exchange automatically via IBKR secdef
+search (preferring USD + US venues). If results are ambiguous, you must pass ``exchange=...`` explicitly.
 
 Expired Futures Contracts (conids)
 ----------------------------------
@@ -42,6 +55,9 @@ known.
 LumiBot supports an offline conid registry (cache-backed, optionally S3-mirrored):
 
 - ``LUMIBOT_CACHE_FOLDER/ibkr/conids.json``
+
+The registry is expected to **grow automatically over time** for new contracts as backtests run (using IBKR REST
+endpoints). Very old expired contracts may still require a one-time offline backfill in internal deployments.
 
 Internal runbook (engineering): ``docs/investigations/2026-01-18_IBKR_EXPIRED_FUTURES_CONID_BACKFILL.md``.
 
@@ -88,7 +104,7 @@ Configuration Notes
 Common environment variables for IBKR REST backtesting:
 
 - ``IBKR_HISTORY_SOURCE`` (default: ``Trades``)
-- ``IBKR_FUTURES_EXCHANGE`` (default: ``CME``)
+- ``IBKR_FUTURES_EXCHANGE`` (default: ``CME``; fallback when auto-routing fails)
 - ``IBKR_CRYPTO_VENUE`` (default: ``ZEROHASH``)
 - ``LUMIBOT_IBKR_ENABLE_FUTURES_BID_ASK`` (default: disabled; opt-in quote derivation for futures)
 

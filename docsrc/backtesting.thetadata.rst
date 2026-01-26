@@ -19,7 +19,7 @@ As of this writing, ThetaData provides historical data for free. If you pay for 
 This backtesting method caches the data on your computer making it faster for subsequent backtests. So even if it takes a bit of time the first time, the following backtests will be much faster.
 
 Session close coverage (index/stock minute bars)
------------------------------------------------
+------------------------------------------------
 
 For some assets, minute-bar feeds are **regular-session (RTH) bounded** (for example, U.S. indexes such as SPX typically have bars from ~09:30 to ~16:00 ET).
 
