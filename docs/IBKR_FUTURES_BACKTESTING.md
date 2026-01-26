@@ -74,6 +74,11 @@ contracts (or for `cont_future` stitching over expired months), LumiBot relies o
 
 See: `docs/investigations/2026-01-18_IBKR_EXPIRED_FUTURES_CONID_BACKFILL.md`.
 
+Operational note:
+- If `ibkr/conids.json` in the active S3 cache namespace is only a few hundred bytes (or missing keys like
+  `future|GC|USD|COMEX|20250226`), `cont_future` backtests will fail for “past year” windows once contracts expire.
+  Seed/promote the registry in S3 using the runbook in the investigation doc above.
+
 ### Multiplier + minTick (mandatory for correct PnL and tick rounding)
 
 For realistic futures accounting:

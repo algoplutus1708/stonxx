@@ -129,6 +129,68 @@ This avoids needing TWS except for the initial historical backfill window.
 Note: IBKR’s public Symbol Lookup response includes `conid` + `localSymbol` for *currently listed* futures contracts.
 That can be used as an additional “no-auth” source for forward refresh, but it does not solve expired-contract discovery.
 
+## Operations: seed the S3 conid registry (prod/dev) without rerunning TWS
+
+If backtests are failing with errors like:
+
+- `IBKR did not return a conid for <ROOT> expiring <YYYYMMDD> on <EXCHANGE>`
+
+…and the target expiration is **expired** (no longer returned by `/ibkr/trsrv/futures`), you must ensure the S3-mirrored
+registry contains it. You do **not** need to rerun TWS if a backfill registry already exists (for example the one in
+`data/ibkr_tws_backfill_cache_dev_v2/ibkr/conids.json`).
+
+### Safety checklist
+
+- Always **download a backup** of the current S3 object before overwriting.
+- Always **union-merge** keys (do not replace blindly).
+- Prefer `aws --profile BotManager ...` when running from this machine.
+
+### Targets (current)
+
+- Prod conids: `s3://lumibot-cache-prod/prod/cache/v1/ibkr/conids.json`
+- Dev conids: `s3://lumibot-cache-dev/dev/cache/v1/ibkr/conids.json`
+
+Additional cache namespaces may exist (for example `dev/cache/v44/...`). Seed every namespace that is actively used by
+backtests.
+
+### Example (merge-before-upload)
+
+```bash
+# Backup
+aws --profile BotManager s3 cp \
+  s3://lumibot-cache-prod/prod/cache/v1/ibkr/conids.json \
+  ./prod_conids.before.json
+
+# Merge (seed wins except where remote already has a key)
+python3 - <<'PY'
+import json
+from pathlib import Path
+
+seed = json.loads(Path("data/ibkr_tws_backfill_cache_dev_v2/ibkr/conids.json").read_text())
+remote = json.loads(Path("prod_conids.before.json").read_text())
+
+merged = dict(seed)
+merged.update(remote)  # remote wins on conflict
+
+Path("prod_conids.merged.json").write_text(json.dumps(merged, sort_keys=True, separators=(",", ":")))
+print("merged_keys", len(merged))
+PY
+
+# Upload
+aws --profile BotManager s3 cp \
+  ./prod_conids.merged.json \
+  s3://lumibot-cache-prod/prod/cache/v1/ibkr/conids.json
+```
+
+### When you still need TWS
+
+You still need a one-time TWS backfill when the desired expiration is **older than any conids you’ve captured** (for
+example, if your registry only starts in 2024 and customers want 2015). In that case:
+
+- run `scripts/backfill_ibkr_futures_conids_tws.py` (with `includeExpired=True`)
+- upload the resulting `ibkr/conids.json` to a new cache namespace (e.g. `v2`, `v3`, …)
+- validate, then promote/seed the production namespace using the merge flow above
+
 ## Verification
 
 ### Correctness
