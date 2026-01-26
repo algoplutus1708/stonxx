@@ -1895,8 +1895,9 @@ class StrategyExecutor(Thread):
 
     def run(self):
         try:
-            # Overloading the broker sleep method
-            self.broker.sleep = self.safe_sleep
+            # Only overload the broker sleep method when backtesting
+            if self.broker.IS_BACKTESTING_BROKER:
+                self.broker.sleep = self.safe_sleep
 
             # Set the strategy name at the broker
             self.broker.set_strategy_name(self.strategy._name)
