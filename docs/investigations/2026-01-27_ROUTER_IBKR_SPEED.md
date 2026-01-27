@@ -44,6 +44,8 @@ We use `scripts/run_backtest_prodlike.py` for “production-like” runs (downlo
 Recommended investigation flags:
 - use the production routing JSON
 - set a dedicated cache folder under `~/Documents/Development/`
+- **IMPORTANT (local-only):** pass `--use-dotenv-s3-keys` on this machine so S3 cache read/write works.
+  - Without it, S3 ops can silently fail (and runs will look “warm” but keep queueing).
 - use S3 cache **read-only** during investigations to avoid mutating shared caches:
   - `env LUMIBOT_CACHE_MODE=readonly ...`
 
@@ -103,6 +105,23 @@ These runs use:
 | 2026-01-27 | a8f17429+local | gc | router-json | 1w (2026-01-20→27) | 163.0 | 5 | 5 | `ibkr/iserver/marketdata/history` | (none) | cold-ish: initial history fetches dominate |
 | 2026-01-27 | a8f17429+local | gc | router-json | 1w (2026-01-20→27) | 12.6 | 0 | 0 | (none) | `/Users/robertgrzesik/Documents/Development/backtest_runs/20260127_001638_gc_router_20260120_week1_yappi/logs/GoldFuturesEMACrossover_2026-01-27_00-16_o66T9X_profile_yappi.csv` | warm-cache: dominated by pandas/numpy |
 
+### Phase 2 results (4.4.40 WIP: end-date semantics + routed benchmark + native multi-minute IBKR bars)
+
+Changes included in this phase:
+- Keep `BACKTESTING_END=YYYY-MM-DD` semantics **exclusive** (end at midnight), but clamp the backtest
+  loop so we do not "await market close" after we've advanced past the configured end bound.
+- Router tearsheet benchmark prefers the router datasource (ThetaData) over Yahoo (daily bars).
+- Router IBKR adapter preserves multi-minute series keys (`60m` → `60minute`) and fetches native IBKR bars for those timesteps.
+- IBKR “stale end” negative-cache: if IBKR returns bars that don’t advance coverage, record a missing-window marker so we don’t re-fetch history in a loop.
+
+| ts | git | bench | mode | window | elapsed_s | queue_submits | history_submits | top_paths | yappi_csv | change |
+|---|---|---|---|---:|---:|---:|---:|---|---|---|
+| 2026-01-27 | dad74668+local | nq | router-json | 2w (2025-01-06→20) | 225.7 | 15 | 14 | `ibkr/iserver/marketdata/history`, `ibkr/iserver/contract/*/info` | (none) | cold run (bounded history; no per-bar thrash) |
+| 2026-01-27 | dad74668+local | nq | router-json | 2w (2025-01-06→20) | 134.8 | 0 | 0 | (none) | (none) | warm run (queue-free; dominated by pandas/strategy work + artifacts) |
+| 2026-01-27 | dad74668+local | gc | router-json | 2w (2025-01-06→20) | 43.8 | 3 | 2 | `ibkr/iserver/marketdata/history`, `ibkr/iserver/contract/*/info` | (none) | cold run (native multi-minute bars; bounded history) |
+| 2026-01-27 | dad74668+local | gc | router-json | 2w (2025-01-06→20) | 34.9 | 0 | 0 | (none) | (none) | warm run (queue-free) |
+| 2026-01-27 | dad74668+local | nq | router-json | 1d (2025-01-06→07) | 58.3 | 0 | 0 | (none) | `/Users/robertgrzesik/Documents/Development/backtest_runs/20260127_072227_nq_1d_yappi/logs/NQDoubleEMATestStrategy_2026-01-27_07-22_TFHU7i_profile_yappi.csv` | YAPPI: dominated by pandas/numpy; network ~0 |
+
 ## 4) Root cause + fix summary
 
 **Root cause (router path, before fix):**
@@ -121,5 +140,6 @@ See implementation: `lumibot/backtesting/routed_backtesting.py` (router IBKR ada
 Deterministic unit tests prevent regression back to “fetch in the hot loop”:
 - `tests/backtest/test_routed_backtesting_ibkr_prefetch.py`
   - futures/cont_future minute: prefetch once + slice
+  - futures/cont_future multi-minute: `60m` must call IBKR with `60minute` and prefetch once
   - crypto minute: prefetch once + slice
-
+  - router benchmark must not call Yahoo: `tests/backtest/test_routed_backtesting_benchmark_prefers_router.py`
