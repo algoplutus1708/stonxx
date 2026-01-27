@@ -43,6 +43,69 @@ class ThetaDataBacktestingPandas(PandasData):
     # Backtests should not trigger expensive option OHLC downloads as an implicit quote fallback.
     option_quote_fallback_allowed = False
 
+    @staticmethod
+    def _compute_prefetch_complete(
+        meta: Dict[str, object],
+        *,
+        requested_start: Optional[datetime],
+        effective_start_buffer: timedelta,
+        end_requirement: Optional[datetime],
+        ts_unit: str,
+        requested_length: int,
+    ) -> bool:
+        """Return True when a cached dataset satisfies the requested coverage window.
+
+        IMPORTANT: `prefetch_complete` is a performance optimization flag used to skip redundant
+        downloader work in hot loops. It must never be set True when coverage is insufficient,
+        otherwise backtests can thrash (STALE → REFRESH → STALE ...) on every bar.
+        """
+        try:
+            if bool(meta.get("negative_cache")):
+                return True
+            if bool(meta.get("tail_missing_permanent")):
+                return True
+        except Exception:
+            pass
+
+        coverage_start = meta.get("data_start") or meta.get("start")
+        coverage_end = meta.get("data_end") or meta.get("end")
+        rows_have = meta.get("data_rows") or meta.get("rows") or 0
+
+        try:
+            rows_have_int = int(rows_have)  # type: ignore[arg-type]
+        except Exception:
+            rows_have_int = 0
+
+        start_ok = True
+        if requested_start is not None:
+            if coverage_start is None:
+                start_ok = False
+            else:
+                try:
+                    if isinstance(coverage_start, pd.Timestamp):
+                        coverage_start = coverage_start.to_pydatetime()
+                    start_ok = coverage_start <= requested_start + effective_start_buffer
+                except Exception:
+                    start_ok = False
+
+        end_ok = True
+        if end_requirement is not None:
+            if coverage_end is None:
+                end_ok = False
+            else:
+                try:
+                    if isinstance(coverage_end, pd.Timestamp):
+                        coverage_end = coverage_end.to_pydatetime()
+                    if ts_unit == "day":
+                        end_ok = coverage_end.date() >= end_requirement.date()  # type: ignore[union-attr]
+                    else:
+                        end_ok = coverage_end >= end_requirement  # type: ignore[operator]
+                except Exception:
+                    end_ok = False
+
+        length_ok = rows_have_int >= int(requested_length)
+        return bool(start_ok and end_ok and length_ok)
+
     def __init__(
         self,
         datetime_start,
@@ -1024,6 +1087,21 @@ class ThetaDataBacktestingPandas(PandasData):
             has_quotes = self._frame_has_quote_columns(existing_data.df)
             self._record_metadata(canonical_key, existing_data.df, existing_data.timestep, asset_separated, has_quotes=has_quotes)
             existing_meta = self._dataset_metadata.get(canonical_key)
+            # PERF + CORRECTNESS: Normalize `prefetch_complete` after rebuilding metadata so stale
+            # sidecars can't cause per-bar STALE/REFRESH loops.
+            try:
+                if existing_meta is not None:
+                    existing_meta["prefetch_complete"] = self._compute_prefetch_complete(
+                        existing_meta,
+                        requested_start=requested_start,
+                        effective_start_buffer=effective_start_buffer,
+                        end_requirement=end_requirement,
+                        ts_unit=ts_unit,
+                        requested_length=requested_length,
+                    )
+                    self._dataset_metadata[canonical_key] = existing_meta
+            except Exception:
+                logger.debug("[THETA][DEBUG][PREFETCH_COMPLETE] failed to recompute after day metadata rebuild", exc_info=True)
             if logger.isEnabledFor(logging.DEBUG):
                 try:
                     df_idx = pd.to_datetime(existing_data.df.index)
@@ -2181,7 +2259,14 @@ class ThetaDataBacktestingPandas(PandasData):
         )
         meta = self._dataset_metadata.get(canonical_key, {}) or {}
         legacy_meta = self._dataset_metadata.get(legacy_key)
-        meta["prefetch_complete"] = True
+        meta["prefetch_complete"] = self._compute_prefetch_complete(
+            meta,
+            requested_start=requested_start,
+            effective_start_buffer=effective_start_buffer,
+            end_requirement=end_requirement,
+            ts_unit=ts_unit,
+            requested_length=requested_length,
+        )
         meta["target_start"] = requested_start
         meta["target_end"] = end_requirement
         meta["ffilled"] = True

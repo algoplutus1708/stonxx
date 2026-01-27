@@ -556,6 +556,7 @@ def get_price_data(
         for seg_start, seg_end in segments:
             if seg_start >= seg_end:
                 continue
+            prev_max = df_cache.index.max() if not df_cache.empty else None
             try:
                 fetched = _fetch_history_between_dates(
                     asset=asset,
@@ -585,6 +586,33 @@ def get_price_data(
                 merged = _merge_frames(df_cache, fetched)
                 _write_cache_frame(cache_file, merged)
                 df_cache = merged
+                # IBKR can return the "latest available" bars even when the requested cursor_end is
+                # beyond the true available range (holiday/early close/entitlement gaps). In that
+                # case, `fetched` may contain *no newer bars* than the existing cache. Without an
+                # explicit negative cache marker, the caller will keep re-submitting the same
+                # history request as the backtest clock advances.
+                try:
+                    new_max = df_cache.index.max() if not df_cache.empty else None
+                    if prev_max is not None and new_max is not None and new_max <= prev_max:
+                        prev_max_utc = _to_utc(prev_max.to_pydatetime() if hasattr(prev_max, "to_pydatetime") else prev_max)
+                        seg_start_utc = _to_utc(seg_start)
+                        seg_end_utc = _to_utc(seg_end)
+                        is_tail_extension = abs((seg_start_utc - prev_max_utc).total_seconds()) <= 1.0 and seg_end_utc > prev_max_utc
+                        if is_tail_extension:
+                            missing_start = prev_max_utc + timedelta(seconds=1)
+                            if missing_start < seg_end_utc:
+                                _record_missing_window(
+                                    asset=asset,
+                                    quote=quote,
+                                    timestep=timestep,
+                                    exchange=effective_exchange,
+                                    source=history_source,
+                                    start_dt=missing_start,
+                                    end_dt=seg_end_utc,
+                                )
+                                df_cache = _read_cache_frame(cache_file)
+                except Exception:
+                    pass
 
     if df_cache.empty:
         return df_cache
@@ -828,6 +856,7 @@ def _get_cached_bars_for_source(
         for seg_start, seg_end in segments:
             if seg_start >= seg_end:
                 continue
+            prev_max = df_cache.index.max() if not df_cache.empty else None
             try:
                 fetched = _fetch_history_between_dates(
                     asset=asset,
@@ -855,6 +884,41 @@ def _get_cached_bars_for_source(
                 merged = _merge_frames(df_cache, fetched)
                 _write_cache_frame(cache_file, merged)
                 df_cache = merged
+                # IBKR can return the "latest available" bars even when the requested cursor_end is
+                # beyond the true available range (holiday/early close/entitlement gaps). In that
+                # case, `fetched` may contain *no newer bars* than the existing cache, and if we do
+                # nothing we'll keep re-submitting the same history request in a loop as the
+                # backtest clock advances.
+                #
+                # Negative-cache this "stale end" by recording a missing window that extends
+                # coverage to the requested bound. The placeholder rows are filtered out before
+                # returning bars, so this does not create synthetic liquidity.
+                try:
+                    new_max = df_cache.index.max() if not df_cache.empty else None
+                    if prev_max is not None and new_max is not None and new_max <= prev_max:
+                        prev_max_utc = _to_utc(prev_max.to_pydatetime() if hasattr(prev_max, "to_pydatetime") else prev_max)
+                        seg_start_utc = _to_utc(seg_start)
+                        seg_end_utc = _to_utc(seg_end)
+                        is_tail_extension = abs((seg_start_utc - prev_max_utc).total_seconds()) <= 1.0 and seg_end_utc > prev_max_utc
+                        if is_tail_extension:
+                            # Start the missing window just *after* the last real bar to avoid
+                            # clobbering the bar at `prev_max` when merging placeholder rows.
+                            missing_start = prev_max_utc + timedelta(seconds=1)
+                            if missing_start >= seg_end_utc:
+                                continue
+                            _record_missing_window(
+                                asset=asset,
+                                quote=quote,
+                                timestep=timestep,
+                                exchange=exchange,
+                                source=history_source,
+                                start_dt=missing_start,
+                                end_dt=seg_end_utc,
+                            )
+                            # Keep the in-memory view in sync for any further segment checks.
+                            df_cache = _read_cache_frame(cache_file)
+                except Exception:
+                    pass
 
     if df_cache.empty:
         return df_cache
@@ -1620,6 +1684,56 @@ def _resolve_conid(*, asset: Asset, quote: Optional[Asset], exchange: Optional[s
             mapping = json.loads(cache_file.read_text(encoding="utf-8")) or {}
         except Exception:
             mapping = {}
+
+    # Seed conids.json across cache namespaces.
+    #
+    # Production backtests often run with a fresh S3 cache version/prefix to simulate cold-cache
+    # behavior. IBKR Client Portal cannot resolve conids for *expired* futures contracts, so
+    # historical futures backtests depend on the shared conid registry (`ibkr/conids.json`).
+    #
+    # If the current cache namespace does not contain `conids.json`, fall back to the default
+    # `v1` namespace and materialize it locally (and, when possible, upload it into the current
+    # namespace) so we do not thrash the downloader in a hot loop.
+    if (not mapping) and (not cache_file.exists()) and getattr(cache_manager, "enabled", False):
+        settings = getattr(cache_manager, "_settings", None)
+        try:
+            backend = getattr(settings, "backend", None)
+            bucket = str(getattr(settings, "bucket", "") or "")
+            prefix = str(getattr(settings, "prefix", "") or "").strip("/")
+            version = str(getattr(settings, "version", "") or "").strip("/")
+        except Exception:
+            backend = None
+            bucket = ""
+            prefix = ""
+            version = ""
+
+        if backend == "s3" and bucket and version and version != "v1":
+            try:
+                relative_path = cache_file.resolve().relative_to(Path(LUMIBOT_CACHE_FOLDER).resolve()).as_posix()
+            except Exception:
+                relative_path = f"{CACHE_SUBFOLDER}/conids.json"
+
+            seed_components = [prefix, "v1", relative_path]
+            seed_key = "/".join([c for c in seed_components if c])
+            seed_mapping: Dict[str, int] = {}
+            try:
+                seed_mapping = _download_remote_conids_json(cache_manager, bucket=bucket, key=seed_key)
+            except Exception as exc:
+                if _is_not_found_error(cache_manager, exc):
+                    seed_mapping = {}
+                else:
+                    seed_mapping = {}
+
+            if seed_mapping:
+                mapping = dict(seed_mapping)
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                cache_file.write_text(json.dumps(mapping, indent=2, sort_keys=True), encoding="utf-8")
+                try:
+                    # Best-effort: upload into the current cache namespace so subsequent runs can
+                    # reuse without re-downloading from the seed namespace.
+                    _merge_upload_conids_json(cache_manager, cache_file, mapping=mapping, required_keys=set())
+                except Exception:
+                    pass
 
     asset_type = str(getattr(asset, "asset_type", "") or "").lower()
     effective_exchange = exchange

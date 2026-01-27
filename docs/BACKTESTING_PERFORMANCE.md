@@ -409,6 +409,23 @@ If warm run #2 still submits a lot of the same request types:
 - confirm effective env vars (settings.json / logs)
 - identify which request types are missing from S3
 
+### Pattern B2 — IBKR historical futures “conid registry missing” thrash (cont_future)
+
+**Symptoms**
+- backtest window is historical (contract months are now expired)
+- repeated errors like “IBKR cont_future requires conids for explicit contract months …”
+- frequent submits to `ibkr/trsrv/futures` even though the backtest never makes progress on data
+- wall time explodes (minutes → hours) and logs become extremely repetitive
+
+**Likely cause**
+- `ibkr/conids.json` is missing in the active S3 cache namespace (fresh cache version/prefix), but
+  IBKR Client Portal cannot discover conids for expired contracts.
+
+**First action**
+- check that the conid registry exists in S3 for the active cache namespace/version
+- if running a fresh cache version, ensure the registry is seeded (see
+  `docs/investigations/2026-01-27_ROUTER_IBKR_SPEED.md`)
+
 ### Pattern C — Low submits but still slow
 
 **Symptoms**

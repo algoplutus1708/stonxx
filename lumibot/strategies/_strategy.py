@@ -1304,6 +1304,10 @@ class _Strategy:
             # is at the start of the day, so the graph cuts short. This may be needed
             # for other timeframes as well
             backtesting_end_adjusted = self._backtesting_end
+            try:
+                from lumibot.backtesting.routed_backtesting import RoutedBacktestingPandas
+            except Exception:
+                RoutedBacktestingPandas = None  # type: ignore[misc,assignment]
 
             # If we are using the polgon data source, then get the benchmark returns from polygon
             if type(self.broker.data_source) == PolygonDataBacktesting:
@@ -1445,6 +1449,71 @@ class _Strategy:
                 df = bars.df
                 if df is None or df.empty or "close" not in df.columns:
                     self.logger.error(f"IBKR benchmark bars empty/invalid: {benchmark_asset}")
+                    _fallback_benchmark_from_strategy()
+                    return
+                df = df.copy()
+                df["return"] = df["close"].pct_change(fill_method=None)
+                df["symbol_cumprod"] = (1 + df["return"]).cumprod()
+                self._benchmark_returns_df = df
+
+            # Router backtests (prod-like Theta+IBKR routing):
+            # Prefer the routed data source over Yahoo so benchmarks remain cacheable and don't
+            # require external network access (Yahoo can be rate-limited and slow).
+            elif RoutedBacktestingPandas is not None and isinstance(self.broker.data_source, RoutedBacktestingPandas):
+                def _fallback_benchmark_from_strategy() -> None:
+                    """Fallback: use the strategy equity curve as a benchmark so tearsheets remain available."""
+                    try:
+                        if self._strategy_returns_df is None or self._strategy_returns_df.empty:
+                            return
+                        if "portfolio_value" not in self._strategy_returns_df.columns:
+                            return
+                        series = self._strategy_returns_df["portfolio_value"].astype(float).copy()
+                        first = float(series.dropna().iloc[0]) if not series.dropna().empty else None
+                        if first is None or first == 0:
+                            return
+                        bench = pd.DataFrame(index=self._strategy_returns_df.index)
+                        bench["return"] = series.pct_change(fill_method=None)
+                        bench["symbol_cumprod"] = (1 + bench["return"]).cumprod()
+                        self._benchmark_returns_df = bench
+                        self.logger.warning(
+                            "Router benchmark bars unavailable; using strategy equity curve as benchmark for tearsheet generation."
+                        )
+                    except Exception:
+                        return
+
+                benchmark_asset = self._benchmark_asset
+                if isinstance(benchmark_asset, str):
+                    parts = [p.strip() for p in benchmark_asset.split("/") if p.strip()]
+                    if len(parts) == 2:
+                        benchmark_asset = (
+                            Asset(symbol=parts[0], asset_type="crypto"),
+                            Asset(symbol=parts[1], asset_type="forex"),
+                        )
+                    else:
+                        # Keep behavior consistent with Yahoo benchmarks: use daily series.
+                        benchmark_asset = Asset(symbol=benchmark_asset, asset_type="stock")
+
+                # Use daily bars for benchmark across intraday strategies to keep tearsheet cost bounded.
+                timestep = "day"
+
+                try:
+                    bars = self.broker.data_source.get_historical_prices_between_dates(
+                        benchmark_asset,
+                        timestep,
+                        start_date=self._backtesting_start,
+                        end_date=backtesting_end_adjusted,
+                        quote=self._quote_asset,
+                    )
+                except Exception:
+                    bars = None
+
+                if bars is None or getattr(bars, "df", None) is None:
+                    self.logger.error(f"Couldn't get benchmark bars from Router data source: {benchmark_asset}")
+                    _fallback_benchmark_from_strategy()
+                    return
+                df = bars.df
+                if df is None or df.empty or "close" not in df.columns:
+                    self.logger.error(f"Router benchmark bars empty/invalid: {benchmark_asset}")
                     _fallback_benchmark_from_strategy()
                     return
                 df = df.copy()

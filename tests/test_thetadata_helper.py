@@ -2426,16 +2426,13 @@ def test_get_historical_eod_data_splits_chunk_on_transient_error(monkeypatch):
 
 
 def test_get_historical_eod_data_split_failure_bubbles(monkeypatch):
-    """If a split sub-chunk fails, propagate the ThetaRequestError."""
-    failure_ranges = {
-        ("2024-01-01", "2024-01-04"),
-        ("2024-01-01", "2024-01-02"),
-    }
+    """If recursive split still fails at day granularity, propagate the ThetaRequestError."""
 
     def fake_get_request(url, headers, querystring):
         start = querystring["start_date"]
         end = querystring["end_date"]
-        if (start, end) in failure_ranges:
+        # Fail any window that starts on 2024-01-01 so even recursive splitting cannot recover.
+        if start == "2024-01-01":
             raise thetadata_helper.ThetaRequestError("still failing", status_code=503)
         rows = [
             [100.0, 101.0, f"{start}T17:15:00Z"],

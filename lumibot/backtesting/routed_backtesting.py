@@ -15,6 +15,7 @@ from lumibot.credentials import ALPACA_CONFIG, COINBASE_CONFIG, KRAKEN_CONFIG, P
 from lumibot.entities import Asset, Data
 from lumibot.tools import ibkr_helper
 from lumibot.tools import polygon_helper
+from lumibot.tools.helpers import parse_timestep_qty_and_unit
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +238,198 @@ class _DataFrameRoutingAdapter(_RoutingAdapter):
 class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
     provider_key = "ibkr"
     _default_start_buffer = timedelta(0)
+
+    @staticmethod
+    def _normalize_timestep_key(timestep: str) -> str:
+        """Normalize a user-facing timestep into a stable IBKR series key.
+
+        Mirrors InteractiveBrokersRESTBacktesting normalization so router and IBKR-only backtests
+        share cache keys and can leverage native multi-minute datasets (e.g., "60m" -> "60minute").
+        """
+        qty, unit = parse_timestep_qty_and_unit(timestep)
+        qty = int(qty)
+        unit = str(unit)
+        return unit if qty == 1 else f"{qty}{unit}"
+
+    def update_pandas_data(
+        self,
+        *,
+        asset: Asset,
+        quote_asset: Asset,
+        length: int,
+        timestep: str,
+        start_dt: datetime | None,
+        require_quote_data: bool,
+        require_ohlc_data: bool,
+        snapshot_only: bool,
+        provider_spec: ProviderSpec,
+    ):
+        """IBKR routing adapter with native multi-minute support.
+
+        Key differences vs the generic DataFrame adapter:
+        - Preserve the full timestep multiplier in the dataset key ("60m" -> "60minute") so it
+          doesn't collide with "minute".
+        - Pass the normalized key through to `ibkr_helper.get_price_data()` so IBKR can return
+          native bars at that cadence (avoids per-iteration resampling).
+        - Store `Data` under the normalized key and annotate `_native_timestep_*` so `Data.get_bars()`
+          can fast-path slices without resampling.
+        """
+        if snapshot_only:
+            return None
+
+        end_dt = start_dt if isinstance(start_dt, datetime) else self._router.get_datetime()
+        ts = timestep or self._router.get_timestep()
+
+        start_datetime, ts_unit = self._router.get_start_datetime_and_ts_unit(
+            length,
+            ts,
+            start_dt=end_dt,
+            start_buffer=self._start_buffer(asset, provider_spec),
+        )
+
+        if ts_unit == "day":
+            try:
+                self._router._effective_day_mode = True
+            except Exception:
+                pass
+
+        dataset_key = self._normalize_timestep_key(ts)
+        qty, unit = parse_timestep_qty_and_unit(dataset_key)
+        qty = int(qty)
+        unit = str(unit)
+
+        canonical_key, legacy_key = self._router._build_dataset_keys(asset, quote_asset, dataset_key)
+        existing = self._router._data_store.get(canonical_key)
+        existing_df = getattr(existing, "df", None) if existing is not None else None
+
+        if existing_df is not None and isinstance(existing_df, pd.DataFrame) and not existing_df.empty:
+            try:
+                existing_start = existing_df.index.min()
+                existing_end = existing_df.index.max()
+                if existing_start is not None and existing_end is not None:
+                    if start_datetime >= existing_start and end_dt <= existing_end:
+                        return None
+            except Exception:
+                pass
+
+        asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+        df = None
+
+        # PERF: warm-cache minute strategies can call `get_historical_prices()` tens of thousands of
+        # times. In the router data source, IBKR history fetches must be amortized by prefetching
+        # the full backtest window once, then slicing in-memory thereafter (same principle as the
+        # IBKR-only backtesting data source).
+        if asset_type in {"future", "cont_future"} and unit in {"minute", "hour", "day"} and canonical_key not in self._fully_loaded_series:
+            try:
+                from lumibot.backtesting.interactive_brokers_rest_backtesting import InteractiveBrokersRESTBacktesting
+
+                prev_open = InteractiveBrokersRESTBacktesting._previous_us_futures_session_open(self._router.datetime_start)
+            except Exception:
+                prev_open = None
+
+            try:
+                if prev_open is not None:
+                    prefetch_start = min(start_datetime, prev_open)
+                else:
+                    prefetch_start = min(start_datetime, self._router.datetime_start - timedelta(days=1))
+            except Exception:
+                prefetch_start = start_datetime
+
+            prefetch_end = self._router.datetime_end or end_dt
+            df = ibkr_helper.get_price_data(
+                asset=asset,
+                quote=quote_asset,
+                timestep=dataset_key,
+                start_dt=prefetch_start,
+                end_dt=prefetch_end,
+                exchange=None,
+                include_after_hours=True,
+            )
+            if df is None or df.empty:
+                return None
+            self._fully_loaded_series.add(canonical_key)
+        elif asset_type == "crypto" and unit in {"minute", "hour"} and canonical_key not in self._fully_loaded_series:
+            try:
+                prefetch_start = min(start_datetime, self._router.datetime_start)
+            except Exception:
+                prefetch_start = start_datetime
+            prefetch_end = self._router.datetime_end or end_dt
+            df = ibkr_helper.get_price_data(
+                asset=asset,
+                quote=quote_asset,
+                timestep=dataset_key,
+                start_dt=prefetch_start,
+                end_dt=prefetch_end,
+                exchange=None,
+                include_after_hours=True,
+            )
+            if df is None or df.empty:
+                return None
+            self._fully_loaded_series.add(canonical_key)
+        elif asset_type == "crypto" and unit == "day" and canonical_key not in self._fully_loaded_series:
+            try:
+                lookback_days = max(7, int(length) + 5)
+            except Exception:
+                lookback_days = 7
+            prefetch_start = min(start_datetime, self._router.datetime_start - timedelta(days=lookback_days))
+            prefetch_end = self._router.datetime_end or end_dt
+            df = ibkr_helper.get_price_data(
+                asset=asset,
+                quote=quote_asset,
+                timestep=dataset_key,
+                start_dt=prefetch_start,
+                end_dt=prefetch_end,
+                exchange=None,
+                include_after_hours=True,
+            )
+            if df is None or df.empty:
+                return None
+            self._fully_loaded_series.add(canonical_key)
+        else:
+            df = ibkr_helper.get_price_data(
+                asset=asset,
+                quote=quote_asset,
+                timestep=dataset_key,
+                start_dt=start_datetime,
+                end_dt=end_dt,
+                exchange=None,
+                include_after_hours=True,
+            )
+
+        if df is None or df.empty:
+            return None
+
+        if isinstance(df.index, pd.DatetimeIndex):
+            if df.index.tz is None:
+                df.index = df.index.tz_localize("UTC")
+            df.index = df.index.tz_convert(LUMIBOT_DEFAULT_PYTZ)
+            df = df.sort_index()
+
+        if existing_df is not None and isinstance(existing_df, pd.DataFrame) and not existing_df.empty:
+            merged = pd.concat([existing_df, df], axis=0).sort_index()
+            merged = merged[~merged.index.duplicated(keep="last")]
+        else:
+            merged = df
+
+        # `Data` supports base units, but IBKR can return multi-minute datasets. Store them under
+        # a separate key (e.g., "60minute") and annotate the instance so `Data.get_bars()` can
+        # slice directly without resampling each iteration.
+        data_timestep = unit if unit in {"minute", "hour", "day"} else "minute"
+        data = Data(asset, merged, timestep=data_timestep, quote=quote_asset)
+        data._native_timestep_quantity = int(qty)  # type: ignore[attr-defined]
+        data._native_timestep_unit = unit  # type: ignore[attr-defined]
+        try:
+            if isinstance(merged.index, pd.DatetimeIndex) and len(merged.index) > 0:
+                data.repair_times_and_fill(merged.index)
+        except Exception:
+            pass
+
+        self._router._data_store[canonical_key] = data
+        # Only expose the (asset, quote) legacy key for true minute data to avoid collisions with
+        # multi-minute datasets (which would otherwise satisfy minute requests incorrectly).
+        if dataset_key == "minute" and legacy_key not in self._router._data_store:
+            self._router._data_store[legacy_key] = data
+        return None
 
     def _fetch_df(
         self,

@@ -41,9 +41,32 @@ Profiling:
 
 We use `scripts/run_backtest_prodlike.py` for “production-like” runs (downloader + S3 caching).
 
+### 2.1 Automated suite runner (always logs results)
+
+To prevent “we forgot to log the numbers”, use the suite runner which appends every run to:
+- `docs/investigations/2026-01-27_ROUTER_IBKR_SPEED.md` (human ledger)
+- `docs/investigations/2026-01-27_ROUTER_IBKR_SPEED.csv` (machine-readable)
+
+```bash
+/Users/robertgrzesik/bin/safe-timeout 7200s python3 scripts/bench_router_ibkr_speed_suite.py \
+  --start 2025-01-06 --end 2025-01-20 \
+  --repeats 3 \
+  --profile yappi \
+  --use-dotenv-s3-keys \
+  --data-source '{"default":"thetadata","crypto":"ibkr","future":"ibkr","cont_future":"ibkr"}' \
+  --cache-folder "/Users/robertgrzesik/Documents/Development/backtest_cache/router_speed" \
+  --note "baseline (no code changes)"
+```
+
+Notes:
+- This is intentionally “append-only” so we can audit perf history.
+- The suite runner drives `scripts/run_backtest_prodlike.py` under the hood.
+
 Recommended investigation flags:
 - use the production routing JSON
 - set a dedicated cache folder under `~/Documents/Development/`
+- **IMPORTANT (local-only):** pass `--use-dotenv-s3-keys` on this machine so S3 cache read/write works.
+  - Without it, S3 ops can silently fail (and runs will look “warm” but keep queueing).
 - use S3 cache **read-only** during investigations to avoid mutating shared caches:
   - `env LUMIBOT_CACHE_MODE=readonly ...`
 
@@ -103,6 +126,23 @@ These runs use:
 | 2026-01-27 | a8f17429+local | gc | router-json | 1w (2026-01-20→27) | 163.0 | 5 | 5 | `ibkr/iserver/marketdata/history` | (none) | cold-ish: initial history fetches dominate |
 | 2026-01-27 | a8f17429+local | gc | router-json | 1w (2026-01-20→27) | 12.6 | 0 | 0 | (none) | `/Users/robertgrzesik/Documents/Development/backtest_runs/20260127_001638_gc_router_20260120_week1_yappi/logs/GoldFuturesEMACrossover_2026-01-27_00-16_o66T9X_profile_yappi.csv` | warm-cache: dominated by pandas/numpy |
 
+### Phase 2 results (4.4.40 WIP: end-date semantics + routed benchmark + native multi-minute IBKR bars)
+
+Changes included in this phase:
+- Keep `BACKTESTING_END=YYYY-MM-DD` semantics **exclusive** (end at midnight), but clamp the backtest
+  loop so we do not "await market close" after we've advanced past the configured end bound.
+- Router tearsheet benchmark prefers the router datasource (ThetaData) over Yahoo (daily bars).
+- Router IBKR adapter preserves multi-minute series keys (`60m` → `60minute`) and fetches native IBKR bars for those timesteps.
+- IBKR “stale end” negative-cache: if IBKR returns bars that don’t advance coverage, record a missing-window marker so we don’t re-fetch history in a loop.
+
+| ts | git | bench | mode | window | elapsed_s | queue_submits | history_submits | top_paths | yappi_csv | change |
+|---|---|---|---|---:|---:|---:|---:|---|---|---|
+| 2026-01-27 | dad74668+local | nq | router-json | 2w (2025-01-06→20) | 225.7 | 15 | 14 | `ibkr/iserver/marketdata/history`, `ibkr/iserver/contract/*/info` | (none) | cold run (bounded history; no per-bar thrash) |
+| 2026-01-27 | dad74668+local | nq | router-json | 2w (2025-01-06→20) | 134.8 | 0 | 0 | (none) | (none) | warm run (queue-free; dominated by pandas/strategy work + artifacts) |
+| 2026-01-27 | dad74668+local | gc | router-json | 2w (2025-01-06→20) | 43.8 | 3 | 2 | `ibkr/iserver/marketdata/history`, `ibkr/iserver/contract/*/info` | (none) | cold run (native multi-minute bars; bounded history) |
+| 2026-01-27 | dad74668+local | gc | router-json | 2w (2025-01-06→20) | 34.9 | 0 | 0 | (none) | (none) | warm run (queue-free) |
+| 2026-01-27 | dad74668+local | nq | router-json | 1d (2025-01-06→07) | 58.3 | 0 | 0 | (none) | `/Users/robertgrzesik/Documents/Development/backtest_runs/20260127_072227_nq_1d_yappi/logs/NQDoubleEMATestStrategy_2026-01-27_07-22_TFHU7i_profile_yappi.csv` | YAPPI: dominated by pandas/numpy; network ~0 |
+
 ## 4) Root cause + fix summary
 
 **Root cause (router path, before fix):**
@@ -116,10 +156,51 @@ These runs use:
 
 See implementation: `lumibot/backtesting/routed_backtesting.py` (router IBKR adapter).
 
+**Root cause (cold-cache namespaces; historical cont_future):**
+- `ibkr/conids.json` is stored in the S3 cache namespace (prefix + version). When a backtest runs with a
+  *fresh* cache version/prefix (common in production “cold cache” simulations), `conids.json` can be missing
+  even if price bars are expected to be downloaded.
+- IBKR Client Portal cannot resolve conids for **expired** futures contracts. Historical `cont_future` backtests
+  (e.g., 2025 windows run in 2026) therefore depend on having the conid registry available.
+- When the conid registry is missing, strategies can end up repeatedly calling `get_historical_prices()` and
+  hitting `ibkr/trsrv/futures` in a hot loop, logging the same “missing conid registry” error thousands of times
+  and turning a 2‑week backtest into hours.
+
+**Fix (Phase 3):**
+- Seed `ibkr/conids.json` from the default `v1` namespace when running in a non-`v1` cache version and the
+  registry is missing (best-effort; no secrets; does not change price-bar cache semantics).
+- Regression test: `tests/backtest/test_ibkr_conids_seed_from_v1_for_new_cache_version.py`.
+
 ## 5) Tests / regression gates
 
 Deterministic unit tests prevent regression back to “fetch in the hot loop”:
 - `tests/backtest/test_routed_backtesting_ibkr_prefetch.py`
   - futures/cont_future minute: prefetch once + slice
+  - futures/cont_future multi-minute: `60m` must call IBKR with `60minute` and prefetch once
   - crypto minute: prefetch once + slice
+  - router benchmark must not call Yahoo: `tests/backtest/test_routed_backtesting_benchmark_prefers_router.py`
 
+
+## Automated Suite Runs (append-only)
+| ts | git | bench | window | elapsed_s | queue_submits | top_paths | workdir | yappi_csv | note |
+|---|---|---|---|---:|---:|---|---|---|---|
+| 2026-01-27T14:43:59-05:00 | a5342aef | nq | 2025-01-06→2025-01-20 | 34.9 | 0 |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144359_router_ibkr_suite/nq_run1` | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144359_router_ibkr_suite/nq_run1/logs/NQDoubleEMATestStrategy_2026-01-27_14-44_LLoEkR_profile_yappi.csv` | baseline suite (local) after suite runner added |
+| 2026-01-27T14:43:59-05:00 | a5342aef | nq | 2025-01-06→2025-01-20 | 13.1 | 0 |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144359_router_ibkr_suite/nq_run2` | `` | baseline suite (local) after suite runner added |
+| 2026-01-27T14:43:59-05:00 | a5342aef | nq | 2025-01-06→2025-01-20 | 13.9 | 0 |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144359_router_ibkr_suite/nq_run3` | `` | baseline suite (local) after suite runner added |
+| 2026-01-27T14:43:59-05:00 | a5342aef | nq_median_3 | 2025-01-06→2025-01-20 | 13.9 |  |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144359_router_ibkr_suite` | `` | baseline suite (local) after suite runner added |
+| 2026-01-27T14:43:59-05:00 | a5342aef | gc | 2025-01-06→2025-01-20 | 4.9 | 0 |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144359_router_ibkr_suite/gc_run1` | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144359_router_ibkr_suite/gc_run1/logs/GoldFuturesEMACrossover_2026-01-27_14-45_Rh5M3C_profile_yappi.csv` | baseline suite (local) after suite runner added |
+| 2026-01-27T14:43:59-05:00 | a5342aef | gc | 2025-01-06→2025-01-20 | 3.4 | 0 |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144359_router_ibkr_suite/gc_run2` | `` | baseline suite (local) after suite runner added |
+| 2026-01-27T14:43:59-05:00 | a5342aef | gc | 2025-01-06→2025-01-20 | 3.3 | 0 |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144359_router_ibkr_suite/gc_run3` | `` | baseline suite (local) after suite runner added |
+| 2026-01-27T14:43:59-05:00 | a5342aef | gc_median_3 | 2025-01-06→2025-01-20 | 3.4 |  |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144359_router_ibkr_suite` | `` | baseline suite (local) after suite runner added |
+| 2026-01-27T14:46:05-05:00 | a5342aef | nq | 2025-01-06→2025-01-20 | 32.6 | 0 |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144605_router_ibkr_suite/nq_run1` | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144605_router_ibkr_suite/nq_run1/logs/NQDoubleEMATestStrategy_2026-01-27_14-46_qK4S7A_profile_yappi.csv` | baseline suite (local) with SAVE_LOGFILE=true + disable UI |
+| 2026-01-27T14:46:05-05:00 | a5342aef | nq | 2025-01-06→2025-01-20 | 13.9 | 0 |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144605_router_ibkr_suite/nq_run2` | `` | baseline suite (local) with SAVE_LOGFILE=true + disable UI |
+| 2026-01-27T14:46:05-05:00 | a5342aef | nq | 2025-01-06→2025-01-20 | 14.0 | 0 |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144605_router_ibkr_suite/nq_run3` | `` | baseline suite (local) with SAVE_LOGFILE=true + disable UI |
+| 2026-01-27T14:46:05-05:00 | a5342aef | nq_median_3 | 2025-01-06→2025-01-20 | 14.0 |  |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144605_router_ibkr_suite` | `` | baseline suite (local) with SAVE_LOGFILE=true + disable UI |
+| 2026-01-27T14:46:05-05:00 | a5342aef | gc | 2025-01-06→2025-01-20 | 4.4 | 0 |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144605_router_ibkr_suite/gc_run1` | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144605_router_ibkr_suite/gc_run1/logs/GoldFuturesEMACrossover_2026-01-27_14-47_1PXZ5J_profile_yappi.csv` | baseline suite (local) with SAVE_LOGFILE=true + disable UI |
+| 2026-01-27T14:46:05-05:00 | a5342aef | gc | 2025-01-06→2025-01-20 | 3.6 | 0 |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144605_router_ibkr_suite/gc_run2` | `` | baseline suite (local) with SAVE_LOGFILE=true + disable UI |
+| 2026-01-27T14:46:05-05:00 | a5342aef | gc | 2025-01-06→2025-01-20 | 3.6 | 0 |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144605_router_ibkr_suite/gc_run3` | `` | baseline suite (local) with SAVE_LOGFILE=true + disable UI |
+| 2026-01-27T14:46:05-05:00 | a5342aef | gc_median_3 | 2025-01-06→2025-01-20 | 3.6 |  |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_144605_router_ibkr_suite` | `` | baseline suite (local) with SAVE_LOGFILE=true + disable UI |
+| 2026-01-27T16:03:11-05:00 | a5342aef | nq | 2025-01-06→2025-01-20 | 60.0 | 16 | `ibkr/iserver/marketdata/history`×14, `ibkr/iserver/contract/666754605/info`×1, `v3/stock/history/eod`×1 | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_160311_router_ibkr_suite/nq_run1` | `` | cold-cache (fresh S3 version) after conids seed fallback |
+| 2026-01-27T16:03:11-05:00 | a5342aef | nq_median_1 | 2025-01-06→2025-01-20 | 60.0 |  |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_160311_router_ibkr_suite` | `` | cold-cache (fresh S3 version) after conids seed fallback |
+| 2026-01-27T16:03:11-05:00 | a5342aef | gc | 2025-01-06→2025-01-20 | 6.1 | 3 | `ibkr/iserver/marketdata/history`×2, `ibkr/iserver/contract/623469623/info`×1 | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_160311_router_ibkr_suite/gc_run1` | `` | cold-cache (fresh S3 version) after conids seed fallback |
+| 2026-01-27T16:03:11-05:00 | a5342aef | gc_median_1 | 2025-01-06→2025-01-20 | 6.1 |  |  | `/Users/robertgrzesik/Documents/Development/backtest_suites/20260127_160311_router_ibkr_suite` | `` | cold-cache (fresh S3 version) after conids seed fallback |

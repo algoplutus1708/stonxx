@@ -83,4 +83,3 @@ def test_get_historical_eod_data_tracks_progress_per_outer_window(monkeypatch):
     assert status["total"] == 2
     assert status["current"] == 2
     assert status["progress"] == 100
-

@@ -234,8 +234,12 @@ def main() -> int:
     env["SHOW_PLOT"] = "True"
     env["SHOW_INDICATORS"] = "True"
     env["SHOW_TEARSHEET"] = "True"
+    env["SAVE_LOGFILE"] = "true"
     env["BACKTESTING_QUIET_LOGS"] = "false"
     env["BACKTESTING_SHOW_PROGRESS_BAR"] = "true"
+    # Prevent LumiBot from auto-opening HTML artifacts (tearsheet/trades) in the user's browser.
+    # Artifacts are still generated in `logs/`; we just avoid UI spam during repeated perf runs.
+    env.setdefault("LUMIBOT_DISABLE_UI", "1")
 
     if args.audit:
         # WHY: Investigations (NVDA/SPX) require a bulletproof per-fill record of quotes/inputs.
