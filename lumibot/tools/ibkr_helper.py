@@ -556,6 +556,7 @@ def get_price_data(
         for seg_start, seg_end in segments:
             if seg_start >= seg_end:
                 continue
+            prev_max = df_cache.index.max() if not df_cache.empty else None
             try:
                 fetched = _fetch_history_between_dates(
                     asset=asset,
@@ -585,6 +586,33 @@ def get_price_data(
                 merged = _merge_frames(df_cache, fetched)
                 _write_cache_frame(cache_file, merged)
                 df_cache = merged
+                # IBKR can return the "latest available" bars even when the requested cursor_end is
+                # beyond the true available range (holiday/early close/entitlement gaps). In that
+                # case, `fetched` may contain *no newer bars* than the existing cache. Without an
+                # explicit negative cache marker, the caller will keep re-submitting the same
+                # history request as the backtest clock advances.
+                try:
+                    new_max = df_cache.index.max() if not df_cache.empty else None
+                    if prev_max is not None and new_max is not None and new_max <= prev_max:
+                        prev_max_utc = _to_utc(prev_max.to_pydatetime() if hasattr(prev_max, "to_pydatetime") else prev_max)
+                        seg_start_utc = _to_utc(seg_start)
+                        seg_end_utc = _to_utc(seg_end)
+                        is_tail_extension = abs((seg_start_utc - prev_max_utc).total_seconds()) <= 1.0 and seg_end_utc > prev_max_utc
+                        if is_tail_extension:
+                            missing_start = prev_max_utc + timedelta(seconds=1)
+                            if missing_start < seg_end_utc:
+                                _record_missing_window(
+                                    asset=asset,
+                                    quote=quote,
+                                    timestep=timestep,
+                                    exchange=effective_exchange,
+                                    source=history_source,
+                                    start_dt=missing_start,
+                                    end_dt=seg_end_utc,
+                                )
+                                df_cache = _read_cache_frame(cache_file)
+                except Exception:
+                    pass
 
     if df_cache.empty:
         return df_cache
@@ -828,6 +856,7 @@ def _get_cached_bars_for_source(
         for seg_start, seg_end in segments:
             if seg_start >= seg_end:
                 continue
+            prev_max = df_cache.index.max() if not df_cache.empty else None
             try:
                 fetched = _fetch_history_between_dates(
                     asset=asset,
@@ -855,6 +884,41 @@ def _get_cached_bars_for_source(
                 merged = _merge_frames(df_cache, fetched)
                 _write_cache_frame(cache_file, merged)
                 df_cache = merged
+                # IBKR can return the "latest available" bars even when the requested cursor_end is
+                # beyond the true available range (holiday/early close/entitlement gaps). In that
+                # case, `fetched` may contain *no newer bars* than the existing cache, and if we do
+                # nothing we'll keep re-submitting the same history request in a loop as the
+                # backtest clock advances.
+                #
+                # Negative-cache this "stale end" by recording a missing window that extends
+                # coverage to the requested bound. The placeholder rows are filtered out before
+                # returning bars, so this does not create synthetic liquidity.
+                try:
+                    new_max = df_cache.index.max() if not df_cache.empty else None
+                    if prev_max is not None and new_max is not None and new_max <= prev_max:
+                        prev_max_utc = _to_utc(prev_max.to_pydatetime() if hasattr(prev_max, "to_pydatetime") else prev_max)
+                        seg_start_utc = _to_utc(seg_start)
+                        seg_end_utc = _to_utc(seg_end)
+                        is_tail_extension = abs((seg_start_utc - prev_max_utc).total_seconds()) <= 1.0 and seg_end_utc > prev_max_utc
+                        if is_tail_extension:
+                            # Start the missing window just *after* the last real bar to avoid
+                            # clobbering the bar at `prev_max` when merging placeholder rows.
+                            missing_start = prev_max_utc + timedelta(seconds=1)
+                            if missing_start >= seg_end_utc:
+                                continue
+                            _record_missing_window(
+                                asset=asset,
+                                quote=quote,
+                                timestep=timestep,
+                                exchange=exchange,
+                                source=history_source,
+                                start_dt=missing_start,
+                                end_dt=seg_end_utc,
+                            )
+                            # Keep the in-memory view in sync for any further segment checks.
+                            df_cache = _read_cache_frame(cache_file)
+                except Exception:
+                    pass
 
     if df_cache.empty:
         return df_cache
