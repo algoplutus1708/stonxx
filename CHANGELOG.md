@@ -3,10 +3,13 @@
 ## 4.4.40 - Unreleased
 
 ### Added
+- ThetaData backtesting: coverage-based `prefetch_complete` computation + tests to prevent per-bar STALE/REFRESH thrash when cached datasets are incomplete.
 
 ### Changed
+- Yahoo helper: when S3 backtest cache is enabled, hydrate cached pickles before falling back to live Yahoo fetches; upload pickles to the cache on write.
 
 ### Fixed
+- ThetaData EOD: enforce the provider's 365-day window limit per request and keep progress tracking consistent with chunked downloads.
 
 ## 4.4.39 - 2026-01-27
 
