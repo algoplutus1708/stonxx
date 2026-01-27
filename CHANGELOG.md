@@ -1,5 +1,13 @@
 # Changelog
 
+## 4.4.40 - Unreleased
+
+### Added
+
+### Changed
+
+### Fixed
+
 ## 4.4.39 - 2026-01-27
 
 ### Added
