@@ -7169,3 +7169,8 @@ timestamp,test_name,data_source,trading_days,execution_time_seconds,git_commit,l
 2026-01-22T03:16:17.250021,test_acceptance_tqqq_sma200,unknown,,40.186,1ed3de0f,4.4.36,,,,,Auto-tracked from test_acceptance_backtests_ci
 2026-01-22T03:20:57.688842,test_acceptance_backdoor_butterfly,unknown,,280.312,1ed3de0f,4.4.36,,,,,Auto-tracked from test_acceptance_backtests_ci
 2026-01-22T03:22:21.831322,test_acceptance_meli_deep_drawdown,unknown,,83.988,1ed3de0f,4.4.36,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-27T01:33:38.194890,test_acceptance_aapl_deep_dip_calls,unknown,,26.975,a8f17429,4.4.38,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-27T01:34:04.516203,test_acceptance_leaps_alpha_picks,unknown,,26.188,a8f17429,4.4.38,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-27T01:34:32.465285,test_acceptance_tqqq_sma200,unknown,,27.826,a8f17429,4.4.38,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-27T01:38:06.696128,test_acceptance_backdoor_butterfly,unknown,,214.118,a8f17429,4.4.38,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-01-27T01:39:18.957945,test_acceptance_meli_deep_drawdown,unknown,,72.125,a8f17429,4.4.38,,,,,Auto-tracked from test_acceptance_backtests_ci

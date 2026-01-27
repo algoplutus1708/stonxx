@@ -18,6 +18,15 @@ This folder contains **human-authored** documentation for the LumiBot trading an
 
 **Speed:** a backtest is “fast” when warm-cache runs are queue-free and complete in bounded wall time, with evidence (request counts, cache hit rate, iterations/sec, and wall-time split: data wait vs compute vs artifacts).
 
+**Resilience:** a backtest is “resilient” when:
+- simulation completion is not masked by post-processing failures (tearsheets/stats/plots),
+- artifacts are as complete as possible even after failures (e.g., `trades.csv` and `stats.csv` still upload),
+- failure modes are classified (simulation vs postprocess vs upload), and
+- run metadata makes debugging easy (include `lumibot_version` in `settings.json` / `completion.json` whenever possible).
+
+If you’re coordinating IBKR speed + crash hardening work, start with:
+- `docs/handoffs/2026-01-26_IBKR_SPEED_RESILIENCE_MASTER_HANDOFF.md`
+
 ---
 
 ## File Index

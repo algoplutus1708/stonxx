@@ -14,6 +14,11 @@ This document is the **canonical manual acceptance suite** for LumiBot backtesti
 
 **Speed:** acceptance warm-cache runs complete in bounded wall time and are **queue-free** (no downloader submits), proving the cache and data semantics are stable.
 
+**Resilience:** acceptance runs must also prove the “end of backtest” pipeline is stable:
+- stats summary must not crash (CAGR/datetime edge cases, NaN handling, etc.),
+- tearsheet/plot generation should either succeed or fail in a controlled way (no masking simulation success with a generic “failed” run),
+- and the run must still emit actionable artifacts (`trades.csv`, `stats.csv`, `logs.csv`) even when optional post-processing fails.
+
 ## IBKR acceptance backtests (Crypto + Futures)
 
 This repo’s acceptance harness (`tests/backtest/test_acceptance_backtests_ci.py`) includes deterministic, cache-backed:

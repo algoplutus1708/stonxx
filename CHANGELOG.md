@@ -1,12 +1,14 @@
 # Changelog
 
-## 4.4.39 - Unreleased
+## 4.4.39 - 2026-01-27
 
 ### Added
 
 ### Changed
 
 ### Fixed
+- Backtesting router (IBKR futures/cont_future/crypto): prefetch full backtest window once per series and slice from memory to avoid per-iteration history fetches (major warm-cache speedup).
+- Indicators: prevent `plot_indicators()` hovertext generation from crashing when `detail_text` is missing/NaN/NA (e.g., mixed indicator points with and without `detail_text`).
 
 ## 4.4.38 - 2026-01-26
 
