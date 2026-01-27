@@ -1858,6 +1858,18 @@ class StrategyExecutor(Thread):
         if self.strategy.is_backtesting:
             self._run_backtesting_loop(is_continuous_market, time_to_close)
 
+            # If the backtest ended because we advanced past the configured end bound, do not
+            # advance the clock to "market close". This is especially important for futures
+            # sessions that cross midnight: awaiting the session close can jump far beyond the
+            # backtest window and trigger out-of-range data refreshes (and queue submits) in what
+            # should be a warm-cache, bounded run.
+            try:
+                datetime_end = getattr(getattr(self.broker, "data_source", None), "datetime_end", None)
+                if datetime_end is not None and self.broker.datetime > datetime_end:
+                    return
+            except Exception:
+                pass
+
         self.strategy.await_market_to_close()
         if self.broker.is_market_open():
             self._before_market_closes()  # perhaps the user could set the time of day based on their data that the market closes?
