@@ -19,6 +19,9 @@ class _DummyBroker:
         self.data_source = _DummyDataSource(datetime_end=datetime_end)
         self.datetime = datetime_end
 
+    def is_market_open(self):
+        return True
+
 
 class _DummyStrategy:
     is_backtesting = True
@@ -40,6 +43,9 @@ def test_strategy_executor_does_not_await_market_close_past_backtest_end(monkeyp
     broker = _DummyBroker(datetime_end=end)
     strategy = _DummyStrategy(broker)
     executor = StrategyExecutor(strategy)
+
+    monkeypatch.setattr(executor, "_before_market_closes", lambda: None)
+    monkeypatch.setattr(executor, "_after_market_closes", lambda: None)
 
     def fake_run_backtesting_loop(is_continuous_market, time_to_close):
         # Simulate the common end-of-backtest state: we overslept by one bar past the

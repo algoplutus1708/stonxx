@@ -1866,6 +1866,15 @@ class StrategyExecutor(Thread):
             try:
                 datetime_end = getattr(getattr(self.broker, "data_source", None), "datetime_end", None)
                 if datetime_end is not None and self.broker.datetime > datetime_end:
+                    # Still run the close lifecycle once so stats/tearsheets have a final mark-to-market
+                    # snapshot, but avoid advancing time beyond the configured backtest window.
+                    if self.broker.is_market_open():
+                        self._before_market_closes()
+
+                    if hasattr(self.broker, "process_expired_option_contracts"):
+                        self.broker.process_expired_option_contracts(self.strategy)
+
+                    self._after_market_closes()
                     return
             except Exception:
                 pass
