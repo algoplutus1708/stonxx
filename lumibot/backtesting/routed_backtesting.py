@@ -254,13 +254,75 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
     ) -> pd.DataFrame | None:
         asset_type = str(getattr(asset, "asset_type", "") or "").lower()
 
+        # PERF: warm-cache minute strategies can call `get_historical_prices()` tens of thousands of
+        # times. In the router data source, IBKR history fetches must be amortized by prefetching
+        # the full backtest window once, then slicing in-memory thereafter (same principle as the
+        # IBKR-only backtesting data source).
+
+        if (
+            asset_type in {"future", "cont_future"}
+            and ts_unit in {"minute", "hour", "day"}
+            and canonical_key not in self._fully_loaded_series
+        ):
+            try:
+                from lumibot.backtesting.interactive_brokers_rest_backtesting import InteractiveBrokersRESTBacktesting
+
+                prev_open = InteractiveBrokersRESTBacktesting._previous_us_futures_session_open(self._router.datetime_start)
+            except Exception:
+                prev_open = None
+
+            try:
+                if prev_open is not None:
+                    prefetch_start = min(start_datetime, prev_open)
+                else:
+                    prefetch_start = min(start_datetime, self._router.datetime_start - timedelta(days=1))
+            except Exception:
+                prefetch_start = start_datetime
+
+            prefetch_end = self._router.datetime_end or end_dt
+
+            df = ibkr_helper.get_price_data(
+                asset=asset,
+                quote=quote_asset,
+                timestep=ts_unit,
+                start_dt=prefetch_start,
+                end_dt=prefetch_end,
+                exchange=None,
+                include_after_hours=True,
+            )
+            if df is None or df.empty:
+                return None
+            self._fully_loaded_series.add(canonical_key)
+            return df
+
+        if asset_type == "crypto" and ts_unit in {"minute", "hour"} and canonical_key not in self._fully_loaded_series:
+            try:
+                prefetch_start = min(start_datetime, self._router.datetime_start)
+            except Exception:
+                prefetch_start = start_datetime
+            prefetch_end = self._router.datetime_end or end_dt
+
+            df = ibkr_helper.get_price_data(
+                asset=asset,
+                quote=quote_asset,
+                timestep=ts_unit,
+                start_dt=prefetch_start,
+                end_dt=prefetch_end,
+                exchange=None,
+                include_after_hours=True,
+            )
+            if df is None or df.empty:
+                return None
+            self._fully_loaded_series.add(canonical_key)
+            return df
+
         if asset_type == "crypto" and ts_unit == "day" and canonical_key not in self._fully_loaded_series:
             try:
                 lookback_days = max(7, int(length) + 5)
             except Exception:
                 lookback_days = 7
             prefetch_start = min(start_datetime, self._router.datetime_start - timedelta(days=lookback_days))
-            prefetch_end = self._router.datetime_end
+            prefetch_end = self._router.datetime_end or end_dt
 
             df = ibkr_helper.get_price_data(
                 asset=asset,
