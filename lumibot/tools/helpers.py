@@ -20,7 +20,19 @@ from ..constants import LUMIBOT_DEFAULT_PYTZ, LUMIBOT_DEFAULT_TIMEZONE
 # ============================================================================
 # PERFORMANCE CACHES - Critical for backtesting performance
 # ============================================================================
-# Trading calendar cache: saves ~0.8s on repeated calendar.schedule() calls
+# Trading calendar cache.
+#
+# NOTE: `pandas_market_calendars` schedule generation is surprisingly expensive because it
+# computes holidays/valid-days even for tiny windows. Options backtests can call
+# `get_trading_days()` thousands of times (ThetaData coverage checks, session-bound clamping,
+# order-fill utilities), and caching by the *exact* (start,end) range is not effective when
+# callers pass slightly different sliding windows.
+#
+# We cache schedules by **year** (market, year, tz) and then slice to the requested window.
+# Key: (market, year, tz_str)
+_TRADING_CALENDAR_YEAR_CACHE = {}
+
+# Slice cache (best-effort; primarily avoids repeated `.loc[]` slicing for identical windows).
 # Key: (market, start_date_str, end_date_str, tz_str)
 _TRADING_CALENDAR_CACHE = {}
 
@@ -124,7 +136,8 @@ def get_trading_days(
     timezone handling for datetime objects.
 
     PERFORMANCE OPTIMIZATION: Caches calendar schedules to avoid expensive
-    holiday calculations. Saves ~0.8s per backtest for repeated calls.
+    holiday calculations. Caches by (market, year, tz) and slices to the
+    requested window.
 
     Args:
         market (str, optional): Market identifier for which the trading days
@@ -162,6 +175,21 @@ def get_trading_days(
     else:
         end_date = ensure_tz_aware(get_lumibot_datetime(), tzinfo)
 
+    # Normalize to date-only boundaries (pandas_market_calendars schedules use a tz-naive date index).
+    try:
+        start_day = pd.Timestamp(start_date.date())
+    except Exception:
+        start_day = pd.Timestamp(pd.to_datetime(start_date).date())
+    try:
+        end_day_exclusive = pd.Timestamp(end_date.date())
+    except Exception:
+        end_day_exclusive = pd.Timestamp(pd.to_datetime(end_date).date())
+
+    # Make end_date exclusive by moving it one day earlier.
+    schedule_end_day = end_day_exclusive - pd.Timedelta(days=1)
+    if schedule_end_day < start_day:
+        return pd.DataFrame(columns=["market_open", "market_close"])
+
     # Create cache key from market, dates, and timezone
     cache_key = (
         market,
@@ -174,16 +202,35 @@ def get_trading_days(
     if cache_key in _TRADING_CALENDAR_CACHE:
         return _TRADING_CALENDAR_CACHE[cache_key].copy()
 
-    if market == "24/7":
-        cal = TwentyFourSevenCalendar(tzinfo=tzinfo)
-    else:
-        cal = mcal.get_calendar(market)
+    def _get_year_schedule(year: int) -> pd.DataFrame:
+        year_key = (market, int(year), str(tzinfo))
+        cached_year = _TRADING_CALENDAR_YEAR_CACHE.get(year_key)
+        if cached_year is not None:
+            return cached_year
 
-    # Make end_date exclusive by moving it one day earlier
-    schedule_end = pd.Timestamp(end_date) - pd.Timedelta(days=1)
-    days = cal.schedule(start_date=start_date, end_date=schedule_end, tz=tzinfo)
-    days.market_open = days.market_open.apply(format_datetime)
-    days.market_close = days.market_close.apply(format_datetime)
+        year_start = pd.Timestamp(year=year, month=1, day=1)
+        year_end = pd.Timestamp(year=year, month=12, day=31)
+        if market == "24/7":
+            cal = TwentyFourSevenCalendar(tzinfo=tzinfo)
+        else:
+            cal = mcal.get_calendar(market)
+
+        schedule = cal.schedule(start_date=year_start, end_date=year_end, tz=tzinfo)
+        schedule.market_open = schedule.market_open.apply(format_datetime)
+        schedule.market_close = schedule.market_close.apply(format_datetime)
+        _TRADING_CALENDAR_YEAR_CACHE[year_key] = schedule
+        return schedule
+
+    start_year = int(start_day.year)
+    end_year = int(schedule_end_day.year)
+    year_schedules = []
+    for year in range(start_year, end_year + 1):
+        year_schedules.append(_get_year_schedule(year))
+
+    full_schedule = year_schedules[0] if len(year_schedules) == 1 else pd.concat(year_schedules, axis=0)
+
+    # Slice to the requested window (inclusive of schedule_end_day).
+    days = full_schedule.loc[start_day:schedule_end_day].copy()
 
     # Cache the result
     _TRADING_CALENDAR_CACHE[cache_key] = days.copy()

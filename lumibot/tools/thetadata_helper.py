@@ -1,6 +1,7 @@
 # This file contains helper functions for getting data from Polygon.io
 import functools
 import hashlib
+import logging
 import json
 import os
 import random
@@ -2202,19 +2203,23 @@ def get_price_data(
     """
     import pytz  # Import at function level to avoid scope issues in nested calls
 
-    # DEBUG-LOG: Entry point for ThetaData request
-    logger.debug(
-        "[THETA][DEBUG][REQUEST][ENTRY] asset=%s quote=%s start=%s end=%s dt=%s timespan=%s datastyle=%s include_after_hours=%s return_polars=%s",
-        asset,
-        quote_asset,
-        start.isoformat() if hasattr(start, 'isoformat') else start,
-        end.isoformat() if hasattr(end, 'isoformat') else end,
-        dt.isoformat() if dt and hasattr(dt, 'isoformat') else dt,
-        timespan,
-        datastyle,
-        include_after_hours,
-        return_polars
-    )
+    # DEBUG-LOG: Entry point for ThetaData request.
+    #
+    # PERF: `get_price_data()` can be called tens of thousands of times in option-heavy backtests.
+    # Avoid eager `.isoformat()` / string building unless debug logging is actually enabled.
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            "[THETA][DEBUG][REQUEST][ENTRY] asset=%s quote=%s start=%s end=%s dt=%s timespan=%s datastyle=%s include_after_hours=%s return_polars=%s",
+            asset,
+            quote_asset,
+            start,
+            end,
+            dt,
+            timespan,
+            datastyle,
+            include_after_hours,
+            return_polars,
+        )
 
     if return_polars:
         raise ValueError("ThetaData polars output is not available; pass return_polars=False.")
@@ -4129,21 +4134,26 @@ def load_cache(cache_file, *, start=None, end=None, preserve_full_history: bool 
     When `start`/`end` are provided and `preserve_full_history=False`, we use PyArrow's dataset
     filtering to load only the requested datetime slice.
     """
-    # DEBUG-LOG: Start loading cache
-    logger.debug(
-        "[THETA][DEBUG][CACHE][LOAD_START] cache_file=%s | "
-        "exists=%s size_bytes=%d",
-        cache_file.name,
-        cache_file.exists(),
-        cache_file.stat().st_size if cache_file.exists() else 0
-    )
+    debug_enabled = logger.isEnabledFor(logging.DEBUG)
 
     if not cache_file.exists():
-        logger.debug(
-            "[THETA][DEBUG][CACHE][LOAD_MISSING] cache_file=%s | returning=None",
-            cache_file.name,
-        )
+        if debug_enabled:
+            logger.debug(
+                "[THETA][DEBUG][CACHE][LOAD_MISSING] cache_file=%s | returning=None",
+                cache_file.name,
+            )
         return None
+
+    if debug_enabled:
+        try:
+            size_bytes = cache_file.stat().st_size
+        except Exception:
+            size_bytes = 0
+        logger.debug(
+            "[THETA][DEBUG][CACHE][LOAD_START] cache_file=%s | size_bytes=%d",
+            cache_file.name,
+            size_bytes,
+        )
 
     df = None
     use_arrow_filter = False
