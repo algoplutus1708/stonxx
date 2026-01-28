@@ -1360,6 +1360,7 @@ class ThetaDataBacktestingPandas(PandasData):
                 )
 
             tail_placeholder = existing_meta.get("tail_placeholder", False)
+            tail_missing_permanent = bool(existing_meta.get("tail_missing_permanent")) if existing_meta else False
             end_ok = True
 
             # DEBUG-LOG: End validation entry
@@ -1440,6 +1441,18 @@ class ThetaDataBacktestingPandas(PandasData):
                                 end_requirement,
                                 ts_unit,
                             )
+
+            # PERF: If the cache metadata says the tail is permanently missing (placeholder coverage through
+            # the requested end), treat the end check as satisfied. Without this, backtests can thrash on
+            # every bar (STALE → REFRESH loops) trying to heal placeholder trading days that are expected
+            # to remain unavailable for this run.
+            if not end_ok and tail_missing_permanent:
+                end_ok = True
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "[THETA][DEBUG][END_VALIDATION] asset=%s | end_ok forced TRUE due to tail_missing_permanent",
+                        asset_separated.symbol if hasattr(asset_separated, "symbol") else str(asset_separated),
+                    )
 
             if (
                 require_quote_data

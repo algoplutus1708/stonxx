@@ -4309,6 +4309,11 @@ def test_tail_placeholder_at_end_marks_permanent_not_refetched(monkeypatch):
     assert meta.get("tail_missing_permanent") is True
     assert meta.get("tail_missing_date") == datetime.date(2024, 1, 5)
 
+    # Regression: once we mark the tail permanently missing, day-mode backtests must not thrash on
+    # every bar by re-invoking the downloader for the same missing end date.
+    ds._update_pandas_data(asset, quote, length=3, timestep="day", start_dt=end)
+    assert calls == ["day"]
+
 
 def test_daily_data_check_uses_utc_date_comparison():
     """
