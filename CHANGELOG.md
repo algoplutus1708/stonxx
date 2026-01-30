@@ -1,6 +1,23 @@
 # Changelog
 
-## 4.4.42 - Unreleased
+## 4.4.43 - 2026-01-30
+
+### Added
+- Charting: `Strategy.add_ohlc()` and `Strategy.get_ohlc_df()` for exporting OHLC (candlestick) indicator series.
+- Indicators: `plot_indicators()` now supports OHLC series in `*_indicators.html` and exports `type=ohlc` rows in `*_indicators.csv`.
+- Docs: add seconds-level backtesting guidance and expand seconds-mode notes.
+
+### Changed
+- Charting: `Strategy.add_line()` now returns the appended dict (consistent with other chart helpers).
+- Docs: recommend `add_ohlc()` for plotting price bars and `add_line()` for single-value indicators.
+
+### Fixed
+- Backtest executor safe-sleep overload now applies only in backtests and uses real sleep outside backtesting.
+
+## 4.4.42 - 2026-01-30
+
+**NOTE:** The PyPI `lumibot==4.4.42` artifact was published from an older commit and does **not** include the changes
+listed below. Upgrade to `lumibot==4.4.43`.
 
 ### Added
 - Charting: `Strategy.add_ohlc()` and `Strategy.get_ohlc_df()` for exporting OHLC (candlestick) indicator series.

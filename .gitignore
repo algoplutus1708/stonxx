@@ -86,3 +86,6 @@ backtest_runs/
 context*.json
 !context7.json
 /tests/backtest/_manual_runs
+
+# Local scratch / diagnostics (never commit)
+tmp/
