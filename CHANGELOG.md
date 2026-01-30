@@ -1,6 +1,14 @@
 # Changelog
 
-## 4.4.42 - Unreleased
+## 4.4.43 - Unreleased
+
+### Added
+
+### Changed
+
+### Fixed
+
+## 4.4.42 - 2026-01-30
 
 ### Added
 - Charting: `Strategy.add_ohlc()` and `Strategy.get_ohlc_df()` for exporting OHLC (candlestick) indicator series.
