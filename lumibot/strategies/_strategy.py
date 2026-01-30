@@ -432,6 +432,9 @@ class _Strategy:
         # Initialize the chart lines list
         self._chart_lines_list = []
 
+        # Initialize the chart OHLC list
+        self._chart_ohlc_list = []
+
         # Hold the asset objects for strings for stocks only.
         self._asset_mapping = dict()
 
@@ -2267,6 +2270,8 @@ class _Strategy:
         )
         # Create chart lines dataframe
         chart_lines_df = pd.DataFrame(self._chart_lines_list)
+        # Create chart OHLC dataframe
+        chart_ohlc_df = pd.DataFrame(getattr(self, "_chart_ohlc_list", []))
         # Create chart markers dataframe
         chart_markers_df = pd.DataFrame(self._chart_markers_list)
 
@@ -2276,6 +2281,7 @@ class _Strategy:
                 indicators_file,
                 chart_markers_df,
                 chart_lines_df,
+                chart_ohlc_df,
                 f"{self._log_strat_name()}Strategy Indicators",
                 show_indicators=show_indicators,
             )
