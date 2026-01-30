@@ -1,5 +1,11 @@
 # Changelog
 
+## 4.4.45 - 2026-01-30
+
+### Fixed
+- Release: include `lumibot/resources/ThetaTerminal.jar` in the PyPI wheel/sdist (required by BotManager and ThetaData setup).
+- Backtesting: `BacktestingBroker.process_pending_orders()` now accepts both iterable order buckets and legacy buckets that expose `get_list()`.
+
 ## 4.4.44 - 2026-01-30
 
 ### Added

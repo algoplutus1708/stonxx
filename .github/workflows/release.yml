@@ -102,11 +102,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: dist
+          path: dist
 
-      - name: Publish to PyPI (Trusted Publisher)
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          # Prefer API token publish. This avoids Trusted Publisher config drift.
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

@@ -1612,15 +1612,21 @@ class BacktestingBroker(Broker):
         if not unprocessed_bucket and not new_bucket:
             return
 
+        def _iter_bucket(bucket):
+            if not bucket:
+                return ()
+            get_list = getattr(bucket, "get_list", None)
+            if callable(get_list):
+                return get_list()
+            return bucket
+
         pending_orders: list[Order] = []
-        if unprocessed_bucket:
-            for order in unprocessed_bucket:
-                if getattr(order, "strategy", None) == strategy_name:
-                    pending_orders.append(order)
-        if new_bucket:
-            for order in new_bucket:
-                if getattr(order, "strategy", None) == strategy_name:
-                    pending_orders.append(order)
+        for order in _iter_bucket(unprocessed_bucket):
+            if getattr(order, "strategy", None) == strategy_name:
+                pending_orders.append(order)
+        for order in _iter_bucket(new_bucket):
+            if getattr(order, "strategy", None) == strategy_name:
+                pending_orders.append(order)
 
         if not pending_orders:
             return

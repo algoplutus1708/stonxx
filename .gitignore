@@ -35,7 +35,8 @@ test_bot.py
 .env.*.local
 lumi_tradier
 lumiwealth_tradier
-ThetaTerminal.jar
+/ThetaTerminal.jar
+!lumibot/resources/ThetaTerminal.jar
 pytest.ini
 
 # Pypi deployment
