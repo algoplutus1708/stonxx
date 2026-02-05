@@ -58,6 +58,12 @@ Every release PR should include:
    - `git switch dev && git pull --ff-only`
    - `git switch version/X.Y.Z && git pull --ff-only`
    - Confirm clean tree: `git status --porcelain=v1` (must be empty)
+   - **IMPORTANT (multi-agent safety):** ensure *everyone* working on `version/X.Y.Z` has pushed their commits. Avoid releasing with local-only work in someone else’s clone.
+
+0.5) **Bring `dev` into the version branch (avoid drift)**
+   - Merge `dev` into `version/X.Y.Z` and push the merge commit.
+   - Re-check GitHub CI on the version PR after this merge.
+   - Rationale: other people may have merged changes to `dev` while the version branch was in flight; this step ensures the release includes those changes.
 
 1) **Verify tests**
    - Ensure required CI checks are green (unit + backtest + acceptance gates as applicable).
@@ -84,13 +90,13 @@ Every release PR should include:
      - If it’s wrong, fix it by bumping forward (never downgrade).
    - Ensure `CHANGELOG.md` has `## X.Y.Z - YYYY-MM-DD` and includes the full range of changes.
    - Commit with message: `deploy X.Y.Z` (this is the deploy marker).
-   - The release tag must point at this commit.
+   - Merge the version PR into `dev` (this makes `dev` the source of truth for everything that shipped).
 
 4) **Tag + publish (preferred path)**
-   - Create an annotated tag `vX.Y.Z` pointing at the deploy-marker commit.
+   - Create an annotated tag `vX.Y.Z` pointing at the *merge commit on `dev`* (or the deploy-marker commit if it was fast-forwarded).
    - Push the tag to GitHub.
    - Let `.github/workflows/release.yml` run:
-     - validates tag ↔ `setup.py` ↔ `CHANGELOG.md`,
+     - validates tag ↔ `setup.py`,
      - runs `pytest -m "not apitest and not downloader"`,
      - builds + publishes to PyPI,
      - creates the GitHub Release.
@@ -155,6 +161,9 @@ Every release PR should include:
   - Fix for next time: **tag first, publish via the workflow**.
   - If you must backfill after a manual publish: either accept a failed publish job and create the GitHub Release
     manually, or add a dedicated “GitHub Release only” workflow (future improvement).
+- **Releasing from a version branch without merging back to `dev`** causes missing commits in the next version branch.
+  - Symptom: `version/X.Y.(Z+1)` is missing changes that “definitely shipped” in `version/X.Y.Z`.
+  - Fix: treat “merge to `dev`” as part of the release. Prefer tagging the `dev` merge commit (Step 4).
 - **Perf claims without evidence** cause churn.
   - If a PR claims speedups, it must include: the exact benchmark command(s), measured before/after numbers, and
     profiler artifacts (e.g., YAPPI CSV path) or it doesn’t ship as “performance work”.
