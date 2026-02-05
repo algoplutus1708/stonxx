@@ -123,7 +123,7 @@ class DataSource(ABC):
 
     @abstractmethod
     def get_historical_prices(
-        self, asset, length, timestep="", timeshift=None, quote=None, exchange=None, include_after_hours=True, return_polars=False
+        self, asset, length, timestep="", timeshift=None, quote=None, exchange=None, include_after_hours=True, **kwargs
     ) -> Bars:
         """
         Get bars for a given asset, going back in time from now, getting length number of bars by timestep.
@@ -153,17 +153,15 @@ class DataSource(ABC):
             The exchange to get the bars for.
         include_after_hours : bool
             Whether to include after hours data.
-        return_polars : bool
-            If True, returns Polars DataFrame via bars.df (2-3x faster for indicator calculations).
-            All data sources support this parameter. The Bars class automatically converts
-            pandas→polars when needed. Default is False for backward compatibility (returns pandas).
+        return_polars : bool (deprecated)
+            Deprecated. Do not use in strategy code. This keyword will be removed in a future release.
+            Strategy logic should use pandas operations on ``bars.pandas_df`` and should not depend on
+            the underlying DataFrame backend.
 
         Returns
         -------
         Bars
-            The bars for the asset. Access via bars.df which returns:
-            - Polars DataFrame if return_polars=True (recommended for performance)
-            - Pandas DataFrame if return_polars=False (default, backward compatible)
+            The bars for the asset. For strategy code, prefer ``bars.pandas_df`` for a pandas DataFrame.
         """
         pass
 

@@ -318,7 +318,7 @@ class DataBentoDataBacktestingPolars(PolarsData):
 
             # OPTIMIZATION: For DataPolars, check polars_df directly without converting to pandas
             if isinstance(asset_data, DataPolars):
-                # Use polars DataFrame directly to avoid conversion overhead
+                # Avoid conversion overhead by reading DataPolars.polars_df directly
                 polars_df = asset_data.polars_df
                 if polars_df.height > 0:
                     # Get datetime bounds from polars DataFrame

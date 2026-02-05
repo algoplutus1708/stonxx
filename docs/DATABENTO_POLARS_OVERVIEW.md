@@ -7,9 +7,11 @@ Overview
 - The pandas classes remain available (`DataBentoDataPandas`, `DataBentoDataBacktestingPandas`) for opt-in legacy usage.  
 - Parity and cache regression tests ensure polars results match pandas output row-for-row while delivering the intended speed-up.
 
+**Deprecated (strategy surface):** The `return_polars` keyword is deprecated and will be removed. Strategy code should remain pandas-only; use `bars.pandas_df` and pandas operations.
+
 How To Enable
 -------------
-- Strategies receive Polars-backed `Bars` by default; call `self.get_historical_prices(..., return_polars=False)` to force pandas.  
+- Polars is an internal optimization; strategies should not depend on the DataFrame backend.  
 - Backtests can still reference the explicit classes when needed:  
   - `DataBentoDataBacktesting` → polars (default)  
   - `DataBentoDataBacktestingPandas` → pandas fallback  
@@ -33,7 +35,7 @@ Performance Notes
 -----------------
 - Polars caching keeps a rolling window (~5k bars) per asset and trims automatically; pandas retains its on-disk cache but remains opt-in.  
 - Aggregated timeframe bars reuse an LRU cache so repeated resample requests stay in memory without recomputation.  
-- Conversion guardrails in `Bars` warn when polars payloads are coerced back to pandas, helping strategies stay on the fast path.  
+- Conversion guardrails in `Bars` may warn when internal polars payloads are converted to pandas; no action is required for strategy correctness.  
 - Benchmark command: ``PYTHONPATH=. python3 tests/performance/profile_databento_comprehensive.py --mode both``  
   - Cold cache (after `rm -rf ~/Library/Caches/lumibot/1.0/databento*`): pandas **25.70 s**, polars **19.85 s** → **1.29×** speed-up.  
   - Warm cache (immediately rerun, no cache clear): pandas **10.42 s**, polars **3.82 s** → **2.73×** speed-up.  

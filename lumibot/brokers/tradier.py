@@ -722,7 +722,7 @@ class Tradier(Broker):
         try:
             df = self.tradier.orders.get_orders()
         except Exception as e:
-            logger.error(f"Error pulling orders from Tradier: {e}")
+            logger.info(f"Error pulling orders from Tradier: {e}", exc_info=True)
             return []
 
         # Check if the dataframe is empty or None

@@ -46,16 +46,12 @@ class PolarsConversionTracker:
         if not self._first_warning_shown:
             logger.warning(
                 "\n" + "="*70 + "\n"
-                "PERFORMANCE TIP: DataFrame Conversion Detected\n" + 
+                "DATAFRAME BACKEND NOTE\n" +
                 "="*70 + "\n"
-                "Polars DataFrames are being converted to Pandas, which adds overhead.\n"
+                "Some data sources use Polars internally and Lumibot converts to pandas for strategy compatibility.\n"
                 "\n"
-                "For ~2-5x faster backtesting, modify your strategy:\n"
-                "\n"
-                "  Change: bars = self.get_historical_prices(asset, length, timestep)\n"
-                "      To: bars = self.get_historical_prices(asset, length, timestep, return_polars=True)\n"
-                "\n"
-                "Note: When using return_polars=True, use Polars DataFrame methods instead of Pandas.\n" +
+                "Strategy code should remain pandas-only: use bars.pandas_df and pandas operations.\n"
+                "Note: `return_polars` is deprecated and will be removed.\n" +
                 "="*70
             )
             self._first_warning_shown = True

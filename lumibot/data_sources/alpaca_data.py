@@ -1144,5 +1144,5 @@ class AlpacaData(DataSource):
                 'rho': greeks_obj.rho,
             }
         except Exception as e:
-            logger.error(f"Error fetching greeks from Alpaca Data API: {e}")
+            logger.info(f"Error fetching greeks from Alpaca Data API: {e}", exc_info=True)
             return {}

@@ -683,7 +683,7 @@ class _Strategy:
             try:
                 broker_balances = self.broker._get_balances_at_broker(self._quote_asset, self)
             except Exception as e:
-                self.logger.error(f"Error getting broker balances: {e}")
+                self.logger.info(f"Error getting broker balances: {e}", exc_info=True)
                 return False
 
             if broker_balances is not None:
@@ -698,7 +698,7 @@ class _Strategy:
                 return True
 
             else:
-                self.logger.error(
+                self.logger.warning(
                     "Unable to get balances (cash, portfolio value, etc) from broker. "
                     "Please check your broker and your broker configuration."
                 )
@@ -2474,16 +2474,13 @@ class _Strategy:
             self.logger.debug(f"Cloud response: Status={response.status_code}, Headers={dict(response.headers)}")
 
         except requests.exceptions.ConnectionError as e:
-            self.logger.warning(f"Connection error when sending to cloud: {e}")
-            self.logger.debug(traceback.format_exc())
+            self.logger.info(f"Connection error when sending to cloud: {e}", exc_info=True)
             return False
         except requests.exceptions.Timeout as e:
-            self.logger.warning(f"Timeout error when sending to cloud: {e}")
-            self.logger.debug(traceback.format_exc())
+            self.logger.info(f"Timeout error when sending to cloud: {e}", exc_info=True)
             return False
         except requests.exceptions.RequestException as e:
-            self.logger.warning(f"Request error when sending to cloud: {e}")
-            self.logger.debug(traceback.format_exc())
+            self.logger.info(f"Request error when sending to cloud: {e}", exc_info=True)
             return False
         except Exception as e:
             self.logger.error(f"Unexpected error when sending to cloud: {e}")

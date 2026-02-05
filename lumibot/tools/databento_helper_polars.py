@@ -1,5 +1,5 @@
 # This file contains helper functions for getting data from DataBento - POLARS VERSION
-# This is a FULL COPY of databento_helper.py that will be incrementally optimized to use polars
+# This is a FULL COPY of databento_helper.py that will be incrementally optimized to leverage polars
 # for filtering operations while maintaining pandas compatibility at the boundaries.
 
 import os
@@ -623,7 +623,7 @@ def _filter_front_month_rows_polars(
     df_polars = pl.from_pandas(df_reset)
 
     # Build filter expression using polars (matching pandas approach)
-    # Keep timezone throughout, but use polars datetime literals for proper comparison
+    # Keep timezone throughout; polars datetime literals are required for proper comparison
     filter_expr = pl.lit(False)
 
     # Get the datetime column dtype to match precision and timezone
@@ -898,8 +898,8 @@ def get_price_data_from_databento(
     """
     Get historical price data from DataBento for the given asset.
 
-    POLARS VERSION: Returns polars DataFrames by default for optimal performance.
-    Set return_polars=False to get pandas DataFrames for compatibility.
+    POLARS VERSION: Returns polars DataFrames by default.
+    `return_polars` is an internal kwarg; strategy code should not use it (deprecated on Strategy.get_historical_prices).
     """
     if not DATABENTO_AVAILABLE:
         logger.error("DataBento package not available. Please install with: pip install databento")
@@ -1036,7 +1036,7 @@ def get_price_data_from_databento(
     )
 
     if schedule:
-        # Use polars filtering for performance
+        # Filtering uses a polars pipeline for performance
         combined = _filter_front_month_rows_polars(combined, schedule)
 
     if "symbol" in combined.columns:
