@@ -44,7 +44,12 @@ _PROGRESS_LAST_PRINT_FALLBACK: dict[tuple[int, str], tuple[float, str]] = {}
 def _format_datetime_to_tz(dtm, tzinfo: pytz.BaseTzInfo):
     if pd.isna(dtm):
         return dtm
-    return pd.Timestamp(dtm).tz_convert(tzinfo).to_pydatetime()
+    ts = pd.Timestamp(dtm)
+    if ts.tz is None:
+        ts = ts.tz_localize(tzinfo)
+    else:
+        ts = ts.tz_convert(tzinfo)
+    return ts.to_pydatetime()
 
 
 @lru_cache(maxsize=256)
