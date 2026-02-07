@@ -73,6 +73,21 @@ Publishing is **tag-driven** via `.github/workflows/release.yml`.
   - If it’s missing, the “Publish to PyPI” step will fail.
 - Optional: configure the GitHub environment `pypi` to require approvals (human gate).
 
+0) **Preflight: “no-loss” + security/hygiene sweep**
+   - Ensure there is **no local-only work** (multi-agent safety):
+     - `git status --porcelain=v1` (must be empty)
+     - `git log --oneline origin/version/X.Y.Z..HEAD` (must be empty)
+     - If you see unexpected local changes/commits (even if you didn’t make them), **do not proceed** until you either:
+       - review the diff, commit, and push, or
+       - intentionally discard/revert them (manually; avoid destructive git commands).
+   - Review what will ship (and look for “bullshit files”):
+     - `git diff --name-status origin/dev..HEAD`
+     - `git diff --stat origin/dev..HEAD`
+     - Confirm there are no: `*.env`, `*.log`, `dist/`, `tmp/`, large stray binaries, or accidental artifacts.
+   - Quick secret sanity checks (best-effort):
+     - Ensure `.env*` stays untracked (except examples like `.env.local.example`).
+     - Scan changed docs/scripts for tokens/keys if you touched any credentials-related files.
+
 0) **Sync your local repo**
    - `git switch dev && git pull --ff-only`
    - `git switch version/X.Y.Z && git pull --ff-only`
