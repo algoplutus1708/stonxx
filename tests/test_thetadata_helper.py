@@ -1942,7 +1942,7 @@ def test_build_historical_chain_live_option_list(theta_terminal_cleanup):
 # - Otherwise it uses direct HTTP to a locally-managed ThetaTerminal.
 # The test below is skipped as error_type handling has been removed from get_request.
 @pytest.mark.skip(reason="Obsolete: error_type handling removed from get_request - queue system handles errors differently")
-@patch('lumibot.tools.thetadata_queue_client.queue_request')
+@patch('lumibot.tools.data_downloader_queue_client.queue_request')
 def test_get_request_error_in_json(mock_queue_request):
     """Test that get_request raises ValueError when response contains error_type."""
     # Mock queue_request to return a response with error_type
@@ -1965,7 +1965,7 @@ def test_get_request_error_in_json(mock_queue_request):
     assert mock_queue_request.called
 
 
-@patch('lumibot.tools.thetadata_queue_client.queue_request')
+@patch('lumibot.tools.data_downloader_queue_client.queue_request')
 def test_get_request_exception_handling(mock_queue_request, monkeypatch):
     """Test that downloader-mode get_request propagates exceptions from queue_request."""
     monkeypatch.setenv("DATADOWNLOADER_BASE_URL", "http://test-server:8080")
@@ -1985,7 +1985,7 @@ def test_get_request_exception_handling(mock_queue_request, monkeypatch):
     assert mock_queue_request.called
 
 
-@patch("lumibot.tools.thetadata_queue_client.queue_request")
+@patch("lumibot.tools.data_downloader_queue_client.queue_request")
 def test_get_request_coerces_v3_row_style_payload(mock_queue_request, monkeypatch):
     """Downloader-mode get_request must handle v3 row-style payloads (no header/format).
 
@@ -2034,7 +2034,7 @@ def test_get_request_coerces_v3_row_style_payload(mock_queue_request, monkeypatc
     assert result["response"][0][timestamp_idx] == "2025-04-11T09:30:00"
 
 
-@patch("lumibot.tools.thetadata_queue_client.queue_request")
+@patch("lumibot.tools.data_downloader_queue_client.queue_request")
 def test_get_historical_data_accepts_v3_row_style_payload(mock_queue_request, monkeypatch):
     """End-to-end: v3 row-style payloads must flow into a datetime-indexed DataFrame."""
     import datetime as dt
@@ -2075,7 +2075,7 @@ def test_get_historical_data_accepts_v3_row_style_payload(mock_queue_request, mo
     assert "open" in out.columns
 
 
-@patch("lumibot.tools.thetadata_queue_client.queue_request")
+@patch("lumibot.tools.data_downloader_queue_client.queue_request")
 def test_get_historical_data_flattens_v3_nested_option_quote_payload(mock_queue_request, monkeypatch):
     """Theta v3 option quote history can return a nested response: [{contract, data:[...]}]."""
     import datetime as dt
@@ -2164,7 +2164,7 @@ def test_build_historical_chain_accepts_v3_row_style_strikes(monkeypatch):
             )
 
     monkeypatch.setattr(
-        "lumibot.tools.thetadata_queue_client.get_queue_client",
+        "lumibot.tools.data_downloader_queue_client.get_queue_client",
         lambda: FakeQueueClient(),
     )
 
@@ -3118,7 +3118,7 @@ def test_build_historical_chain_parses_quote_payload(monkeypatch):
 
     # build_historical_chain() pipelines strike-list fetches through the queue client.
     # Patch the queue client so the test remains hermetic.
-    from lumibot.tools import thetadata_queue_client
+    from lumibot.tools import data_downloader_queue_client
 
     class FakeQueueClient:
         max_concurrent = 8
@@ -3141,7 +3141,7 @@ def test_build_historical_chain_parses_quote_payload(monkeypatch):
         def wait_for_result(self, request_id, timeout=None, poll_interval=None):
             return self._results[request_id]
 
-    monkeypatch.setattr(thetadata_queue_client, "get_queue_client", lambda *args, **kwargs: FakeQueueClient())
+    monkeypatch.setattr(data_downloader_queue_client, "get_queue_client", lambda *args, **kwargs: FakeQueueClient())
 
     result = thetadata_helper.build_historical_chain(asset, as_of_date)
 
@@ -3170,7 +3170,7 @@ def test_build_historical_chain_updates_download_status(monkeypatch):
 
     monkeypatch.setattr(thetadata_helper, "get_request", fake_get_request)
 
-    from lumibot.tools import thetadata_queue_client
+    from lumibot.tools import data_downloader_queue_client
 
     class FakeQueueClient:
         max_concurrent = 8
@@ -3193,7 +3193,7 @@ def test_build_historical_chain_updates_download_status(monkeypatch):
         def wait_for_result(self, request_id, timeout=None, poll_interval=None):
             return self._results[request_id]
 
-    monkeypatch.setattr(thetadata_queue_client, "get_queue_client", lambda *args, **kwargs: FakeQueueClient())
+    monkeypatch.setattr(data_downloader_queue_client, "get_queue_client", lambda *args, **kwargs: FakeQueueClient())
 
     status_updates = []
     progress_updates = []
@@ -3246,7 +3246,7 @@ def test_build_historical_chain_uses_v3_option_list_params(monkeypatch):
 
     monkeypatch.setattr(thetadata_helper, "get_request", fake_get_request)
 
-    from lumibot.tools import thetadata_queue_client
+    from lumibot.tools import data_downloader_queue_client
 
     class FakeQueueClient:
         max_concurrent = 8
@@ -3268,7 +3268,7 @@ def test_build_historical_chain_uses_v3_option_list_params(monkeypatch):
         def wait_for_result(self, request_id, timeout=None, poll_interval=None):
             return self._results[request_id]
 
-    monkeypatch.setattr(thetadata_queue_client, "get_queue_client", lambda *args, **kwargs: FakeQueueClient())
+    monkeypatch.setattr(data_downloader_queue_client, "get_queue_client", lambda *args, **kwargs: FakeQueueClient())
 
     result = thetadata_helper.build_historical_chain(asset, as_of_date)
     assert result is not None
@@ -3297,7 +3297,7 @@ def test_build_historical_chain_returns_none_when_no_dates(monkeypatch, caplog):
 
     monkeypatch.setattr(thetadata_helper, "get_request", fake_get_request)
 
-    from lumibot.tools import thetadata_queue_client
+    from lumibot.tools import data_downloader_queue_client
 
     class FakeQueueClient:
         max_concurrent = 8
@@ -3318,7 +3318,7 @@ def test_build_historical_chain_returns_none_when_no_dates(monkeypatch, caplog):
         def wait_for_result(self, request_id, timeout=None, poll_interval=None):
             return self._results[request_id]
 
-    monkeypatch.setattr(thetadata_queue_client, "get_queue_client", lambda *args, **kwargs: FakeQueueClient())
+    monkeypatch.setattr(data_downloader_queue_client, "get_queue_client", lambda *args, **kwargs: FakeQueueClient())
 
     result = thetadata_helper.build_historical_chain(asset, as_of_date)
 

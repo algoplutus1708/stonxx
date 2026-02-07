@@ -5069,7 +5069,7 @@ def get_request(
                 "Set DATADOWNLOADER_API_KEY or unset DATADOWNLOADER_BASE_URL to use local ThetaTerminal."
             )
 
-        from lumibot.tools.thetadata_queue_client import queue_request
+        from lumibot.tools.data_downloader_queue_client import queue_request
 
         logger.debug("[DOWNLOADER][QUEUE] Making request via queue: %s params=%s", url, querystring)
 
@@ -6482,7 +6482,7 @@ def build_historical_chain(
 
     # Use the queue client's ability to keep multiple requests in-flight to dramatically speed up
     # chain building for underlyings with dense expiration schedules (e.g., SPXW daily expirations).
-    from lumibot.tools.thetadata_queue_client import get_queue_client
+    from lumibot.tools.data_downloader_queue_client import get_queue_client
 
     queue_client = get_queue_client()
     strikes_path = OPTION_LIST_ENDPOINTS["strikes"].lstrip("/")

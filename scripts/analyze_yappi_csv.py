@@ -52,7 +52,7 @@ BUCKETS: List[Bucket] = [
         name="network_io",
         patterns=_compile(
             [
-                r"lumibot/.*/thetadata_queue_client\.py",
+                r"lumibot/.*/data_downloader_queue_client\.py",
                 r"requests/.*\.py",
                 r"urllib3/.*\.py",
             ]

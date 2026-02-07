@@ -97,3 +97,15 @@ def test_nymex_micro_crude_oil_rolls_before_last_trade_date():
 
     year, month = futures_roll.determine_contract_year_month(asset_symbol, _dt(2025, 2, 12, 0, 6))
     assert (year, month) == (2025, 4)
+
+
+def test_cme_crypto_futures_roll_uses_last_friday_anchor():
+    # MBT (Micro Bitcoin) expiries are last-Friday-trading-day; roll occurs 8 business days before.
+    # April 2024 last Friday is 2024-04-26 -> roll trigger 2024-04-16 (plus a +5 minute shift).
+    asset_symbol = "MBT"
+
+    year, month = futures_roll.determine_contract_year_month(asset_symbol, _dt(2024, 4, 15))
+    assert (year, month) == (2024, 4)
+
+    year, month = futures_roll.determine_contract_year_month(asset_symbol, _dt(2024, 4, 16, 0, 6))
+    assert (year, month) == (2024, 5)

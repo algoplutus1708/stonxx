@@ -43,7 +43,7 @@ def _require_downloader() -> tuple[str, str, str]:
 def _wrap_queue_request(monkeypatch) -> list[str]:
     """Capture urls passed to queue_request (IBKR + Theta both use this)."""
     import lumibot.tools.ibkr_helper as ibkr_helper
-    import lumibot.tools.thetadata_queue_client as queue
+    import lumibot.tools.data_downloader_queue_client as queue
 
     calls: list[str] = []
     original = queue.queue_request

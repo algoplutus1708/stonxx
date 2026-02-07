@@ -468,8 +468,52 @@ class _Strategy:
             # Set initial positions if live trading.
             self.broker._set_initial_positions(self)
         else:
-            # If budget is not provided to run_backtest, default it
+            # Determine initial cash ("budget") for backtesting.
+            # NOTE: In BotSpot/BotManager runs we often inject settings via environment variables.
+            # If BACKTESTING_BUDGET is provided, prefer it (even if strategy code passed an explicit budget)
+            # so the starting cash can be controlled per-run without forcing a code change.
             effective_budget = budget
+            env_budget_raw = os.environ.get("BACKTESTING_BUDGET")
+            if env_budget_raw is not None:
+                trimmed = env_budget_raw.strip()
+                if trimmed and trimmed.lower() not in ("none", "null"):
+                    normalized = (
+                        trimmed.replace("$", "")
+                        .replace(",", "")
+                        .replace("_", "")
+                        .strip()
+                    )
+                    multiplier = 1.0
+                    suffix = normalized[-1:].lower()
+                    if suffix in ("k", "m", "b") and len(normalized) > 1:
+                        normalized = normalized[:-1].strip()
+                        if suffix == "k":
+                            multiplier = 1_000.0
+                        elif suffix == "m":
+                            multiplier = 1_000_000.0
+                        elif suffix == "b":
+                            multiplier = 1_000_000_000.0
+                    try:
+                        parsed = float(normalized) * multiplier
+                        if not math.isfinite(parsed) or parsed <= 0:
+                            raise ValueError("budget must be a finite positive number")
+                        effective_budget = parsed
+                        self.logger.info(
+                            colored(
+                                f"Using BACKTESTING_BUDGET={effective_budget:g} as starting backtest cash",
+                                "green",
+                            )
+                        )
+                    except Exception:
+                        self.logger.warning(
+                            colored(
+                                f"Invalid BACKTESTING_BUDGET value: {env_budget_raw!r}. "
+                                "Expected a positive number like 500, 5000, 5k, 1_000_000, or $10,000. "
+                                "Ignoring and falling back to budget/default.",
+                                "yellow",
+                            )
+                        )
+
             if effective_budget is None:
                 effective_budget = 100000  # Default budget
 

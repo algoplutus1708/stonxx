@@ -55,7 +55,7 @@ def test_build_historical_chain_applies_default_max_days_out(monkeypatch):
     fake_queue = _FakeQueueClient()
 
     monkeypatch.setattr(
-        "lumibot.tools.thetadata_queue_client.get_queue_client",
+        "lumibot.tools.data_downloader_queue_client.get_queue_client",
         lambda: fake_queue,
     )
 
@@ -87,7 +87,7 @@ def test_build_historical_chain_applies_default_max_days_out(monkeypatch):
 def test_build_historical_chain_respects_explicit_max_hint(monkeypatch):
     fake_queue = _FakeQueueClient()
     monkeypatch.setattr(
-        "lumibot.tools.thetadata_queue_client.get_queue_client",
+        "lumibot.tools.data_downloader_queue_client.get_queue_client",
         lambda: fake_queue,
     )
 

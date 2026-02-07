@@ -155,7 +155,7 @@ class ThetaDataBacktestingPandas(PandasData):
         # even when multiple backtests are running concurrently.
         import uuid
 
-        from lumibot.tools.thetadata_queue_client import set_queue_client_id
+        from lumibot.tools.data_downloader_queue_client import set_queue_client_id
 
         unique_id = uuid.uuid4().hex[:8]
         strategy_name = kwargs.get('name', 'Backtest')

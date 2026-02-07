@@ -3957,7 +3957,7 @@ class Strategy(_Strategy):
             pass
 
         try:
-            from lumibot.tools.thetadata_queue_client import queue_telemetry_snapshot
+            from lumibot.tools.data_downloader_queue_client import queue_telemetry_snapshot
 
             settings["thetadata_queue_telemetry"] = queue_telemetry_snapshot()
         except Exception:

@@ -71,6 +71,53 @@ ROLL_RULES.update(
             anchor="mcl_last_trade",
             contract_months=_MONTHLY_CONTRACT_MONTHS,
         ),
+        # CME Crypto futures (IBKR roots). These expire on the last Friday trading day of the
+        # contract month (holiday-adjusted; e.g. Good Friday -> Thursday).
+        #
+        # Note: The roll offset is a synthetic convention for cont-futures stitching; 8 business
+        # days matches our equity-index cont-futures roll behavior and keeps exposure away from
+        # the final week when liquidity can fragment.
+        "BRR": RollRule(
+            offset_business_days=8,
+            anchor="last_friday",
+            contract_months=_MONTHLY_CONTRACT_MONTHS,
+        ),
+        "MBT": RollRule(
+            offset_business_days=8,
+            anchor="last_friday",
+            contract_months=_MONTHLY_CONTRACT_MONTHS,
+        ),
+        "ETHUSDRR": RollRule(
+            offset_business_days=8,
+            anchor="last_friday",
+            contract_months=_MONTHLY_CONTRACT_MONTHS,
+        ),
+        "MET": RollRule(
+            offset_business_days=8,
+            anchor="last_friday",
+            contract_months=_MONTHLY_CONTRACT_MONTHS,
+        ),
+        # EUR variants (CME crypto reference rate futures).
+        "BTCEURRR": RollRule(
+            offset_business_days=8,
+            anchor="last_friday",
+            contract_months=_MONTHLY_CONTRACT_MONTHS,
+        ),
+        "EBMEUR": RollRule(
+            offset_business_days=8,
+            anchor="last_friday",
+            contract_months=_MONTHLY_CONTRACT_MONTHS,
+        ),
+        "EEM": RollRule(
+            offset_business_days=8,
+            anchor="last_friday",
+            contract_months=_MONTHLY_CONTRACT_MONTHS,
+        ),
+        "ETHEURRR": RollRule(
+            offset_business_days=8,
+            anchor="last_friday",
+            contract_months=_MONTHLY_CONTRACT_MONTHS,
+        ),
     }
 )
 
@@ -185,6 +232,26 @@ def _prior_month_25th_minus_trading_days(year: int, month: int, trading_days_bef
         target = valid[-offset].date()
     return _to_timezone(datetime.combine(target, datetime.min.time()))
 
+def _last_friday_trading_day(year: int, month: int) -> datetime:
+    """Last Friday *trading* day of the given month (holiday-adjusted).
+
+    Several CME crypto futures (IBKR roots like BRR/MBT/ETHUSDRR/MET) expire on the last Friday
+    trading day of the month. If that Friday is a holiday (e.g., Good Friday), use the prior
+    futures trading day.
+    """
+    if month == 12:
+        next_year, next_month = year + 1, 1
+    else:
+        next_year, next_month = year, month + 1
+
+    last_day = date(next_year, next_month, 1) - timedelta(days=1)
+    cursor = last_day
+    while cursor.weekday() != 4:  # Friday
+        cursor -= timedelta(days=1)
+
+    cursor = _previous_us_futures_trading_day(cursor)
+    return _to_timezone(datetime.combine(cursor, datetime.min.time()))
+
 
 def _cl_last_trade_date(year: int, month: int) -> datetime:
     """WTI crude oil last trade date for the contract delivery month (CL/MCL).
@@ -206,6 +273,8 @@ def _mcl_last_trade_date(year: int, month: int) -> datetime:
 def _calculate_roll_trigger(year: int, month: int, rule: RollRule) -> datetime:
     if rule.anchor == "third_friday":
         anchor = _third_friday(year, month)
+    elif rule.anchor == "last_friday":
+        anchor = _last_friday_trading_day(year, month)
     elif rule.anchor == "third_last_business_day":
         anchor = _third_last_business_day(year, month)
     elif rule.anchor == "cl_last_trade":

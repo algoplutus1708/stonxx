@@ -1,9 +1,12 @@
 Interactive Brokers (REST) Backtesting
 ======================================
 
-LumiBot supports backtesting with **Interactive Brokers Client Portal (REST)**.
+LumiBot supports backtesting with **Interactive Brokers data providers**.
 
-The primary data path uses Client Portal (REST) via the LumiBot Data Downloader (it does **not** require the legacy TWS API for bar history).
+The primary data path uses Client Portal (REST) via the LumiBot Data Downloader.
+
+Note: second-level and tick-level history are not yet a fully-supported end-to-end workflow in the open-source
+distribution. (Some internal deployments may have additional adapters behind the same external ``/ibkr/*`` contract.)
 
 For **expired futures** contract discovery (conids), IBKR Client Portal cannot reliably discover old contracts. In that
 case, LumiBot relies on an **offline conid registry** (populated via a one-time TWS backfill in internal deployments).
@@ -29,7 +32,7 @@ Select IBKR as the backtesting data source:
 Supported Data
 --------------
 
-- **Futures**: US futures across CME/CBOT/COMEX/NYMEX via IBKR historical endpoints (1-minute+ bars).
+- **Futures**: US futures across CME/CBOT/COMEX/NYMEX via IBKR historical endpoints (minute/hour/day bars).
 - **Spot crypto**: IBKR crypto bars (availability depends on region and IBKR product support).
 
 Futures Exchange Routing (auto + override)

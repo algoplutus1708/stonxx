@@ -9,7 +9,7 @@ from lumibot.data_sources import PandasData
 from lumibot.entities import Asset, Data
 import lumibot.tools.ibkr_helper as ibkr_helper
 from lumibot.tools.helpers import parse_timestep_qty_and_unit
-from lumibot.tools.thetadata_queue_client import set_queue_client_id
+from lumibot.tools.data_downloader_queue_client import set_queue_client_id
 
 logger = logging.getLogger(__name__)
 

@@ -1,4 +1,4 @@
-"""Queue client for ThetaData requests via Data Downloader.
+"""Queue client for Data Downloader requests.
 
 This module provides a queue-aware client that:
 - Tracks all pending requests and their status
@@ -117,7 +117,7 @@ def queue_telemetry_snapshot() -> Dict[str, Any]:
         return dict(_TELEMETRY)
 
 # Configuration from environment
-# Queue mode is ALWAYS enabled - it's the only way to connect to ThetaData
+# Queue mode is ALWAYS enabled: all provider requests (Theta/IBKR/etc.) go through the Data Downloader.
 # NOTE: Extremely fast polling can overwhelm the downloader (and CloudWatch) when many requests
 # are in flight. A 200ms default keeps progress responsive without creating a status-poll storm.
 QUEUE_POLL_INTERVAL = float(os.environ.get("THETADATA_QUEUE_POLL_INTERVAL", "0.2"))

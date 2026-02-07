@@ -51,7 +51,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Tuple, Optional
-from functools import lru_cache
 from enum import Enum
 
 # Import LUMIWEALTH_API_KEY from credentials
@@ -674,6 +673,9 @@ def _ensure_handlers_configured():
     def _apply_levels(root_logger: logging.Logger):
         """Ensure root level and console handler levels reflect the desired state."""
         root_logger.setLevel(effective_log_level)
+        # Some environments/tests toggle `propagate` to avoid duplicate output. For Lumibot's unified logger we want
+        # records to remain capturable by upstream handlers (pytest caplog, app-level root handlers, etc.).
+        root_logger.propagate = True
 
         console_handlers = [
             handler
@@ -742,7 +744,6 @@ def _ensure_handlers_configured():
         _handlers_configured = True
 
 
-@lru_cache(maxsize=128)
 def get_logger(name: str) -> logging.Logger:
     """
     Get a logger instance for the given name with consistent Lumibot formatting.

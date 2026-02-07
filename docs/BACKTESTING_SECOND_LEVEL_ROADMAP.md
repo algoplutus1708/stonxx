@@ -2,7 +2,7 @@
 
 > Roadmap for “seconds-level” backtesting support without making backtests 60× slower.
 
-**Last Updated:** 2026-01-28
+**Last Updated:** 2026-02-06
 **Status:** Active
 **Audience:** Developers, AI Agents
 
@@ -22,6 +22,16 @@ See also:
 - `docs/BACKTESTING_PERFORMANCE.md` (profiling + speed methodology)
 - `docs/BACKTESTING_SESSION_GAPS_AND_DATA_GAPS.md` (no synthetic bars; gaps are “no data”)
 - `docs/investigations/bot_manager.md` (current implementation plan for true seconds-mode, futures-first)
+
+## Current Status (2026-02-06)
+
+- `ibkr_helper` now normalizes second-level timestep aliases (`second`, `1S`, `1sec`, etc.) into IBKR-style bar values.
+  This removes “unknown unit” style parsing failures, but does not by itself guarantee that second-level history is
+  supported end-to-end.
+- Full second-level backtesting is still pending engine work (clock iteration + `Data` second-unit support + fill semantics tests).
+
+Internal note (do not treat as shipped capability): second/tick history routing via a TWS/Gateway adapter is being
+worked on in the downloader layer, but it is not relied on by default.
 
 ---
 

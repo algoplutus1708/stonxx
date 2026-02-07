@@ -20,7 +20,7 @@ from lumibot.tools.ibkr_secdef import (
     select_futures_exchange_from_secdef_search_payload,
 )
 from lumibot.tools.parquet_series_cache import ParquetSeriesCache
-from lumibot.tools.thetadata_queue_client import queue_request
+from lumibot.tools.data_downloader_queue_client import queue_request
 
 logger = logging.getLogger(__name__)
 
@@ -759,6 +759,8 @@ def _contract_expiration_date(root_symbol: str, *, year: int, month: int):
 
         if anchor == "third_last_business_day":
             expiry = futures_roll._third_last_business_day(year, month)
+        elif anchor == "last_friday":
+            expiry = futures_roll._last_friday_trading_day(year, month)
         elif anchor == "cl_last_trade":
             expiry = futures_roll._cl_last_trade_date(year, month)
         elif anchor == "mcl_last_trade":
@@ -2139,7 +2141,20 @@ def _safe_component(value: str) -> str:
 def _timestep_to_ibkr_bar(timestep: str) -> Tuple[str, int, str]:
     raw = (timestep or "minute").strip().lower()
     raw = raw.replace(" ", "")
-    raw = raw.replace("minutes", "minute").replace("hours", "hour").replace("days", "day")
+    raw = raw.replace("seconds", "second").replace("minutes", "minute").replace("hours", "hour").replace("days", "day")
+
+    if raw in {"second", "1second", "s", "1s", "sec", "1sec"}:
+        return "1sec", 1, "second"
+    if raw.endswith("second"):
+        qty = raw.removesuffix("second") or "1"
+        seconds = int(qty)
+        return f"{seconds}sec", seconds, f"{seconds}second"
+    if raw.endswith("sec"):
+        seconds = int(raw.removesuffix("sec") or "1")
+        return f"{seconds}sec", seconds, f"{seconds}second"
+    if raw.endswith("s") and raw[:-1].isdigit():
+        seconds = int(raw[:-1] or "1")
+        return f"{seconds}sec", seconds, f"{seconds}second"
 
     if raw in {"minute", "1minute", "m", "1m"}:
         return "1min", 60, "minute"
@@ -2186,6 +2201,9 @@ def _normalize_history_source(source: Optional[str]) -> str:
 def _max_period_for_bar(bar: str) -> str:
     """Return an IBKR `period` that requests at most ~1000 datapoints for the bar size."""
     normalized = (bar or "").strip().lower()
+    if normalized.endswith("sec"):
+        multiplier = int(normalized.removesuffix("sec") or "1")
+        return f"{IBKR_HISTORY_MAX_POINTS * multiplier}sec"
     if normalized.endswith("min"):
         multiplier = int(normalized.removesuffix("min") or "1")
         return f"{IBKR_HISTORY_MAX_POINTS * multiplier}min"

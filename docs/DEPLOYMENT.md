@@ -2,7 +2,7 @@
 
 > Release/deployment workflow for LumiBot (version branches, changelog, tags, and GitHub releases).
 
-**Last Updated:** 2026-02-06  
+**Last Updated:** 2026-02-07  
 **Status:** Active  
 **Audience:** Developers + AI Agents
 
@@ -15,7 +15,7 @@
 3) Merge the PR into `dev` (no direct pushes to `dev`).  
 4) Tag the **merge commit on `dev`** as `vX.Y.Z` (this triggers GitHub Actions to publish to PyPI + create a GitHub Release).  
 5) Verify `pip install lumibot==X.Y.Z` works.  
-6) Immediately cut `version/X.Y.(Z+1)` from updated `dev`.
+6) Immediately cut `version/X.Y.(Z+1)` from updated `dev`, bump `setup.py`, and push the branch so everyone’s local clones move forward.
 
 ## Goals
 
@@ -72,6 +72,26 @@ Publishing is **tag-driven** via `.github/workflows/release.yml`.
   - Must exist as a **repository secret** or as an **environment secret** for the GitHub environment named `pypi`.
   - If it’s missing, the “Publish to PyPI” step will fail.
 - Optional: configure the GitHub environment `pypi` to require approvals (human gate).
+
+0) **Preflight: “no-loss” + security/hygiene sweep**
+   - Ensure there is **no local-only work** (multi-agent safety):
+     - `git status --porcelain=v1` (must be empty)
+     - `git log --oneline origin/version/X.Y.Z..HEAD` (must be empty)
+     - If you see unexpected local changes/commits (even if you didn’t make them), **do not proceed** until you either:
+       - review the diff, commit, and push, or
+       - intentionally discard/revert them (manually; avoid destructive git commands).
+   - Review what will ship (and look for “bullshit files”):
+     - `git diff --name-status origin/dev..HEAD`
+     - `git diff --stat origin/dev..HEAD`
+     - Confirm there are no: `*.env`, `*.log`, `dist/`, `tmp/`, large stray binaries, or accidental artifacts.
+   - Manual code review (security, best-effort):
+     - Scan the diff for unexpected behavior: new process execution, credential handling, network calls, filesystem writes, or workflow changes.
+     - If new/renamed modules were added, ensure they’re “boring” (no hidden side effects at import time).
+     - If any new binary is added, confirm it’s expected and justified (size + provenance).
+     - If anything feels off, stop and escalate before merging/releasing.
+   - Quick secret sanity checks (best-effort):
+     - Ensure `.env*` stays untracked (except examples like `.env.local.example`).
+     - Scan changed docs/scripts for tokens/keys if you touched any credentials-related files.
 
 0) **Sync your local repo**
    - `git switch dev && git pull --ff-only`
@@ -180,6 +200,15 @@ Publishing is **tag-driven** via `.github/workflows/release.yml`.
    - Create `version/X.Y.(Z+1)` from `dev` (or from the just-deployed commit once it’s on `dev`).
    - Immediately bump `setup.py` to `X.Y.(Z+1)` and commit: `chore: start X.Y.(Z+1)`.
    - Add a new `CHANGELOG.md` section: `## X.Y.(Z+1) - Unreleased`.
+   - Push the new branch to GitHub (so other agents don’t keep working on the old version branch):
+
+     ```bash
+     git switch dev
+     git pull --ff-only
+     git switch -c version/X.Y.(Z+1)
+     # bump setup.py + CHANGELOG.md, then:
+     git push -u origin version/X.Y.(Z+1)
+     ```
 
 ---
 

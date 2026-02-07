@@ -533,7 +533,7 @@ ThetaData backtests are often dominated by:
 Common targets:
 - `lumibot/tools/thetadata_helper.py`
 - `lumibot/backtesting/thetadata_backtesting_pandas.py`
-- `lumibot/tools/thetadata_queue_client.py`
+- `lumibot/tools/data_downloader_queue_client.py`
 
 Key invariants:
 - do not alter trade/quote semantics silently

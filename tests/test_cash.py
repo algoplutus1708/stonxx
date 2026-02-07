@@ -1,4 +1,5 @@
 import unittest
+import os
 from decimal import Decimal
 from datetime import datetime, timedelta
 
@@ -81,6 +82,26 @@ class TestCash(unittest.TestCase):
                         f"Initial self.cash should equal budget: {expected_budget}")
         self.assertEqual(method_cash, expected_budget, 
                         f"Initial get_cash() should equal budget: {expected_budget}")
+
+    def test_backtesting_budget_env_override(self):
+        """Test that BACKTESTING_BUDGET overrides the explicit budget argument."""
+        previous = os.environ.get("BACKTESTING_BUDGET")
+        os.environ["BACKTESTING_BUDGET"] = "500"
+        try:
+            # Use a fresh broker so the existing setUp strategy's cash position doesn't
+            # get reused (positions are strategy-scoped inside a shared broker).
+            broker = BacktestingBroker(self.data_source)
+            strategy = CashTestStrategy(
+                broker=broker,
+                budget=100000,
+                name="CashTestStrategy_env_override",
+            )
+            self.assertEqual(strategy.cash, 500, "BACKTESTING_BUDGET should override starting cash to 500")
+        finally:
+            if previous is None:
+                os.environ.pop("BACKTESTING_BUDGET", None)
+            else:
+                os.environ["BACKTESTING_BUDGET"] = previous
     
     def test_no_private_cash_variable(self):
         """Test that we no longer have a problematic _cash variable"""

@@ -30,6 +30,13 @@ This page documents environment variables used by LumiBot, with an emphasis on *
 - Purpose: Default date range used by `Strategy.run_backtest()` / `Strategy.backtest()` when dates are not passed in code.
 - Format: `YYYY-MM-DD`
 
+### `BACKTESTING_BUDGET`
+- Purpose: Override the starting cash used for backtests (initial portfolio cash).
+- Format: Positive number. Accepted examples: `500`, `5000`, `5k`, `1_000_000`, `$10,000`.
+- Notes:
+  - When set, this value is preferred over any `budget=` passed in strategy code, so it can be controlled per-run via injected environment variables.
+  - Default (when unset and no code budget is provided): `100000`.
+
 ### `BACKTESTING_DATA_SOURCE`
 - Purpose: Selects the backtesting datasource **even if code passes an explicit `datasource_class`**.
 - Values (case-insensitive):

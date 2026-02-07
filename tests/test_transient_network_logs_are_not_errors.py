@@ -34,7 +34,7 @@ def test_update_broker_balances_exception_logs_info(monkeypatch, caplog):
     assert all(record.levelno < logging.ERROR for record in caplog.records)
 
 
-def test_tradier_pull_orders_exception_logs_info(monkeypatch, caplog):
+def test_tradier_pull_orders_exception_logs_info(monkeypatch):
     def raise_orders_error():
         raise ConnectionError("Max retries exceeded")
 
@@ -44,18 +44,26 @@ def test_tradier_pull_orders_exception_logs_info(monkeypatch, caplog):
         )
     )
 
-    caplog.set_level(logging.DEBUG)
+    # Avoid relying on global logging config (which is frequently mutated across tests and across environments).
+    # Instead, patch the module-level logger and assert that the code path logs at INFO with `exc_info=True`.
+    import lumibot.brokers.tradier as tradier_module
+
+    info_calls = []
+    error_calls = []
+
+    def fake_info(msg, *args, **kwargs):
+        info_calls.append((msg, kwargs))
+
+    def fake_error(msg, *args, **kwargs):
+        error_calls.append((msg, kwargs))
+
+    monkeypatch.setattr(tradier_module, "logger", SimpleNamespace(info=fake_info, error=fake_error))
+
     result = Tradier._pull_broker_all_orders(dummy)
 
     assert result == []
+    assert error_calls == []
+    assert any("Error pulling orders from Tradier" in msg for msg, _kwargs in info_calls)
     assert any(
-        record.levelno == logging.INFO and "Error pulling orders from Tradier" in record.getMessage()
-        for record in caplog.records
+        "Error pulling orders from Tradier" in msg and kwargs.get("exc_info") for msg, kwargs in info_calls
     )
-    assert any(
-        record.levelno == logging.INFO
-        and "Error pulling orders from Tradier" in record.getMessage()
-        and record.exc_info
-        for record in caplog.records
-    )
-    assert all(record.levelno < logging.ERROR for record in caplog.records)

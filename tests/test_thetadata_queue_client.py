@@ -16,7 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from lumibot.tools.thetadata_queue_client import (
+from lumibot.tools.data_downloader_queue_client import (
     QUEUE_POLL_INTERVAL,
     QUEUE_TIMEOUT,
     QueueClient,
@@ -35,7 +35,7 @@ def _queue_client_test_env(monkeypatch):
     monkeypatch.setenv("DATADOWNLOADER_API_KEY", "test-api-key")
     yield
     # Reset the module singleton so state cannot leak across tests.
-    import lumibot.tools.thetadata_queue_client as queue_module
+    import lumibot.tools.data_downloader_queue_client as queue_module
 
     queue_module._queue_client = None
 
@@ -470,7 +470,7 @@ class TestGlobalFunctions:
         client2 = get_queue_client()
         assert client1 is client2
 
-    @patch('lumibot.tools.thetadata_queue_client.QueueClient.execute_request')
+    @patch('lumibot.tools.data_downloader_queue_client.QueueClient.execute_request')
     def test_queue_request_calls_client(self, mock_execute):
         """Test queue_request uses the client correctly."""
         mock_execute.return_value = ({"data": "test"}, 200)
@@ -483,7 +483,7 @@ class TestGlobalFunctions:
         assert result == {"data": "test"}
         mock_execute.assert_called_once()
 
-    @patch("lumibot.tools.thetadata_queue_client.QueueClient.execute_request")
+    @patch("lumibot.tools.data_downloader_queue_client.QueueClient.execute_request")
     def test_queue_request_parses_query_from_url_when_querystring_none(self, mock_execute):
         """Test queue_request parses query params from URL when querystring is None."""
         mock_execute.return_value = ({"data": "test"}, 200)

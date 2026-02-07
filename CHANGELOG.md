@@ -1,5 +1,17 @@
 # Changelog
 
+## 4.4.47 - 2026-02-07
+### Added
+- Backtesting: support `BACKTESTING_BUDGET` environment override for strategy backtest cash/budget.
+
+### Changed
+- Downloader: rename the downloader queue client module from `thetadata_queue_client` to `data_downloader_queue_client` (provider-agnostic naming).
+
+### Fixed
+- IBKR: parse seconds-style timesteps (e.g. `20S`) for history requests where supported.
+- IBKR crypto futures: harden continuous futures expiration selection in backtesting.
+- Logging: avoid stale env-driven logger levels by re-applying Lumibot logging configuration on each `get_logger()` call (reduces test flakiness when env vars toggle).
+
 ## 4.4.46 - 2026-02-04
 
 ### Fixed
