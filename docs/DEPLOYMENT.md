@@ -2,7 +2,7 @@
 
 > Release/deployment workflow for LumiBot (version branches, changelog, tags, and GitHub releases).
 
-**Last Updated:** 2026-02-06  
+**Last Updated:** 2026-02-07  
 **Status:** Active  
 **Audience:** Developers + AI Agents
 
@@ -84,6 +84,11 @@ Publishing is **tag-driven** via `.github/workflows/release.yml`.
      - `git diff --name-status origin/dev..HEAD`
      - `git diff --stat origin/dev..HEAD`
      - Confirm there are no: `*.env`, `*.log`, `dist/`, `tmp/`, large stray binaries, or accidental artifacts.
+   - Manual code review (security, best-effort):
+     - Scan the diff for unexpected behavior: new process execution, credential handling, network calls, filesystem writes, or workflow changes.
+     - If new/renamed modules were added, ensure they’re “boring” (no hidden side effects at import time).
+     - If any new binary is added, confirm it’s expected and justified (size + provenance).
+     - If anything feels off, stop and escalate before merging/releasing.
    - Quick secret sanity checks (best-effort):
      - Ensure `.env*` stays untracked (except examples like `.env.local.example`).
      - Scan changed docs/scripts for tokens/keys if you touched any credentials-related files.

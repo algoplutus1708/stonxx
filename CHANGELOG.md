@@ -1,7 +1,6 @@
 # Changelog
 
-## 4.4.47 - Unreleased
-
+## 4.4.47 - 2026-02-07
 ### Added
 - Backtesting: support `BACKTESTING_BUDGET` environment override for strategy backtest cash/budget.
 
