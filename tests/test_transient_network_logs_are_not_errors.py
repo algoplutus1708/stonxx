@@ -3,7 +3,6 @@ from types import SimpleNamespace
 
 from lumibot.brokers.tradier import Tradier
 from lumibot.strategies._strategy import _Strategy
-from lumibot.tools.lumibot_logger import get_logger
 
 
 def test_update_broker_balances_exception_logs_info(monkeypatch, caplog):
@@ -35,22 +34,7 @@ def test_update_broker_balances_exception_logs_info(monkeypatch, caplog):
     assert all(record.levelno < logging.ERROR for record in caplog.records)
 
 
-def test_tradier_pull_orders_exception_logs_info(monkeypatch, caplog):
-    # This test asserts INFO-level logging from the Lumibot logger hierarchy.
-    # Other tests may toggle backtesting env vars (notably `IS_BACKTESTING` and `BACKTESTING_QUIET_LOGS`) which can
-    # raise the effective logger level to ERROR and suppress INFO logs. Make this test deterministic by forcing a
-    # non-quiet configuration and re-applying logger levels.
-    monkeypatch.delenv("IS_BACKTESTING", raising=False)
-    monkeypatch.setenv("BACKTESTING_QUIET_LOGS", "false")
-    monkeypatch.setenv("LUMIBOT_LOG_LEVEL", "DEBUG")
-    get_logger(__name__)  # re-apply env-driven levels to the `lumibot` root logger
-
-    # Lumibot uses a dedicated logger hierarchy. Some environments (and some tests) mutate propagation/handlers,
-    # which can make pytest's caplog miss records. Attach caplog's handler directly to the specific logger used by
-    # the code under test, then remove it to avoid cross-test leakage.
-    tradier_logger = logging.getLogger("lumibot.brokers.tradier")
-    tradier_logger.addHandler(caplog.handler)
-
+def test_tradier_pull_orders_exception_logs_info(monkeypatch):
     def raise_orders_error():
         raise ConnectionError("Max retries exceeded")
 
@@ -60,21 +44,26 @@ def test_tradier_pull_orders_exception_logs_info(monkeypatch, caplog):
         )
     )
 
-    caplog.set_level(logging.DEBUG)
-    try:
-        result = Tradier._pull_broker_all_orders(dummy)
-    finally:
-        tradier_logger.removeHandler(caplog.handler)
+    # Avoid relying on global logging config (which is frequently mutated across tests and across environments).
+    # Instead, patch the module-level logger and assert that the code path logs at INFO with `exc_info=True`.
+    import lumibot.brokers.tradier as tradier_module
+
+    info_calls = []
+    error_calls = []
+
+    def fake_info(msg, *args, **kwargs):
+        info_calls.append((msg, kwargs))
+
+    def fake_error(msg, *args, **kwargs):
+        error_calls.append((msg, kwargs))
+
+    monkeypatch.setattr(tradier_module, "logger", SimpleNamespace(info=fake_info, error=fake_error))
+
+    result = Tradier._pull_broker_all_orders(dummy)
 
     assert result == []
+    assert error_calls == []
+    assert any("Error pulling orders from Tradier" in msg for msg, _kwargs in info_calls)
     assert any(
-        record.levelno == logging.INFO and "Error pulling orders from Tradier" in record.getMessage()
-        for record in caplog.records
+        "Error pulling orders from Tradier" in msg and kwargs.get("exc_info") for msg, kwargs in info_calls
     )
-    assert any(
-        record.levelno == logging.INFO
-        and "Error pulling orders from Tradier" in record.getMessage()
-        and record.exc_info
-        for record in caplog.records
-    )
-    assert all(record.levelno < logging.ERROR for record in caplog.records)
