@@ -86,6 +86,12 @@ Publishing is **tag-driven** via `.github/workflows/release.yml`.
      - Confirm there are no: `*.env`, `*.log`, `dist/`, `tmp/`, large stray binaries, or accidental artifacts.
    - Manual code review (security, best-effort):
      - Scan the diff for unexpected behavior: new process execution, credential handling, network calls, filesystem writes, or workflow changes.
+     - Explicitly look for “malicious” indicators:
+       - obfuscated code (large base64 blobs, weird string concatenation around URLs/commands)
+       - `eval`/`exec`, unsafe deserialization (`pickle.loads`) in new code
+       - new network destinations / hard-coded private endpoints
+       - silent secret capture/exfil paths (reading `.env`, keychains, `~/.ssh`, AWS creds)
+       - changes under `.github/workflows/` (must be intentional and reviewed)
      - If new/renamed modules were added, ensure they’re “boring” (no hidden side effects at import time).
      - If any new binary is added, confirm it’s expected and justified (size + provenance).
      - If anything feels off, stop and escalate before merging/releasing.
