@@ -108,6 +108,25 @@ def test_plot_indicators_handles_lines_missing_detail_text_column(tmp_path, monk
     mock_write.assert_called_once()
 
 
+def test_plot_indicators_emits_empty_csv_and_parquet_when_no_chart_data(tmp_path, monkeypatch) -> None:
+    """Regression: indicators artifacts should exist even when a strategy emits no data."""
+    mock_write = MagicMock()
+    monkeypatch.setattr("plotly.graph_objects.Figure.write_html", mock_write)
+
+    plot_indicators(
+        plot_file_html=str(tmp_path / "plot.html"),
+        chart_markers_df=None,
+        chart_lines_df=None,
+        chart_ohlc_df=None,
+        strategy_name="Test",
+        show_indicators=True,
+    )
+
+    mock_write.assert_called_once()
+    assert (tmp_path / "plot.csv").exists()
+    assert (tmp_path / "plot.parquet").exists()
+
+
 def test_plot_indicators_handles_markers_missing_detail_text_column(tmp_path, monkeypatch) -> None:
     mock_write = MagicMock()
     monkeypatch.setattr("plotly.graph_objects.Figure.write_html", mock_write)

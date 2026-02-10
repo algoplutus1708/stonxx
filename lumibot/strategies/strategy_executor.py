@@ -878,9 +878,26 @@ class StrategyExecutor(Thread):
         positions_list = []
         positions = self.strategy.get_positions()
         for position in positions:
+            # IMPORTANT: Never put raw Asset objects into stats rows.
+            # They break parquet export (pyarrow cannot serialize arbitrary Python objects),
+            # and they bloat logs. Keep this minimal and JSON/parquet-friendly.
+            asset_value = getattr(position, "asset", None)
+            try:
+                if asset_value is not None and hasattr(asset_value, "to_minimal_dict"):
+                    asset_value = asset_value.to_minimal_dict()
+            except Exception:
+                # Fall back to a string representation to keep tracing resilient.
+                asset_value = str(asset_value)
+
+            quantity_value = getattr(position, "quantity", None)
+            try:
+                quantity_value = float(quantity_value) if quantity_value is not None else 0.0
+            except Exception:
+                quantity_value = 0.0
+
             pos_dict = {
-                "asset": position.asset,
-                "quantity": position.quantity,
+                "asset": asset_value,
+                "quantity": quantity_value,
             }
             positions_list.append(pos_dict)
 
