@@ -77,6 +77,22 @@ IBKR futures bar history requires a specific contract identifier (conid). LumiBo
 For deterministic acceptance and correct lookup behavior, **explicit futures** should be used:
 - `Asset("MES", asset_type="future", expiration=date(2025, 12, 19))`
 
+### Auto-expiry futures (rolling wrapper; recommended when you don't want to hardcode an expiration)
+
+If you want “front month” behavior without hardcoding an expiration date, use an auto-expiry futures asset:
+- `Asset("MES", asset_type="future", auto_expiry=Asset.AutoExpiry.FRONT_MONTH)`
+
+Semantics:
+- This is a **rolling wrapper** resolved by the data source/broker as time advances (similar to `cont_future` stitching).
+- `Asset.expiration` remains `None` unless you explicitly provide `expiration=...`.
+- This keeps backtests and live behavior aligned and avoids `date.today()` skew when backtesting historical periods.
+
+### Crypto futures roots (IBKR / CME)
+
+IBKR’s futures root symbols can differ from spot tickers, especially for CME crypto products. Examples:
+- Bitcoin: `MBT` (Micro Bitcoin futures), `BRR` (Bitcoin Reference Rate futures root)
+- Ether: `MET` (Micro Ether futures), `ETHUSDRR` (Ether Reference Rate futures root)
+
 ### Expired contracts (critical)
 
 IBKR Client Portal cannot reliably discover conids for **expired** futures. For backtests that reference expired

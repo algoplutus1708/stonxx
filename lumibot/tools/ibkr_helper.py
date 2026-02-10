@@ -32,9 +32,22 @@ IBKR_DEFAULT_CRYPTO_VENUE = "ZEROHASH"
 IBKR_DEFAULT_HISTORY_SOURCE = "Trades"
 IBKR_DEFAULT_FUTURES_EXCHANGE_FALLBACK = "CME"
 
+IBKR_CONID_NEGATIVE_CACHE_TTL_SECONDS = 24 * 60 * 60  # 24h (persisted via BacktestCacheManager when enabled)
+
+
+class IbkrFuturesConidLookupError(RuntimeError):
+    """Raised when IBKR cannot resolve a futures conid for a root/expiration.
+
+    This is treated as a data-availability issue (not a platform crash) so backtests can
+    complete while logging loudly.
+    """
+
 
 _FUTURES_EXCHANGE_CACHE: Dict[str, str] = {}
 _FUTURES_EXCHANGE_CACHE_LOADED = False
+
+_NEGATIVE_CONID_CACHE: Dict[str, Dict[str, Any]] = {}
+_NEGATIVE_CONID_CACHE_LOADED = False
 
 def _enable_futures_bid_ask_derivation() -> bool:
     """Whether to derive bid/ask quotes for futures from Bid_Ask + Midpoint history.
@@ -84,6 +97,84 @@ def _persist_futures_exchange_cache() -> None:
     try:
         cache = get_backtest_cache()
         cache.on_local_update(path, payload={"provider": "ibkr", "type": "futures_exchanges"})
+    except Exception:
+        pass
+
+
+def _negative_conid_cache_file() -> Path:
+    return Path(LUMIBOT_CACHE_FOLDER) / CACHE_SUBFOLDER / "conids_negative.json"
+
+
+def _load_negative_conid_cache() -> None:
+    """Load negative conid cache (best-effort) and prune stale entries."""
+    global _NEGATIVE_CONID_CACHE_LOADED
+    if _NEGATIVE_CONID_CACHE_LOADED:
+        return
+    _NEGATIVE_CONID_CACHE_LOADED = True
+
+    path = _negative_conid_cache_file()
+    cache_manager = get_backtest_cache()
+    try:
+        cache_manager.ensure_local_file(path, payload={"provider": "ibkr", "type": "conids_negative"})
+    except Exception:
+        pass
+
+    if not path.exists():
+        return
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        return
+
+    now = float(time.time())
+    changed = False
+    for key, value in payload.items():
+        if not isinstance(key, str) or not key:
+            continue
+        if not isinstance(value, dict):
+            continue
+        ts = value.get("ts")
+        try:
+            ts_f = float(ts)
+        except Exception:
+            ts_f = None
+        if ts_f is None or (now - ts_f) > IBKR_CONID_NEGATIVE_CACHE_TTL_SECONDS:
+            changed = True
+            continue
+        _NEGATIVE_CONID_CACHE[key] = value
+
+    if changed:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(_NEGATIVE_CONID_CACHE, indent=2, sort_keys=True), encoding="utf-8")
+            try:
+                cache_manager.on_local_update(path, payload={"provider": "ibkr", "type": "conids_negative"})
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+
+def _record_negative_conid(*, key: str, reason: str, message: str) -> None:
+    """Persist a negative cache marker so we stop hammering IBKR for invalid roots/expirations."""
+    if not key:
+        return
+    _load_negative_conid_cache()
+    now = float(time.time())
+    _NEGATIVE_CONID_CACHE[key] = {"ts": now, "reason": str(reason), "message": str(message)}
+
+    path = _negative_conid_cache_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(_NEGATIVE_CONID_CACHE, indent=2, sort_keys=True), encoding="utf-8")
+    except Exception:
+        return
+    try:
+        cache_manager = get_backtest_cache()
+        cache_manager.on_local_update(path, payload={"provider": "ibkr", "type": "conids_negative"})
     except Exception:
         pass
 
@@ -209,10 +300,11 @@ def get_price_data(
     end_local = end_utc.astimezone(LUMIBOT_DEFAULT_PYTZ)
 
     asset_type = str(getattr(asset, "asset_type", "") or "").lower()
-    if asset_type == "future" and getattr(asset, "expiration", None) is None:
+    asset_auto_expiry = getattr(asset, "auto_expiry", None)
+    if asset_type == "future" and getattr(asset, "expiration", None) is None and not asset_auto_expiry:
         raise ValueError(
-            "IBKR futures require an explicit expiration on Asset(asset_type='future'). "
-            "Use asset_type='cont_future' for continuous futures."
+            "IBKR futures require an explicit expiration on Asset(asset_type='future') unless "
+            "`auto_expiry` is set. Use asset_type='cont_future' for continuous futures."
         )
     effective_exchange = exchange
     if asset_type in {"future", "cont_future"} and not effective_exchange:
@@ -262,13 +354,32 @@ def get_price_data(
     # backfill. `cont_future` data is stitched by resolving each contract month using LumiBot's
     # roll schedule (see `_resolve_cont_future_segments`), then fetching bars per-expiration.
 
-    if asset_type == "cont_future":
+    is_roll_wrapper = bool(
+        asset_type == "cont_future"
+        or (
+            asset_type == "future"
+            and getattr(asset, "expiration", None) is None
+            and asset_auto_expiry
+        )
+    )
+
+    # Cont-futures + Auto-expiry futures
+    #
+    # Behavior: for IBKR we treat `Asset(asset_type='cont_future')` and
+    # `Asset(asset_type='future', auto_expiry=...)` as synthetic roll wrappers.
+    #
+    # Rationale: backtests must match live semantics and must not depend on `date.today()` for
+    # selecting a contract month.
+    if is_roll_wrapper:
         segments = _resolve_cont_future_segments(asset=asset, start_dt=start_utc, end_dt=end_utc, exchange=effective_exchange)
         if not segments:
-            raise RuntimeError(
-                "Unable to resolve cont_future roll segments for IBKR. "
-                "This usually means the futures roll rules are unavailable or conid backfill is missing."
+            logger.error(
+                "IBKR futures roll wrapper could not resolve any roll segments for %s (type=%s exchange=%s). Returning empty bars.",
+                getattr(asset, "symbol", None),
+                asset_type,
+                effective_exchange,
             )
+            return pd.DataFrame()
         # Ensure the *user-facing* cont_future asset (used in orders/positions) carries the
         # correct contract metadata (multiplier/min_tick). Otherwise PnL and tick rounding will
         # be wrong even if we fetch bars for the right underlying expirations.
@@ -709,13 +820,19 @@ def _resolve_cont_future_segments(*, asset: Asset, start_dt: datetime, end_dt: d
         try:
             _resolve_conid(asset=contract_asset, quote=None, exchange=exchange)
         except Exception as exc:
-            raise RuntimeError(
-                f"IBKR cont_future requires conids for explicit contract months (e.g., {contract_symbol}). "
-                "If this is an expired contract, IBKR Client Portal cannot discover its conid. "
-                "Ensure the IBKR conid registry (`<cache>/ibkr/conids.json`, S3-mirrored) contains the "
-                "missing expiration. New contracts are expected to auto-populate via REST as backtests "
-                "run; only older historical gaps require a one-time TWS backfill."
-            ) from exc
+            # Do not crash the whole backtest because one contract month cannot resolve.
+            #
+            # This most commonly happens when:
+            # - The root symbol is invalid (no contracts returned), or
+            # - IBKR cannot discover a conid for an expired contract month via Client Portal.
+            logger.error(
+                "IBKR roll segment conid resolution failed for %s %s (%s): %s",
+                getattr(asset, "symbol", None),
+                expiration,
+                contract_symbol,
+                exc,
+            )
+            continue
         segments.append((contract_asset, _to_utc(seg_start), _to_utc(seg_end)))
     return segments
 
@@ -1933,7 +2050,7 @@ def _lookup_conid_remote(
 ) -> int:
     asset_type = str(getattr(asset, "asset_type", "") or "").lower()
     if asset_type in {"future", "cont_future"}:
-        if getattr(asset, "expiration", None) is None and asset_type != "cont_future":
+        if getattr(asset, "expiration", None) is None and asset_type != "cont_future" and not getattr(asset, "auto_expiry", None):
             raise ValueError(
                 "IBKR futures require an explicit expiration on Asset(asset_type='future'). "
                 "Use asset_type='cont_future' for continuous futures."
@@ -2026,6 +2143,22 @@ def _lookup_conid_future(
         except Exception:
             desired_exchange = (os.environ.get("IBKR_FUTURES_EXCHANGE") or IBKR_DEFAULT_FUTURES_EXCHANGE_FALLBACK).strip().upper()
 
+    symbol_upper = str(getattr(asset, "symbol", "") or "").strip().upper()
+    expiration = getattr(asset, "expiration", None)
+    target = expiration.strftime("%Y%m%d") if expiration is not None else ""
+
+    # Negative cache: stop hammering IBKR for invalid roots/expirations.
+    _load_negative_conid_cache()
+    neg_root_key = IbkrConidKey("future", symbol_upper, "", desired_exchange, "").to_key()
+    neg_target_key = IbkrConidKey("future", symbol_upper, "", desired_exchange, target).to_key() if target else ""
+    neg_hit = _NEGATIVE_CONID_CACHE.get(neg_root_key) or (_NEGATIVE_CONID_CACHE.get(neg_target_key) if neg_target_key else None)
+    if isinstance(neg_hit, dict):
+        cached_msg = str(neg_hit.get("message") or "").strip() or (
+            f"IBKR futures conid lookup is negatively cached for {symbol_upper} on {desired_exchange} (target={target or 'front_month'})."
+        )
+        logger.error("IBKR negative conid cache hit: %s", cached_msg)
+        raise IbkrFuturesConidLookupError(cached_msg)
+
     query = {"symbols": asset.symbol, "exchange": desired_exchange, "secType": "FUT"}
     payload = queue_request(url=url, querystring=query, headers=None, timeout=None)
     # Response shape: { "<symbol>": [ {conid, expirationDate, ...}, ... ] }
@@ -2041,22 +2174,26 @@ def _lookup_conid_future(
         raise RuntimeError(f"Unexpected IBKR trsrv/futures response: {payload}")
     contracts = payload.get(asset.symbol) or payload.get(asset.symbol.upper()) or []
     if not isinstance(contracts, list) or not contracts:
-        raise RuntimeError(f"No futures contracts returned for {asset.symbol} on {desired_exchange}")
+        msg = f"No futures contracts returned for {symbol_upper} on {desired_exchange}"
+        _record_negative_conid(key=neg_root_key, reason="no_contracts", message=msg)
+        raise IbkrFuturesConidLookupError(msg)
 
     # Bulk-refresh: update conids.json with *all* returned contract months for this root+exchange.
     # This keeps the registry current via REST so we rarely/never need a new TWS backfill.
     if mapping is not None:
-        symbol_upper = str(getattr(asset, "symbol", "") or "").strip().upper()
         for contract in contracts:
             if not isinstance(contract, dict):
                 continue
-            exp = contract.get("expirationDate")
             conid = contract.get("conid")
-            if exp is None or conid is None:
+            if conid is None:
                 continue
-            exp_str = str(exp).strip()
-            if not (exp_str.isdigit() and len(exp_str) == 8):
-                continue
+            date_candidates = []
+            exp = contract.get("expirationDate")
+            if exp is not None:
+                date_candidates.append(exp)
+            ltd = contract.get("ltd") or contract.get("lastTradeDate") or contract.get("lastTradeDay") or contract.get("lastTrade")
+            if ltd is not None:
+                date_candidates.append(ltd)
             try:
                 conid_int = int(conid)
             except Exception:
@@ -2064,28 +2201,35 @@ def _lookup_conid_future(
             if conid_int <= 0:
                 continue
 
-            key_blank = IbkrConidKey("future", symbol_upper, "", desired_exchange, exp_str).to_key()
-            key_usd = IbkrConidKey("future", symbol_upper, "USD", desired_exchange, exp_str).to_key()
-            for k in (key_blank, key_usd):
-                prior = mapping.get(k)
-                if prior != conid_int:
-                    mapping[k] = conid_int
-                    if keys_added is not None:
-                        keys_added.add(k)
+            for raw in date_candidates:
+                exp_str = str(raw).strip()
+                if not (exp_str.isdigit() and len(exp_str) == 8):
+                    continue
+                key_blank = IbkrConidKey("future", symbol_upper, "", desired_exchange, exp_str).to_key()
+                key_usd = IbkrConidKey("future", symbol_upper, "USD", desired_exchange, exp_str).to_key()
+                for k in (key_blank, key_usd):
+                    prior = mapping.get(k)
+                    if prior != conid_int:
+                        mapping[k] = conid_int
+                        if keys_added is not None:
+                            keys_added.add(k)
 
-    expiration = getattr(asset, "expiration", None)
     if expiration is not None:
-        target = expiration.strftime("%Y%m%d")
         for contract in contracts:
-            if str(contract.get("expirationDate") or "") == target:
+            exp_str = str(contract.get("expirationDate") or "").strip()
+            ltd_str = str(contract.get("ltd") or contract.get("lastTradeDate") or contract.get("lastTradeDay") or "").strip()
+            if exp_str == target or ltd_str == target:
                 return int(contract["conid"])
-        raise RuntimeError(
-            f"IBKR did not return a conid for {asset.symbol} expiring {target} on {desired_exchange}. "
+        msg = (
+            f"IBKR did not return a conid for {symbol_upper} expiring {target} on {desired_exchange}. "
             "If this is an expired contract, IBKR Client Portal cannot reliably discover it. "
             "Ensure the IBKR conid registry (`<cache>/ibkr/conids.json`, S3-mirrored) contains the "
             "missing expiration. New contracts are expected to auto-populate via REST; only older "
             "historical gaps require a one-time TWS backfill."
         )
+        if neg_target_key:
+            _record_negative_conid(key=neg_target_key, reason="no_conid", message=msg)
+        raise IbkrFuturesConidLookupError(msg)
 
     # Default: earliest expiration (front month) – used for smoke tests like MES.
     def _exp_key(item: Dict[str, Any]) -> int:

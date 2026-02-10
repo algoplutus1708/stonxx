@@ -79,6 +79,10 @@ class SimpleContinuousFutures(Strategy):
 class TestDatabentoBacktestFull:
     """Test suite for Databento data source with continuous futures"""
 
+    # Live DataBento API integration tests. Excluded from the default CI unit run
+    # (`-m "not apitest and not downloader"`) unless explicitly enabled.
+    pytestmark = pytest.mark.apitest
+
     @pytest.mark.skipif(
         not DATABENTO_API_KEY,
         reason="This test requires a Databento API key"

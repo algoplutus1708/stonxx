@@ -19,6 +19,10 @@ from lumibot.tools import databento_helper, databento_helper_polars
 
 DATABENTO_API_KEY = DATABENTO_CONFIG.get("API_KEY")
 
+# Live DataBento API integration tests. Excluded from the default CI unit run
+# (`-m "not apitest and not downloader"`) unless explicitly enabled.
+pytestmark = [pytest.mark.apitest]
+
 
 def _clear_databento_caches():
     for cache_dir in (

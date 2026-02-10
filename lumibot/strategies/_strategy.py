@@ -1347,6 +1347,18 @@ class _Strategy:
                     os.makedirs(stats_directory)
 
                 self._stats.to_csv(self._stats_file)
+                stats_parquet_file = (
+                    self._stats_file[:-4] + ".parquet" if self._stats_file.lower().endswith(".csv") else self._stats_file + ".parquet"
+                )
+                try:
+                    self._stats.to_parquet(
+                        stats_parquet_file,
+                        engine="pyarrow",
+                        compression="zstd",
+                    )
+                except Exception as exc:
+                    # Never fail end-of-run stats due to parquet export; CSV is the compatibility layer.
+                    self.logger.warning("Failed to write stats parquet file %s: %s", stats_parquet_file, exc)
 
             self._strategy_returns_df = day_deduplicate(self._stats)
 

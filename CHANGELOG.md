@@ -1,5 +1,19 @@
 # Changelog
 
+## 4.4.48 - 2026-02-10
+
+### Added
+- Backtesting artifacts: emit Parquet siblings for `*_indicators.csv`, `*_trades.csv`, `*_stats.csv`, and `*_trade_events.csv` (zstd + PyArrow). CSV remains the compatibility layer.
+
+### Changed
+- Tradier: support OAuth payload + access token refresh; add runtime notes for the refresh flow.
+- Tests: mark DataBento backtest coverage as `apitest` so the default CI suite stays deterministic without vendor credentials.
+- Docs: clarify auto-expiry futures behavior and IBKR crypto roots.
+
+### Fixed
+- Data: handle `timeshift=None` in Data bars.
+- Futures (auto-expiry): make selection roll-aware and harden IBKR conid negative cache behavior.
+
 ## 4.4.47 - 2026-02-07
 ### Added
 - Backtesting: support `BACKTESTING_BUDGET` environment override for strategy backtest cash/budget.

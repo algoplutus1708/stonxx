@@ -204,6 +204,25 @@ class TestBacktestingBroker:
         assert broker.data_source.datetime_end == now
         assert broker.should_continue() is False
 
+    def test_export_trade_events_to_csv_emits_parquet(self, tmp_path):
+        broker = BacktestingBroker.__new__(BacktestingBroker)
+        broker._trade_event_log_df = pd.DataFrame(
+            [
+                {"time": dt(2025, 1, 1, 10, 0), "status": "new", "symbol": "SPY", "price": 100.0},
+                {"time": dt(2025, 1, 1, 10, 1), "status": "fill", "symbol": "SPY", "price": 101.0},
+            ]
+        )
+
+        out_csv = tmp_path / "trade_events.csv"
+        broker.export_trade_events_to_csv(out_csv.as_posix())
+
+        assert out_csv.exists()
+        assert out_csv.with_suffix(".parquet").exists()
+
+        parquet_df = pd.read_parquet(out_csv.with_suffix(".parquet"))
+        assert "time" in parquet_df.columns
+        assert "status" in parquet_df.columns
+
 
 # New Test Class for Time Advancement Logic
 class TestBacktestingBrokerTimeAdvance(unittest.TestCase):

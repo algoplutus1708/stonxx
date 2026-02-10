@@ -7,6 +7,17 @@ This project relies on a layered test strategy:
 3. **Acceptance backtests** (manual, end-to-end): run from `Strategy Library/` and inspect artifacts
    (`*_trades.html`, `*_tearsheet.html`, `*_stats.csv`) for realism and regressions.
 
+## Recommended workflow (local + GitHub CI)
+
+Local runs are great for fast feedback, but the full suite is often faster and more reliable on GitHub because CI runs tests in parallel (sharded).
+
+Recommended approach on `version/X.Y.Z` branches:
+
+- Run targeted tests locally for quick iteration.
+- Push early/often so GitHub CI can run the full sharded suite for release confidence.
+
+Treat **green GitHub CI** as the “release-ready” signal since it matches the release workflow environment more closely than a single local machine.
+
 ## Test authority (“Legacy tests win”)
 
 When tests fail, **how you fix them depends on how old the test is**:

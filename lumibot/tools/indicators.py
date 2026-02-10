@@ -776,6 +776,17 @@ def plot_indicators(
         if export_dfs:
             combined_df = pd.concat(export_dfs, ignore_index=True).sort_values(by="datetime")
             combined_df.to_csv(csv_file, index=False)
+            parquet_file = csv_file.replace(".csv", ".parquet")
+            try:
+                combined_df.to_parquet(
+                    parquet_file,
+                    index=False,
+                    engine="pyarrow",
+                    compression="zstd",
+                )
+            except Exception as exc:
+                # Never fail backtest post-processing due to parquet export; CSV is the compatibility layer.
+                logger.warning("Failed to write indicators parquet file %s: %s", parquet_file, exc)
 
 
 def plot_returns(
@@ -816,6 +827,17 @@ def plot_returns(
         # Create an empty DataFrame with standard headers for the CSV
         empty_trades_for_csv = pd.DataFrame(columns=standard_trade_columns)
         empty_trades_for_csv.to_csv(trades_csv_file, index=False)
+        trades_parquet_file = trades_csv_file.replace(".csv", ".parquet")
+        try:
+            empty_trades_for_csv.to_parquet(
+                trades_parquet_file,
+                index=False,
+                engine="pyarrow",
+                compression="zstd",
+            )
+        except Exception as exc:
+            # Never fail backtest post-processing due to parquet export; CSV is the compatibility layer.
+            logger.warning("Failed to write trades parquet file %s: %s", trades_parquet_file, exc)
     else:
         # Prepare a copy of trades_df for CSV export, ensuring standard columns
         trades_df_for_csv = trades_df.copy()
@@ -827,6 +849,17 @@ def plot_returns(
         trades_df_for_csv = trades_df_for_csv[standard_trade_columns]
         trades_df_for_csv.to_csv(trades_csv_file, index=False)
         logger.info(f"Trades data saved to CSV: {trades_csv_file}")
+        trades_parquet_file = trades_csv_file.replace(".csv", ".parquet")
+        try:
+            trades_df_for_csv.to_parquet(
+                trades_parquet_file,
+                index=False,
+                engine="pyarrow",
+                compression="zstd",
+            )
+        except Exception as exc:
+            # Never fail backtest post-processing due to parquet export; CSV is the compatibility layer.
+            logger.warning("Failed to write trades parquet file %s: %s", trades_parquet_file, exc)
     # --- End: CSV Generation for trades_df ---
 
     dfs_concat = []

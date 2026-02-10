@@ -34,6 +34,7 @@ This repo is frequently edited by **multiple AI sessions**. To avoid lost work:
 - **Test gating (STRICT):** do not introduce new environment variables just to skip/disable tests or to paper over CI failures.
   - Prefer existing pytest markers (`apitest`, `acceptance_backtest`, etc.) and normal test skips with clear reasons.
   - If a new env var is truly required for a user-facing feature, document it in `docsrc/environment_variables.rst` in the same PR.
+- **Full suite verification:** prefer pushing commits to GitHub on the shared `version/X.Y.Z` branch so sharded CI validates the full suite. Local runs should focus on targeted tests or marker-filtered subsets.
 
 1. **Never launch ThetaTerminal locally WITH PRODUCTION CREDENTIALS.** Production has the only licensed session for that account. Starting the jar with prod credentials (even briefly or via Docker) instantly terminates the prod connection and halts all customers.
 2. **Use the downloader for backtests.** All tests/backtests must set `DATADOWNLOADER_BASE_URL` and `DATADOWNLOADER_API_KEY` via the runtime environment. Do not short-cut by hitting Theta directly.

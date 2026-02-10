@@ -168,9 +168,9 @@ class Asset:
         MULTILEG = "multileg" # Multileg option
 
     class AutoExpiry(StrEnum):
-        FRONT_MONTH = "front_month" # Front month (nearest quarterly expiry)
-        NEXT_QUARTER = "next_quarter" # Next quarterly expiry (same as front month for quarterly contracts)
-        AUTO = "auto" # Auto (default to front month behavior)
+        FRONT_MONTH = "front_month"  # Front month (rolling; determined by broker/data source)
+        NEXT_QUARTER = "next_quarter"  # Next quarterly expiry (when applicable)
+        AUTO = "auto"  # Alias for FRONT_MONTH
 
     # Pull the rights from the OptionRight class
     _right: list = [v for k, v in OptionRight.__dict__.items() if not k.startswith("__")]
@@ -211,11 +211,12 @@ class Asset:
         underlying_asset : Asset
             Underlying asset for options.
         auto_expiry : str or Asset.AutoExpiry, optional
-            Automatic expiry resolution for futures. Options:
-            - Asset.AutoExpiry.FRONT_MONTH: Always use the front month (nearest quarterly expiry)
-            - Asset.AutoExpiry.NEXT_QUARTER: Use the next quarterly expiry (same as front month for quarterly contracts)
-            - Asset.AutoExpiry.AUTO: Use front_month behavior
-            If specified, this overrides the expiration parameter for futures.
+            Automatic expiry resolution for futures.
+
+            IMPORTANT: When `auto_expiry` is set on a futures asset, the concrete contract/expiration is
+            resolved by the broker/data source at query/order time (so that live trading and backtesting
+            can roll deterministically as time moves forward). For this reason, `Asset.expiration` remains
+            `None` unless you explicitly provide `expiration=...`.
 
         Raises
         ------
@@ -251,9 +252,10 @@ class Asset:
 
         # Handle auto expiry for futures
         self.auto_expiry = auto_expiry
-        if auto_expiry and asset_type == self.AssetType.FUTURE and self.expiration is None:
-            # Only use auto_expiry if no manual expiration was provided
-            self.expiration = self._calculate_auto_expiry(auto_expiry)
+        # Do not materialize a single expiration for auto-expiry futures. The backtesting/live data
+        # stack must resolve the correct contract as the clock advances (roll-aware).
+        #
+        # NOTE: This also avoids `date.today()` skew when backtesting historical periods.
 
         # Multiplier for options must always be 100
         if asset_type == self.AssetType.OPTION:
@@ -272,7 +274,8 @@ class Asset:
         # Cache the hash: Asset objects are used heavily as dict keys during backtests (quotes, bars,
         # chains, positions). Recomputing tuple hashes millions of times dominates CPU in option-heavy
         # strategies; caching preserves correctness as long as identity fields remain unchanged.
-        self._cached_hash = hash((self.symbol, self.asset_type, self.expiration, self.strike, self.right))
+        auto_expiry_key = self.auto_expiry if (self.asset_type == self.AssetType.FUTURE and self.expiration is None) else None
+        self._cached_hash = hash((self.symbol, self.asset_type, self.expiration, self.strike, self.right, auto_expiry_key))
 
     @classmethod
     def symbol2asset(cls, symbol: str):
@@ -314,7 +317,11 @@ class Asset:
 
     def __repr__(self):
         if self.asset_type == "future":
-            return f"{self.symbol} {self.expiration}"
+            if self.expiration is not None:
+                return f"{self.symbol} {self.expiration}"
+            if self.auto_expiry:
+                return f"{self.symbol} ({self.auto_expiry})"
+            return f"{self.symbol}"
         elif self.asset_type == "option":
             return f"{self.symbol} {self.expiration} {self.strike} {self.right}"
         else:
@@ -322,7 +329,11 @@ class Asset:
 
     def __str__(self):
         if self.asset_type == "future":
-            return f"{self.symbol} {self.expiration}"
+            if self.expiration is not None:
+                return f"{self.symbol} {self.expiration}"
+            if self.auto_expiry:
+                return f"{self.symbol} ({self.auto_expiry})"
+            return f"{self.symbol}"
         elif self.asset_type == "option":
             return f"{self.symbol} {self.expiration} {self.strike} {self.right}"
         else:
@@ -343,12 +354,24 @@ class Asset:
             return False
 
         # Only check other attributes if symbols match
-        return (
+        if not (
             self.asset_type == other.asset_type
             and self.expiration == other.expiration
             and self.strike == other.strike
             and self.right == other.right
-        )
+        ):
+            return False
+
+        # Auto-expiry futures are roll wrappers; they must not collide with each other.
+        if (
+            self.asset_type == self.AssetType.FUTURE
+            and other.asset_type == self.AssetType.FUTURE
+            and self.expiration is None
+            and other.expiration is None
+        ):
+            return self.auto_expiry == other.auto_expiry
+
+        return True
 
     def __hash__(self):
         """Make Asset hashable for use in sets and dicts."""

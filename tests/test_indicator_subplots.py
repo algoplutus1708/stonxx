@@ -281,6 +281,9 @@ def test_plot_returns_preserves_cash_settled_status(tmp_path, monkeypatch):
     trades_csv = pd.read_csv(plot_path.with_suffix(".csv"))
     assert "cash_settled" in trades_csv["status"].tolist()
 
+    trades_parquet = pd.read_parquet(plot_path.with_suffix(".parquet"))
+    assert "cash_settled" in trades_parquet["status"].tolist()
+
     def test_named_lines(self, pandas_data_fixture):
         """Test the named lines"""
         strategy_name = "TestIndicatorStrategy"

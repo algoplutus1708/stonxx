@@ -71,3 +71,35 @@ def test_dump_stats_end_to_end_regression_for_datetime_indexes():
     assert strat._strategy_returns_df is not None
     assert not strat._strategy_returns_df.empty
     assert isinstance(pd.Timestamp(strat._strategy_returns_df.index[0]), pd.Timestamp)
+
+
+def test_dump_stats_emits_parquet_file_when_stats_file_is_set(tmp_path) -> None:
+    broker = PandasDataBacktesting(
+        datetime_start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime_end=datetime(2026, 1, 5, tzinfo=timezone.utc),
+    )
+    backtesting_broker = BacktestingBroker(data_source=broker)
+    strat = _StatsOnlyStrategy(broker=backtesting_broker)
+
+    strat._benchmark_asset = None
+    strat._stats_file = str(tmp_path / "stats.csv")
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for i, value in enumerate([100_000.0, 101_000.0, 99_000.0]):
+        strat._append_row(
+            {
+                "datetime": start + timedelta(days=i),
+                "portfolio_value": value,
+            }
+        )
+
+    strat._dump_stats()
+
+    stats_csv = tmp_path / "stats.csv"
+    stats_parquet = tmp_path / "stats.parquet"
+    assert stats_csv.exists()
+    assert stats_parquet.exists()
+
+    parquet_df = pd.read_parquet(stats_parquet)
+    assert not parquet_df.empty
+    assert "portfolio_value" in parquet_df.columns

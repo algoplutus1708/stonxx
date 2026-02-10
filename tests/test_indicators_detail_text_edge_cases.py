@@ -77,6 +77,12 @@ def test_plot_indicators_handles_lines_with_detail_text_nan(tmp_path, monkeypatc
     )
 
     mock_write.assert_called_once()
+    assert (tmp_path / "plot.csv").exists()
+    assert (tmp_path / "plot.parquet").exists()
+
+    parquet_df = pd.read_parquet(tmp_path / "plot.parquet")
+    assert not parquet_df.empty
+    assert "type" in parquet_df.columns
 
 
 def test_plot_indicators_handles_lines_missing_detail_text_column(tmp_path, monkeypatch) -> None:

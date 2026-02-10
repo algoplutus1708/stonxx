@@ -2367,6 +2367,20 @@ class Broker(ABC):
             output_df = self._trade_event_log_df.set_index("time")
             output_df.to_csv(filename)
 
+            parquet_filename = (
+                filename[:-4] + ".parquet" if str(filename).lower().endswith(".csv") else str(filename) + ".parquet"
+            )
+            try:
+                self._trade_event_log_df.to_parquet(
+                    parquet_filename,
+                    index=False,
+                    engine="pyarrow",
+                    compression="zstd",
+                )
+            except Exception as exc:
+                # Never fail end-of-run export due to parquet; CSV is the compatibility layer.
+                self.logger.warning("Failed to write trade events parquet file %s: %s", parquet_filename, exc)
+
     def set_strategy_name(self, strategy_name):
         """
         Let's the broker know the name of the strategy that is using it for logging purposes.

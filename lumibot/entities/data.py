@@ -692,6 +692,11 @@ class Data:
             dt_key = dt.to_pydatetime() if isinstance(dt, pd.Timestamp) else dt
             length = kwargs.get("length", 1)
             timeshift = kwargs.get("timeshift", 0)
+            if timeshift is None:
+                # Strategy.get_historical_prices defaults `timeshift=None` (no shift). Treat None
+                # equivalently to 0 so backtests don't crash when callers omit timeshift.
+                timeshift = 0
+                kwargs["timeshift"] = 0
 
             if isinstance(timeshift, datetime.timedelta):
                 if self.timestep == "day":
@@ -947,6 +952,8 @@ class Data:
         dict
 
         """
+        if timeshift is None:
+            timeshift = 0
 
         if isinstance(timeshift, datetime.timedelta):
             if self.timestep == "day":
@@ -1050,6 +1057,8 @@ class Data:
         pandas.DataFrame
 
         """
+        if timeshift is None:
+            timeshift = 0
         # Parse the timestep
         quantity, timestep = parse_timestep_qty_and_unit(timestep)
         num_periods = length
