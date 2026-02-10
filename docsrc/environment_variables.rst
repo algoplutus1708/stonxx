@@ -81,6 +81,17 @@ SHOW_PLOT / SHOW_INDICATORS / SHOW_TEARSHEET
 - Purpose: Enable/disable artifact generation.
 - Values: ``True`` / ``False`` (string).
 
+LUMIBOT_BACKTEST_PARQUET_MODE
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Control parquet export semantics for backtest artifacts (indicators/trades/stats/trade events).
+- Values:
+  - ``best_effort`` (default): parquet failures log warnings; CSV remains the compatibility layer.
+  - ``required``: parquet export failures raise and should fail the backtest (artifact contract mode).
+- Notes:
+  - This is primarily intended for BotManager/BotSpot backtests where downstream tools depend on Parquet for performance.
+  - When set to ``required``, a parquet export error should fail the backtest so missing artifacts are never silently ignored.
+
 BACKTESTING_QUIET_LOGS
 ^^^^^^^^^^^^^^^^^^^^^^
 

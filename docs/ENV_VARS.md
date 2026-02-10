@@ -70,6 +70,20 @@ This page documents environment variables used by LumiBot, with an emphasis on *
 - Purpose: Enables/disables artifact generation.
 - Values: `True` / `False` (string).
 
+### `LUMIBOT_BACKTEST_PARQUET_MODE`
+- Purpose: Controls parquet export semantics for backtest artifacts (indicators/trades/stats/trade events).
+- Values:
+  - `best_effort` (default): parquet failures log warnings; CSV remains the compatibility layer.
+  - `required`: parquet export failures raise and should fail the backtest (artifact contract mode).
+- Notes:
+  - This is intended for BotManager/BotSpot backtests where downstream tooling depends on Parquet for performance.
+  - BotManager should set `LUMIBOT_BACKTEST_PARQUET_MODE=required` for production backtests.
+- Where:
+  - Mode parsing + sanitizers: `lumibot/tools/parquet_utils.py`
+  - Stats parquet: `lumibot/strategies/_strategy.py`
+  - Indicators/trades parquet: `lumibot/tools/indicators.py`
+  - Trade events parquet: `lumibot/brokers/broker.py`
+
 ### `BACKTESTING_QUIET_LOGS`
 - Purpose: Reduce log noise during backtests.
 - Values: `true` / `false` (string).

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from lumibot.backtesting import BacktestingBroker, PandasDataBacktesting
+from lumibot.entities import Asset
 from lumibot.strategies.strategy import Strategy
 
 
@@ -103,3 +104,40 @@ def test_dump_stats_emits_parquet_file_when_stats_file_is_set(tmp_path) -> None:
     parquet_df = pd.read_parquet(stats_parquet)
     assert not parquet_df.empty
     assert "portfolio_value" in parquet_df.columns
+
+
+def test_dump_stats_parquet_is_resilient_to_object_positions(tmp_path) -> None:
+    """Regression: stats.parquet export must not crash when positions contain objects.
+
+    Production failure was triggered by stats rows containing nested Python objects
+    (e.g., Asset instances). We now coerce object-ish columns to JSON strings before
+    parquet export so backtests fail loudly only in required/contract mode.
+    """
+    broker = PandasDataBacktesting(
+        datetime_start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime_end=datetime(2026, 1, 5, tzinfo=timezone.utc),
+    )
+    backtesting_broker = BacktestingBroker(data_source=broker)
+    strat = _StatsOnlyStrategy(broker=backtesting_broker)
+
+    strat._benchmark_asset = None
+    strat._stats_file = str(tmp_path / "stats.csv")
+
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    strat._append_row(
+        {
+            "datetime": start,
+            "portfolio_value": 100_000.0,
+            # Old behavior included raw Asset objects; keep a variant here to ensure
+            # sanitizer continues to protect parquet export.
+            "positions": [{"asset": Asset("SPY"), "quantity": 1}],
+        }
+    )
+
+    strat._dump_stats()
+
+    stats_parquet = tmp_path / "stats.parquet"
+    assert stats_parquet.exists()
+    parquet_df = pd.read_parquet(stats_parquet)
+    assert "positions" in parquet_df.columns
+    assert isinstance(parquet_df["positions"].iloc[0], str)

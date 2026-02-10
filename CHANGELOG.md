@@ -1,5 +1,16 @@
 # Changelog
 
+## 4.4.49 - 2026-02-10
+### Added
+- Backtesting artifacts: add `LUMIBOT_BACKTEST_PARQUET_MODE` with `required` contract mode (fail-fast on parquet export failures) and structured parquet export logs (rows/cols/bytes/duration, coerced columns).
+
+### Changed
+- Indicators: always emit `*_indicators.csv` + `*_indicators.parquet`, even when a strategy produced no markers/lines/OHLC (empty indicators = valid artifact).
+- Trade events: always emit `*_trade_events.csv` + `*_trade_events.parquet` (empty events = valid artifact).
+
+### Fixed
+- Stats: stop embedding raw `Asset` objects in the `positions` stats snapshot; sanitize object-ish stats columns before parquet export to prevent `Conversion failed for column positions with type object`.
+
 ## 4.4.48 - 2026-02-10
 
 ### Added

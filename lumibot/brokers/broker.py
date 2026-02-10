@@ -22,6 +22,11 @@ from lumibot.tools.lumibot_logger import get_logger
 logger = get_logger(__name__)
 
 from lumibot.tools.lumibot_logger import get_logger, get_strategy_logger
+from lumibot.tools.parquet_utils import (
+    coerce_object_columns_to_json_strings,
+    is_parquet_required,
+    write_parquet_with_logging,
+)
 from ..data_sources import DataSource
 from ..entities import Asset, Order, Position, Quote
 from ..entities.chains import normalize_option_chains
@@ -2363,23 +2368,35 @@ class Broker(ABC):
         return self.data_source.get_quote(asset, quote, exchange)
 
     def export_trade_events_to_csv(self, filename):
-        if len(self._trade_event_log_df) > 0:
-            output_df = self._trade_event_log_df.set_index("time")
+        safe_logger = getattr(self, "logger", None) or logger
+
+        df = self._trade_event_log_df
+        if df is None:
+            df = pd.DataFrame()
+
+        if df.empty:
+            columns = getattr(self, "_trade_event_log_columns", None) or TRADE_EVENT_LOG_COLUMNS
+            df = pd.DataFrame(columns=list(columns))
+            df.to_csv(filename, index=False)
+        else:
+            # Preserve legacy "time as index" CSV formatting for readability.
+            output_df = df.set_index("time") if "time" in df.columns else df
             output_df.to_csv(filename)
 
-            parquet_filename = (
-                filename[:-4] + ".parquet" if str(filename).lower().endswith(".csv") else str(filename) + ".parquet"
-            )
-            try:
-                self._trade_event_log_df.to_parquet(
-                    parquet_filename,
-                    index=False,
-                    engine="pyarrow",
-                    compression="zstd",
-                )
-            except Exception as exc:
-                # Never fail end-of-run export due to parquet; CSV is the compatibility layer.
-                self.logger.warning("Failed to write trade events parquet file %s: %s", parquet_filename, exc)
+        parquet_filename = (
+            filename[:-4] + ".parquet" if str(filename).lower().endswith(".csv") else str(filename) + ".parquet"
+        )
+        required = bool(self.IS_BACKTESTING_BROKER) and is_parquet_required()
+        write_parquet_with_logging(
+            df=df,
+            path=parquet_filename,
+            artifact="trade_events",
+            logger=safe_logger,
+            index=False,
+            required=required,
+            compression="zstd",
+            sanitizer=coerce_object_columns_to_json_strings,
+        )
 
     def set_strategy_name(self, strategy_name):
         """

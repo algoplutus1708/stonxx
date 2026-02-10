@@ -19,6 +19,11 @@ from plotly.subplots import make_subplots
 from .yahoo_helper import YahooHelper as yh
 
 from lumibot.tools.lumibot_logger import get_logger
+from lumibot.tools.parquet_utils import (
+    coerce_object_columns_to_json_strings,
+    is_parquet_required,
+    write_parquet_with_logging,
+)
 
 logger = get_logger(__name__)
 
@@ -502,12 +507,11 @@ def plot_indicators(
     if chart_ohlc_df is not None and not chart_ohlc_df.empty:
         plot_names.update(chart_ohlc_df["plot_name"].unique())
 
-    # Convert to sorted list to ensure consistent order
-    plot_names = sorted(list(plot_names))
-
-    # Ensure num_subplots is at least 1 to avoid ValueError in make_subplots
-    num_subplots = max(1, len(plot_names))
-    subplot_titles = plot_names if num_subplots > 0 else ["default_plot"]
+    # Convert to sorted list to ensure consistent order. Ensure at least one subplot exists
+    # even when the strategy emitted no chart data (empty indicators should still produce artifacts).
+    plot_names = sorted(list(plot_names)) or ["default_plot"]
+    num_subplots = len(plot_names)
+    subplot_titles = plot_names
 
     # Create subplots without shared x-axes
     fig = make_subplots(
@@ -695,20 +699,24 @@ def plot_indicators(
     # Chart Titles and Layouts
     ###############################
 
+    # Set title and layout
+    # Calculate height based on number of subplots
+    # 400px per subplot
+    height = max(800, num_subplots * 400)
+
+    title_text = f"Indicators for {strategy_name}" if strategy_name else "Indicators"
+    if not has_chart_data:
+        title_text = title_text + " (no indicator data)"
+
+    fig.update_layout(
+        title_text=title_text,
+        title_font_size=30,
+        template="plotly_dark",
+        height=height,  # Dynamic height based on number of subplots
+        margin=dict(t=150),  # Add more space between title and first subplot
+    )
+
     if has_chart_data:
-        # Set title and layout
-        # Calculate height based on number of subplots
-        # 400px per subplot
-        height = max(800, num_subplots * 400)
-
-        fig.update_layout(
-            title_text=f"Indicators for {strategy_name}",
-            title_font_size=30,
-            template="plotly_dark",
-            height=height,  # Dynamic height based on number of subplots
-            margin=dict(t=150),  # Add more space between title and first subplot
-        )
-
         # Range selector buttons
         rangeselector_buttons = list([
             dict(count=1, label="1m", step="month", stepmode="backward"),
@@ -747,46 +755,67 @@ def plot_indicators(
                 col=1
             )
 
-        disable_ui = (
-            os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
-            or bool(os.environ.get("PYTEST_CURRENT_TEST"))
-        )
+    disable_ui = (
+        os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    )
 
-        # Create graph (auto_open disabled for CI/tests).
-        fig.write_html(plot_file_html, auto_open=show_indicators and not disable_ui)
+    # Create graph (auto_open disabled for CI/tests).
+    fig.write_html(plot_file_html, auto_open=show_indicators and not disable_ui)
 
-        # Get the file name for the CSV file by removing the .html extension and adding .csv
-        csv_file = plot_file_html.replace(".html", ".csv")
+    # Get the file name for the CSV file by removing the .html extension and adding .csv
+    csv_file = plot_file_html.replace(".html", ".csv")
 
-        # Export chart markers and lines to CSV - combine them and sort by datetime
-        export_dfs = []
-        if chart_markers_df is not None and not chart_markers_df.empty:
-            markers_out = chart_markers_df.copy()
-            markers_out["type"] = "marker"
-            export_dfs.append(markers_out)
-        if chart_lines_df is not None and not chart_lines_df.empty:
-            lines_out = chart_lines_df.copy()
-            lines_out["type"] = "line"
-            export_dfs.append(lines_out)
-        if chart_ohlc_df is not None and not chart_ohlc_df.empty:
-            ohlc_out = chart_ohlc_df.copy()
-            ohlc_out["type"] = "ohlc"
-            export_dfs.append(ohlc_out)
+    # Export chart markers and lines to CSV - combine them and sort by datetime
+    standard_columns = [
+        "datetime",
+        "name",
+        "plot_name",
+        "type",
+        "value",
+        "symbol",
+        "size",
+        "color",
+        "detail_text",
+        "open",
+        "high",
+        "low",
+        "close",
+    ]
+    export_dfs = []
+    if chart_markers_df is not None and not chart_markers_df.empty:
+        markers_out = chart_markers_df.copy()
+        markers_out["type"] = "marker"
+        export_dfs.append(markers_out)
+    if chart_lines_df is not None and not chart_lines_df.empty:
+        lines_out = chart_lines_df.copy()
+        lines_out["type"] = "line"
+        export_dfs.append(lines_out)
+    if chart_ohlc_df is not None and not chart_ohlc_df.empty:
+        ohlc_out = chart_ohlc_df.copy()
+        ohlc_out["type"] = "ohlc"
+        export_dfs.append(ohlc_out)
 
-        if export_dfs:
-            combined_df = pd.concat(export_dfs, ignore_index=True).sort_values(by="datetime")
-            combined_df.to_csv(csv_file, index=False)
-            parquet_file = csv_file.replace(".csv", ".parquet")
-            try:
-                combined_df.to_parquet(
-                    parquet_file,
-                    index=False,
-                    engine="pyarrow",
-                    compression="zstd",
-                )
-            except Exception as exc:
-                # Never fail backtest post-processing due to parquet export; CSV is the compatibility layer.
-                logger.warning("Failed to write indicators parquet file %s: %s", parquet_file, exc)
+    if export_dfs:
+        combined_df = pd.concat(export_dfs, ignore_index=True).sort_values(by="datetime")
+    else:
+        # Always emit indicators.csv so downstream systems can reliably query it.
+        # Some strategies produce no markers/lines/OHLC; treat this as "empty indicators", not a missing artifact.
+        combined_df = pd.DataFrame(columns=standard_columns)
+
+    combined_df.to_csv(csv_file, index=False)
+    parquet_file = csv_file.replace(".csv", ".parquet")
+    required = is_parquet_required()
+    write_parquet_with_logging(
+        df=combined_df,
+        path=parquet_file,
+        artifact="indicators",
+        logger=logger,
+        index=False,
+        required=required,
+        compression="zstd",
+        sanitizer=coerce_object_columns_to_json_strings,
+    )
 
 
 def plot_returns(
@@ -828,16 +857,16 @@ def plot_returns(
         empty_trades_for_csv = pd.DataFrame(columns=standard_trade_columns)
         empty_trades_for_csv.to_csv(trades_csv_file, index=False)
         trades_parquet_file = trades_csv_file.replace(".csv", ".parquet")
-        try:
-            empty_trades_for_csv.to_parquet(
-                trades_parquet_file,
-                index=False,
-                engine="pyarrow",
-                compression="zstd",
-            )
-        except Exception as exc:
-            # Never fail backtest post-processing due to parquet export; CSV is the compatibility layer.
-            logger.warning("Failed to write trades parquet file %s: %s", trades_parquet_file, exc)
+        write_parquet_with_logging(
+            df=empty_trades_for_csv,
+            path=trades_parquet_file,
+            artifact="trades",
+            logger=logger,
+            index=False,
+            required=is_parquet_required(),
+            compression="zstd",
+            sanitizer=coerce_object_columns_to_json_strings,
+        )
     else:
         # Prepare a copy of trades_df for CSV export, ensuring standard columns
         trades_df_for_csv = trades_df.copy()
@@ -850,16 +879,16 @@ def plot_returns(
         trades_df_for_csv.to_csv(trades_csv_file, index=False)
         logger.info(f"Trades data saved to CSV: {trades_csv_file}")
         trades_parquet_file = trades_csv_file.replace(".csv", ".parquet")
-        try:
-            trades_df_for_csv.to_parquet(
-                trades_parquet_file,
-                index=False,
-                engine="pyarrow",
-                compression="zstd",
-            )
-        except Exception as exc:
-            # Never fail backtest post-processing due to parquet export; CSV is the compatibility layer.
-            logger.warning("Failed to write trades parquet file %s: %s", trades_parquet_file, exc)
+        write_parquet_with_logging(
+            df=trades_df_for_csv,
+            path=trades_parquet_file,
+            artifact="trades",
+            logger=logger,
+            index=False,
+            required=is_parquet_required(),
+            compression="zstd",
+            sanitizer=coerce_object_columns_to_json_strings,
+        )
     # --- End: CSV Generation for trades_df ---
 
     dfs_concat = []
