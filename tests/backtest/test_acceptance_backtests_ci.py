@@ -110,6 +110,10 @@ def _find_single(paths: list[Path], description: str) -> Path:
 
 def _base_env(repo_root: Path) -> dict[str, str]:
     env = dict(os.environ)
+    # Acceptance baselines are generated against a specific warm S3 cache namespace. Do not
+    # implicitly follow `LUMIBOT_CACHE_S3_VERSION` here (CI secrets may be rotated ahead of the
+    # warmed/baselined cache, which would force downloader-queue activity and break determinism).
+    acceptance_cache_version = env.get("LUMIBOT_ACCEPTANCE_CACHE_S3_VERSION", "v44")
     env.update(
         {
             # The acceptance subprocess should behave like GitHub CI (where CI=true is always set),
@@ -133,7 +137,7 @@ def _base_env(repo_root: Path) -> dict[str, str]:
             # Default to the CI-provided cache namespace when available (keeps CI + local aligned
             # with the current shared warm-cache version). Fall back to the historical ThetaData
             # acceptance namespace for local/dev runs that don't set the secret.
-            "LUMIBOT_CACHE_S3_VERSION": env.get("LUMIBOT_CACHE_S3_VERSION", "v44"),
+            "LUMIBOT_CACHE_S3_VERSION": acceptance_cache_version,
             "THETADATA_USE_QUEUE": "true",
             "DATADOWNLOADER_API_KEY_HEADER": env.get("DATADOWNLOADER_API_KEY_HEADER", "X-Downloader-Key"),
             "DATADOWNLOADER_SKIP_LOCAL_START": env.get("DATADOWNLOADER_SKIP_LOCAL_START", "true"),
