@@ -225,11 +225,12 @@ def test_intraday_index_minute_clamps_end_requirement_to_last_trading_session_cl
     assert "[THETA][CACHE][STALE]" not in caplog.text
 
 
-def test_index_coverage_gap_does_not_raise_during_prefetch(monkeypatch):
-    """Regression: acceptance mode must not crash on early-run index OHLC coverage gaps.
+def test_index_minute_fetch_bounds_end_to_dt_not_backtest_end(monkeypatch):
+    """Regression: index minute fetches must be bounded to the simulation timestamp.
 
-    Acceptance backtests use an incremental prefetch mode (bounded to the current simulation
-    timestamp) and must not treat "full window not yet loaded" as a fatal error.
+    For intraday backtests we fetch and validate coverage incrementally as `dt` advances.
+    If the request end is forced to the full backtest end up-front, early iterations can fail
+    with large coverage gaps even when the data path is otherwise healthy.
     """
 
     tz = pytz.timezone("America/New_York")
@@ -243,8 +244,6 @@ def test_index_coverage_gap_does_not_raise_during_prefetch(monkeypatch):
         tzinfo=tz,
     )
     monkeypatch.setattr(source, "get_datetime", lambda: dt)
-    monkeypatch.setenv("LUMIBOT_ACCEPTANCE_BACKTEST", "true")
-
     asset = Asset("SPX", asset_type=Asset.AssetType.INDEX)
     quote_asset = Asset("USD", asset_type="forex")
 

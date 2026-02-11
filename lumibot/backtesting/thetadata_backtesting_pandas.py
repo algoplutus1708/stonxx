@@ -743,7 +743,6 @@ class ThetaDataBacktestingPandas(PandasData):
 
         asset_type_value = str(getattr(asset_separated, "asset_type", "")).lower()
         symbol_upper = str(getattr(asset_separated, "symbol", "") or "").upper()
-        is_acceptance = os.environ.get("LUMIBOT_ACCEPTANCE_BACKTEST", "").strip().lower() == "true"
         index_symbols = {
             "SPX", "SPXW",
             "RUT", "RUTW",
@@ -807,12 +806,7 @@ class ThetaDataBacktestingPandas(PandasData):
         window_start = self._normalize_default_timezone(self.datetime_start - START_BUFFER)
         if requested_start is None:
             requested_start = window_start
-        elif (
-            not is_acceptance
-            and asset_separated.asset_type != "option"
-            and window_start is not None
-            and window_start < requested_start
-        ):
+        elif asset_separated.asset_type != "option" and window_start is not None and window_start < requested_start:
             # For non-options, prefetch the full backtest window once for performance.
             requested_start = window_start
         start_threshold = requested_start + effective_start_buffer if requested_start is not None else None
@@ -838,8 +832,8 @@ class ThetaDataBacktestingPandas(PandasData):
             and require_ohlc_data
             and asset_type_value == "index"
             and asset_separated.asset_type != "option"
+            and ts_unit == "day"
             and self.datetime_end is not None
-            and not is_acceptance
         ):
             try:
                 normalized_end = self._normalize_default_timezone(self.datetime_end)
@@ -2493,37 +2487,11 @@ class ThetaDataBacktestingPandas(PandasData):
                         meta.get("prefetch_complete"),
                     )
                 else:
-                    if is_acceptance:
-                        # Acceptance backtests intentionally run in "incremental prefetch" mode:
-                        # the ThetaData helper bounds missing-date validation to `dt` (the current
-                        # simulation timestamp) to keep runs queue-free and deterministic.
-                        logger.warning(
-                            "[THETA][COVERAGE][GAP] asset=%s/%s (%s) coverage_end=%s target_end=%s rows=%s placeholders=%s days_behind=%s; "
-                            "continuing with available data (acceptance incremental prefetch)",
-                            asset_separated,
-                            quote_asset,
-                            ts_unit,
-                            coverage_end,
-                            end_requirement,
-                            meta.get("rows"),
-                            meta.get("placeholders"),
-                            days_behind,
-                        )
-                        logger.debug(
-                            "[THETA][COVERAGE][GAP][DIAGNOSTICS] requested_start=%s start_for_fetch=%s data_start=%s data_end=%s requested_length=%s prefetch_complete=%s",
-                            requested_start,
-                            start_for_fetch,
-                            meta.get("data_start"),
-                            meta.get("data_end"),
-                            requested_length,
-                            meta.get("prefetch_complete"),
-                        )
-                    else:
-                        raise ValueError(
-                            f"[THETA][COVERAGE][GAP] asset={asset_separated}/{quote_asset} ({ts_unit}) coverage_end={coverage_end} "
-                            f"target_end={end_requirement} rows={meta.get('rows')} placeholders={meta.get('placeholders')} "
-                            f"days_behind={days_behind}; refusing to proceed for non-option asset."
-                        )
+                    raise ValueError(
+                        f"[THETA][COVERAGE][GAP] asset={asset_separated}/{quote_asset} ({ts_unit}) coverage_end={coverage_end} "
+                        f"target_end={end_requirement} rows={meta.get('rows')} placeholders={meta.get('placeholders')} "
+                        f"days_behind={days_behind}; refusing to proceed for non-option asset."
+                    )
         if meta.get("tail_placeholder") and not meta.get("tail_missing_permanent"):
             if is_option_asset:
                 # Placeholders at the end mean the option didn't trade for those dates; continue.

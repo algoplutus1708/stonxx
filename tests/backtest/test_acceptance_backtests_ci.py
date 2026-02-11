@@ -115,8 +115,6 @@ def _base_env(repo_root: Path) -> dict[str, str]:
             # The acceptance subprocess should behave like GitHub CI (where CI=true is always set),
             # so any CI-only guardrails in the data path are consistently exercised locally too.
             "CI": "true",
-            # Explicitly enable acceptance-mode guardrails in the ThetaData backtesting datasource.
-            "LUMIBOT_ACCEPTANCE_BACKTEST": "true",
             "IS_BACKTESTING": "True",
             # Acceptance backtests are intended to validate ThetaData + downloader + S3 warm-cache
             # behavior. Many Strategy Library demo scripts default to Polygon for minute-level runs,
