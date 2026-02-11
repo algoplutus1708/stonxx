@@ -9,7 +9,7 @@ import pytest
 from lumibot.backtesting import PandasDataBacktesting
 from lumibot.strategies.strategy import Strategy
 from lumibot.entities import Asset
-from lumibot.tools.indicators import _build_trade_marker_tooltip, plot_returns
+from lumibot.tools.indicators import _build_trade_marker_tooltip, plot_indicators, plot_returns
 
 from tests.fixtures import pandas_data_fixture
 
@@ -556,8 +556,6 @@ class TestAddOHLCGuards:
 
 
 def test_plot_indicators_exports_ohlc_rows(tmp_path, monkeypatch):
-    from lumibot.tools.indicators import plot_indicators
-
     ohlc_df = pd.DataFrame(
         {
             "datetime": pd.to_datetime(["2024-01-01 09:30", "2024-01-01 10:30"]),
@@ -606,3 +604,102 @@ def test_plot_indicators_exports_ohlc_rows(tmp_path, monkeypatch):
     ohlc_rows = exported[exported["type"] == "ohlc"]
     assert len(ohlc_rows) == 2
     assert {"open", "high", "low", "close"}.issubset(set(ohlc_rows.columns))
+
+
+def test_plot_indicators_scales_vertical_spacing_for_many_rows(tmp_path, monkeypatch):
+    from plotly.subplots import make_subplots as real_make_subplots
+
+    rows = 13
+    chart_lines_df = pd.DataFrame(
+        {
+            "datetime": [pd.Timestamp("2024-01-01 09:30")] * rows,
+            "plot_name": [f"plot_{idx}" for idx in range(rows)],
+            "name": [f"line_{idx}" for idx in range(rows)],
+            "value": [float(idx) for idx in range(rows)],
+            "color": ["blue"] * rows,
+            "detail_text": [None] * rows,
+        }
+    )
+
+    captured = {}
+
+    def _spy_make_subplots(*args, **kwargs):
+        captured["vertical_spacing"] = kwargs.get("vertical_spacing")
+        return real_make_subplots(*args, **kwargs)
+
+    monkeypatch.setattr("lumibot.tools.indicators.make_subplots", _spy_make_subplots)
+    mock_write = MagicMock()
+    monkeypatch.setattr("plotly.graph_objects.Figure.write_html", mock_write)
+
+    plot_path = tmp_path / "plot.html"
+    plot_indicators(
+        plot_file_html=str(plot_path),
+        chart_lines_df=chart_lines_df,
+        strategy_name="ManyRows",
+        show_indicators=True,
+    )
+
+    assert "vertical_spacing" in captured
+    assert captured["vertical_spacing"] <= (1.0 / (rows - 1))
+    assert captured["vertical_spacing"] > 0
+    mock_write.assert_called_once()
+    assert plot_path.with_suffix(".csv").exists()
+    assert plot_path.with_suffix(".parquet").exists()
+
+
+def test_plot_indicators_skips_html_when_env_disabled(tmp_path, monkeypatch):
+    chart_lines_df = pd.DataFrame(
+        {
+            "datetime": [pd.Timestamp("2024-01-01 09:30")],
+            "plot_name": ["default_plot"],
+            "name": ["line"],
+            "value": [1.0],
+            "color": ["blue"],
+            "detail_text": [None],
+        }
+    )
+
+    monkeypatch.setenv("LUMIBOT_WRITE_INDICATORS_HTML", "false")
+    mock_write = MagicMock()
+    monkeypatch.setattr("plotly.graph_objects.Figure.write_html", mock_write)
+
+    plot_path = tmp_path / "plot.html"
+    plot_indicators(
+        plot_file_html=str(plot_path),
+        chart_lines_df=chart_lines_df,
+        strategy_name="NoHtml",
+        show_indicators=True,
+    )
+
+    mock_write.assert_not_called()
+    assert plot_path.with_suffix(".csv").exists()
+    assert plot_path.with_suffix(".parquet").exists()
+
+
+def test_plot_indicators_exports_artifacts_when_html_write_fails(tmp_path, monkeypatch):
+    chart_lines_df = pd.DataFrame(
+        {
+            "datetime": [pd.Timestamp("2024-01-01 09:30")],
+            "plot_name": ["default_plot"],
+            "name": ["line"],
+            "value": [1.0],
+            "color": ["blue"],
+            "detail_text": [None],
+        }
+    )
+
+    def _raise_write_html(*args, **kwargs):
+        raise RuntimeError("simulated html failure")
+
+    monkeypatch.setattr("plotly.graph_objects.Figure.write_html", _raise_write_html)
+
+    plot_path = tmp_path / "plot.html"
+    plot_indicators(
+        plot_file_html=str(plot_path),
+        chart_lines_df=chart_lines_df,
+        strategy_name="HtmlFail",
+        show_indicators=True,
+    )
+
+    assert plot_path.with_suffix(".csv").exists()
+    assert plot_path.with_suffix(".parquet").exists()
