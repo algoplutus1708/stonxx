@@ -2,7 +2,14 @@
 
 ## 4.4.50 - Unreleased
 
-- TBD
+### Changed
+- Indicators HTML: improve subplot scaling so indicator panels render with sane proportions across mixed plots.
+- Indicators export: make HTML export non-fatal so backtests still complete if HTML rendering fails.
+
+### Fixed
+- ThetaData backtesting: keep intraday index minute/hour fetch bounds aligned to the simulation timestamp instead of forcing full-window end coverage.
+- Acceptance baselines: refresh 0DTE backdoor baseline metrics and timing metadata to match current provider data revisions.
+- Acceptance CI: allow a bounded queue-fill threshold for `spx_short_straddle_repro` while keeping strict queue-free checks for other ThetaData acceptance cases.
 
 ## 4.4.49 - 2026-02-10
 ### Added
