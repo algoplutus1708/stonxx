@@ -832,6 +832,7 @@ class ThetaDataBacktestingPandas(PandasData):
             and require_ohlc_data
             and asset_type_value == "index"
             and asset_separated.asset_type != "option"
+            and ts_unit == "day"
             and self.datetime_end is not None
         ):
             try:
@@ -976,12 +977,18 @@ class ThetaDataBacktestingPandas(PandasData):
                             )
                             cached_close = None
                             if not schedule.empty:
-                                closes = schedule["market_close"]
-                                candidates = closes[closes <= end_requirement]
-                                if not candidates.empty:
-                                    cached_close = candidates.iloc[-1]
-                                else:
-                                    cached_close = closes.iloc[0]
+                                # We want the session close for the *last trading day* at or before
+                                # end_requirement's date. Do not clamp intraday requests (e.g. 10:15)
+                                # down to a prior-day close: only clamp when the end bound is after
+                                # the session close (e.g. 23:59, weekend/holiday end dates).
+                                end_date = end_requirement.date()
+                                try:
+                                    mask = schedule.index.date <= end_date
+                                    eligible = schedule.loc[mask]
+                                except Exception:
+                                    eligible = schedule
+                                if not eligible.empty:
+                                    cached_close = eligible.iloc[-1]["market_close"]
                             close_cache[cache_key] = cached_close
 
                         if cached_close is not None and end_requirement > cached_close:

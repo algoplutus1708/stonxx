@@ -14,7 +14,6 @@ from plotly.subplots import make_subplots
 
 from ..constants import LUMIBOT_DEFAULT_TIMEZONE
 from lumibot.tools import to_datetime_aware
-from plotly.subplots import make_subplots
 
 from .yahoo_helper import YahooHelper as yh
 
@@ -26,6 +25,9 @@ from lumibot.tools.parquet_utils import (
 )
 
 logger = get_logger(__name__)
+
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 
 TERMINAL_TRADE_STATUSES_FOR_MARKERS = {
     "fill",
@@ -448,6 +450,31 @@ def _safe_color(raw_color, key_hint=""):
     return SAFE_COLOR_CYCLE[idx]
 
 
+def _env_flag_enabled(name: str, default: bool = False) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+
+    normalized = str(raw_value).strip().lower()
+    if normalized in _TRUE_ENV_VALUES:
+        return True
+    if normalized in _FALSE_ENV_VALUES:
+        return False
+    return default
+
+
+def _safe_subplot_vertical_spacing(rows: int, default_spacing: float = 0.15, epsilon: float = 1e-6) -> float:
+    # Plotly requires vertical_spacing <= 1 / (rows - 1) for multi-row layouts.
+    if rows <= 1:
+        return 0.0
+
+    max_allowed = (1.0 / float(rows - 1)) - epsilon
+    if max_allowed <= 0:
+        return 0.0
+
+    return min(default_spacing, max_allowed)
+
+
 def calculate_returns(symbol, start=datetime(1900, 1, 1), end=datetime.now()):
     start = to_datetime_aware(start)
     end = to_datetime_aware(end)
@@ -513,255 +540,269 @@ def plot_indicators(
     num_subplots = len(plot_names)
     subplot_titles = plot_names
 
-    # Create subplots without shared x-axes
-    fig = make_subplots(
-        rows=num_subplots,
-        cols=1,
-        subplot_titles=subplot_titles,
-        shared_xaxes=False,  # Do not use shared x-axes
-        vertical_spacing=0.15,  # Increase spacing between subplots to prevent range slider overlap,
-    )
+    vertical_spacing = _safe_subplot_vertical_spacing(num_subplots)
+    if vertical_spacing < 0.15:
+        logger.info(
+            f"Adjusted indicators subplot vertical spacing from 0.15 to {vertical_spacing:.6f} for {num_subplots} rows."
+        )
 
-    has_chart_data = False
+    try:
+        # Create subplots without shared x-axes
+        fig = make_subplots(
+            rows=num_subplots,
+            cols=1,
+            subplot_titles=subplot_titles,
+            shared_xaxes=False,  # Do not use shared x-axes
+            vertical_spacing=vertical_spacing,
+        )
 
-    ###############################
-    # Chart Markers
-    ###############################
+        has_chart_data = False
 
-    def generate_marker_plotly_text(row):
-        return _format_indicator_plotly_text(row.get("value"), row.get("detail_text"))
+        ###############################
+        # Chart Markers
+        ###############################
 
-    # Plot the chart markers
-    if chart_markers_df is not None and not chart_markers_df.empty:
-        chart_markers_df["detail_text"] = chart_markers_df.apply(generate_marker_plotly_text, axis=1)
+        def generate_marker_plotly_text(row):
+            return _format_indicator_plotly_text(row.get("value"), row.get("detail_text"))
 
-        # Group by plot_name first, then by name
-        for plot_name, plot_df in chart_markers_df.groupby("plot_name"):
-            # Loop over the marker names for this plot_name
-            for marker_name, group_df in plot_df.groupby("name"):
-                group_df = group_df.copy()
-                # Get the marker symbol
-                marker_symbol = group_df["symbol"].iloc[0]
+        # Plot the chart markers
+        if chart_markers_df is not None and not chart_markers_df.empty:
+            chart_markers_df["detail_text"] = chart_markers_df.apply(generate_marker_plotly_text, axis=1)
 
-                # Determine marker size(s), falling back to sensible defaults when unspecified
-                default_marker_size = 25
-                raw_sizes = group_df.get("size")
-                marker_size = default_marker_size
+            # Group by plot_name first, then by name
+            for plot_name, plot_df in chart_markers_df.groupby("plot_name"):
+                # Loop over the marker names for this plot_name
+                for marker_name, group_df in plot_df.groupby("name"):
+                    group_df = group_df.copy()
+                    # Get the marker symbol
+                    marker_symbol = group_df["symbol"].iloc[0]
 
-                if raw_sizes is not None:
-                    marker_sizes = pd.to_numeric(raw_sizes, errors="coerce")
+                    # Determine marker size(s), falling back to sensible defaults when unspecified
+                    default_marker_size = 25
+                    raw_sizes = group_df.get("size")
+                    marker_size = default_marker_size
 
-                    if isinstance(marker_sizes, pd.Series):
-                        marker_sizes = marker_sizes.fillna(default_marker_size).clip(lower=1)
-                        unique_sizes = marker_sizes.unique()
-                        if len(unique_sizes) == 1:
-                            marker_size = float(unique_sizes[0])
+                    if raw_sizes is not None:
+                        marker_sizes = pd.to_numeric(raw_sizes, errors="coerce")
+
+                        if isinstance(marker_sizes, pd.Series):
+                            marker_sizes = marker_sizes.fillna(default_marker_size).clip(lower=1)
+                            unique_sizes = marker_sizes.unique()
+                            if len(unique_sizes) == 1:
+                                marker_size = float(unique_sizes[0])
+                            else:
+                                marker_size = marker_sizes.tolist()
                         else:
-                            marker_size = marker_sizes.tolist()
-                    else:
-                        if pd.isna(marker_sizes) or marker_sizes <= 0:
-                            marker_size = default_marker_size
-                        else:
-                            marker_size = float(marker_sizes)
+                            if pd.isna(marker_sizes) or marker_sizes <= 0:
+                                marker_size = default_marker_size
+                            else:
+                                marker_size = float(marker_sizes)
 
-                if "color" not in group_df.columns:
-                    group_df["color"] = None
-                group_df.loc[:, "color"] = group_df["color"].apply(
-                    lambda val: _safe_color(val, f"{plot_name}:{marker_name}")
-                )
+                    if "color" not in group_df.columns:
+                        group_df["color"] = None
+                    group_df.loc[:, "color"] = group_df["color"].apply(
+                        lambda val: _safe_color(val, f"{plot_name}:{marker_name}")
+                    )
 
-                # Determine which subplot to use
-                row = plot_names.index(plot_name) + 1
-
-                # Create a new trace for this marker name
-                fig.add_trace(
-                    go.Scatter(
-                        x=group_df["datetime"],
-                        y=group_df["value"],
-                        mode="markers",
-                        name=marker_name,
-                        marker_color=group_df["color"],
-                        marker_size=marker_size,
-                        marker_symbol=marker_symbol,
-                        hovertemplate=f"{marker_name}<br>%{{text}}<br>%{{x|%b %d %Y %I:%M:%S %p}}<extra></extra>",
-                        text=group_df["detail_text"],
-                    ),
-                    row=row,
-                    col=1
-                )
-
-        has_chart_data = True
-
-    ###############################
-    # Chart Lines
-    ###############################
-
-    def generate_line_plotly_text(row):
-        return _format_indicator_plotly_text(row.get("value"), row.get("detail_text"))
-
-    # Plot the chart lines
-    if chart_lines_df is not None and not chart_lines_df.empty:
-        chart_lines_df["detail_text"] = chart_lines_df.apply(generate_line_plotly_text, axis=1)
-
-        # Group by plot_name first, then by name
-        for plot_name, plot_df in chart_lines_df.groupby("plot_name"):
-            # Loop over the line names for this plot_name
-            for line_name, group_df in plot_df.groupby("name"):
-                if "color" not in group_df.columns:
-                    group_df = group_df.assign(color=None)
-                color = _safe_color(group_df["color"].iloc[0], f"{plot_name}:{line_name}")
-
-                # Determine which subplot to use
-                row = plot_names.index(plot_name) + 1
-
-                # Create a new trace for this line name
-                fig.add_trace(
-                    go.Scatter(
-                        x=group_df["datetime"],
-                        y=group_df["value"],
-                        mode="lines",
-                        name=line_name,
-                        line_color=color,
-                        hovertemplate=f"{line_name}<br>%{{text}}<br>%{{x|%b %d %Y %I:%M:%S %p}}<extra></extra>",
-                        text=group_df["detail_text"],
-                    ),
-                    row=row,
-                    col=1
-                )
-
-        has_chart_data = True
-
-    ###############################
-    # Chart OHLC
-    ###############################
-
-    def _generate_ohlc_hover_text(row):
-        base = f"O: {row['open']}<br>H: {row['high']}<br>L: {row['low']}<br>C: {row['close']}"
-        if row.get("detail_text") is None:
-            return base
-        return base + "<br>" + str(row.get("detail_text"))
-
-    if chart_ohlc_df is not None and not chart_ohlc_df.empty:
-        chart_ohlc_df = chart_ohlc_df.copy()
-
-        for col in ("open", "high", "low", "close"):
-            if col not in chart_ohlc_df.columns:
-                logger.warning(f"OHLC data missing required column '{col}', skipping OHLC plotting.")
-                chart_ohlc_df = None
-                break
-
-        if chart_ohlc_df is not None and not chart_ohlc_df.empty:
-            if "color" not in chart_ohlc_df.columns:
-                chart_ohlc_df["color"] = None
-
-            # Default per-bar colors: green for bullish, red for bearish (matches Strategy.add_ohlc defaults).
-            chart_ohlc_df["color"] = chart_ohlc_df["color"].where(
-                chart_ohlc_df["color"].notna(),
-                np.where(chart_ohlc_df["close"] >= chart_ohlc_df["open"], "green", "red"),
-            )
-
-            chart_ohlc_df["detail_text"] = chart_ohlc_df.apply(_generate_ohlc_hover_text, axis=1)
-
-            # Group by plot_name first, then by series name.
-            for plot_name, plot_df in chart_ohlc_df.groupby("plot_name"):
-                for ohlc_name, group_df in plot_df.groupby("name"):
+                    # Determine which subplot to use
                     row = plot_names.index(plot_name) + 1
 
-                    # Preserve per-bar colors by splitting into separate traces per color.
-                    color_groups = list(group_df.groupby("color"))
-                    for idx, (bar_color, colored_df) in enumerate(color_groups):
-                        trace_color = _safe_color(bar_color, f"{plot_name}:{ohlc_name}:{bar_color}")
-
-                        fig.add_trace(
-                            go.Candlestick(
-                                x=colored_df["datetime"],
-                                open=colored_df["open"],
-                                high=colored_df["high"],
-                                low=colored_df["low"],
-                                close=colored_df["close"],
-                                name=ohlc_name,
-                                showlegend=idx == 0,
-                                legendgroup=ohlc_name,
-                                increasing_line_color=trace_color,
-                                decreasing_line_color=trace_color,
-                                increasing_fillcolor=trace_color,
-                                decreasing_fillcolor=trace_color,
-                                hovertext=colored_df["detail_text"],
-                                hoverinfo="x+text",
-                            ),
-                            row=row,
-                            col=1,
-                        )
+                    # Create a new trace for this marker name
+                    fig.add_trace(
+                        go.Scatter(
+                            x=group_df["datetime"],
+                            y=group_df["value"],
+                            mode="markers",
+                            name=marker_name,
+                            marker_color=group_df["color"],
+                            marker_size=marker_size,
+                            marker_symbol=marker_symbol,
+                            hovertemplate=f"{marker_name}<br>%{{text}}<br>%{{x|%b %d %Y %I:%M:%S %p}}<extra></extra>",
+                            text=group_df["detail_text"],
+                        ),
+                        row=row,
+                        col=1
+                    )
 
             has_chart_data = True
 
-    ###############################
-    # Chart Titles and Layouts
-    ###############################
+        ###############################
+        # Chart Lines
+        ###############################
 
-    # Set title and layout
-    # Calculate height based on number of subplots
-    # 400px per subplot
-    height = max(800, num_subplots * 400)
+        def generate_line_plotly_text(row):
+            return _format_indicator_plotly_text(row.get("value"), row.get("detail_text"))
 
-    title_text = f"Indicators for {strategy_name}" if strategy_name else "Indicators"
-    if not has_chart_data:
-        title_text = title_text + " (no indicator data)"
+        # Plot the chart lines
+        if chart_lines_df is not None and not chart_lines_df.empty:
+            chart_lines_df["detail_text"] = chart_lines_df.apply(generate_line_plotly_text, axis=1)
 
-    fig.update_layout(
-        title_text=title_text,
-        title_font_size=30,
-        template="plotly_dark",
-        height=height,  # Dynamic height based on number of subplots
-        margin=dict(t=150),  # Add more space between title and first subplot
-    )
+            # Group by plot_name first, then by name
+            for plot_name, plot_df in chart_lines_df.groupby("plot_name"):
+                # Loop over the line names for this plot_name
+                for line_name, group_df in plot_df.groupby("name"):
+                    if "color" not in group_df.columns:
+                        group_df = group_df.assign(color=None)
+                    color = _safe_color(group_df["color"].iloc[0], f"{plot_name}:{line_name}")
 
-    if has_chart_data:
-        # Range selector buttons
-        rangeselector_buttons = list([
-            dict(count=1, label="1m", step="month", stepmode="backward"),
-            dict(count=6, label="6m", step="month", stepmode="backward"),
-            dict(count=1, label="YTD", step="year", stepmode="todate"),
-            dict(count=1, label="1y", step="year", stepmode="backward"),
-            dict(step="all"),
-        ])
+                    # Determine which subplot to use
+                    row = plot_names.index(plot_name) + 1
 
-        # Update axes for all subplots
-        for i in range(1, num_subplots + 1):
-            # Get the plot name for this subplot
-            plot_title = plot_names[i - 1]
+                    # Create a new trace for this line name
+                    fig.add_trace(
+                        go.Scatter(
+                            x=group_df["datetime"],
+                            y=group_df["value"],
+                            mode="lines",
+                            name=line_name,
+                            line_color=color,
+                            hovertemplate=f"{line_name}<br>%{{text}}<br>%{{x|%b %d %Y %I:%M:%S %p}}<extra></extra>",
+                            text=group_df["detail_text"],
+                        ),
+                        row=row,
+                        col=1
+                    )
 
-            # Set y-axes titles for each subplot
-            fig.update_yaxes(
-                title_text=plot_title,
-                secondary_y=False,
-                row=i,
-                col=1
+            has_chart_data = True
+
+        ###############################
+        # Chart OHLC
+        ###############################
+
+        def _generate_ohlc_hover_text(row):
+            base = f"O: {row['open']}<br>H: {row['high']}<br>L: {row['low']}<br>C: {row['close']}"
+            if row.get("detail_text") is None:
+                return base
+            return base + "<br>" + str(row.get("detail_text"))
+
+        if chart_ohlc_df is not None and not chart_ohlc_df.empty:
+            chart_ohlc_df = chart_ohlc_df.copy()
+
+            for col in ("open", "high", "low", "close"):
+                if col not in chart_ohlc_df.columns:
+                    logger.warning(f"OHLC data missing required column '{col}', skipping OHLC plotting.")
+                    chart_ohlc_df = None
+                    break
+
+            if chart_ohlc_df is not None and not chart_ohlc_df.empty:
+                if "color" not in chart_ohlc_df.columns:
+                    chart_ohlc_df["color"] = None
+
+                # Default per-bar colors: green for bullish, red for bearish (matches Strategy.add_ohlc defaults).
+                chart_ohlc_df["color"] = chart_ohlc_df["color"].where(
+                    chart_ohlc_df["color"].notna(),
+                    np.where(chart_ohlc_df["close"] >= chart_ohlc_df["open"], "green", "red"),
+                )
+
+                chart_ohlc_df["detail_text"] = chart_ohlc_df.apply(_generate_ohlc_hover_text, axis=1)
+
+                # Group by plot_name first, then by series name.
+                for plot_name, plot_df in chart_ohlc_df.groupby("plot_name"):
+                    for ohlc_name, group_df in plot_df.groupby("name"):
+                        row = plot_names.index(plot_name) + 1
+
+                        # Preserve per-bar colors by splitting into separate traces per color.
+                        color_groups = list(group_df.groupby("color"))
+                        for idx, (bar_color, colored_df) in enumerate(color_groups):
+                            trace_color = _safe_color(bar_color, f"{plot_name}:{ohlc_name}:{bar_color}")
+
+                            fig.add_trace(
+                                go.Candlestick(
+                                    x=colored_df["datetime"],
+                                    open=colored_df["open"],
+                                    high=colored_df["high"],
+                                    low=colored_df["low"],
+                                    close=colored_df["close"],
+                                    name=ohlc_name,
+                                    showlegend=idx == 0,
+                                    legendgroup=ohlc_name,
+                                    increasing_line_color=trace_color,
+                                    decreasing_line_color=trace_color,
+                                    increasing_fillcolor=trace_color,
+                                    decreasing_fillcolor=trace_color,
+                                    hovertext=colored_df["detail_text"],
+                                    hoverinfo="x+text",
+                                ),
+                                row=row,
+                                col=1,
+                            )
+
+                has_chart_data = True
+
+        ###############################
+        # Chart Titles and Layouts
+        ###############################
+
+        # Set title and layout
+        # Calculate height based on number of subplots
+        # 400px per subplot
+        height = max(800, num_subplots * 400)
+
+        title_text = f"Indicators for {strategy_name}" if strategy_name else "Indicators"
+        if not has_chart_data:
+            title_text = title_text + " (no indicator data)"
+
+        fig.update_layout(
+            title_text=title_text,
+            title_font_size=30,
+            template="plotly_dark",
+            height=height,  # Dynamic height based on number of subplots
+            margin=dict(t=150),  # Add more space between title and first subplot
+        )
+
+        if has_chart_data:
+            # Range selector buttons
+            rangeselector_buttons = list([
+                dict(count=1, label="1m", step="month", stepmode="backward"),
+                dict(count=6, label="6m", step="month", stepmode="backward"),
+                dict(count=1, label="YTD", step="year", stepmode="todate"),
+                dict(count=1, label="1y", step="year", stepmode="backward"),
+                dict(step="all"),
+            ])
+
+            # Update axes for all subplots
+            for i in range(1, num_subplots + 1):
+                # Get the plot name for this subplot
+                plot_title = plot_names[i - 1]
+
+                # Set y-axes titles for each subplot
+                fig.update_yaxes(
+                    title_text=plot_title,
+                    secondary_y=False,
+                    row=i,
+                    col=1
+                )
+
+                # Add range selector and range slider to each subplot
+                fig.update_xaxes(
+                    rangeselector=dict(
+                        buttons=rangeselector_buttons,
+                        font=dict(color="black"),
+                        activecolor="grey",
+                        bgcolor="white",
+                    ),
+                    rangeslider=dict(
+                        visible=True,
+                        thickness=0.02  # Make the range slider height shorter to make line graph appear taller
+                    ),
+                    row=i,
+                    col=1
+                )
+
+        disable_ui = _env_flag_enabled("LUMIBOT_DISABLE_UI", default=False) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        write_indicators_html = _env_flag_enabled("LUMIBOT_WRITE_INDICATORS_HTML", default=True)
+
+        if write_indicators_html:
+            # Create graph (auto_open disabled for CI/tests).
+            fig.write_html(plot_file_html, auto_open=show_indicators and not disable_ui)
+        else:
+            logger.info(
+                "Skipping indicators HTML generation because LUMIBOT_WRITE_INDICATORS_HTML is disabled."
             )
-
-            # Add range selector and range slider to each subplot
-            fig.update_xaxes(
-                rangeselector=dict(
-                    buttons=rangeselector_buttons,
-                    font=dict(color="black"),
-                    activecolor="grey",
-                    bgcolor="white",
-                ),
-                rangeslider=dict(
-                    visible=True,
-                    thickness=0.02  # Make the range slider height shorter to make line graph appear taller
-                ),
-                row=i,
-                col=1
-            )
-
-    disable_ui = (
-        os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
-        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
-    )
-
-    # Create graph (auto_open disabled for CI/tests).
-    fig.write_html(plot_file_html, auto_open=show_indicators and not disable_ui)
+    except Exception:
+        logger.exception(
+            "Indicators subplot rendering failed; continuing with indicators CSV/parquet export."
+        )
 
     # Get the file name for the CSV file by removing the .html extension and adding .csv
     csv_file = plot_file_html.replace(".html", ".csv")
@@ -835,10 +876,7 @@ def plot_returns(
         logger.info("show_plot is False, not creating the plot file or CSV.")
         return
 
-    disable_ui = (
-        os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
-        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
-    )
+    disable_ui = _env_flag_enabled("LUMIBOT_DISABLE_UI", default=False) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
     logger.info("\nCreating trades plot and CSV...")
 
@@ -1493,10 +1531,7 @@ def create_tearsheet(
     except Exception:  # pragma: no cover
         pass
 
-    disable_ui = (
-        os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
-        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
-    )
+    disable_ui = _env_flag_enabled("LUMIBOT_DISABLE_UI", default=False) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
     if show_tearsheet and not disable_ui:
         url = "file://" + os.path.abspath(str(tearsheet_file))

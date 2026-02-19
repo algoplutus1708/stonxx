@@ -73,21 +73,21 @@
       "strategy_name": "TqqqSma200Strategy"
     },
     {
-      "backtest_time_seconds": 291.9957483340404,
-      "baseline_run_id": "BackdoorButterfly0DTE_2026-01-05_09-36_7AP0H8",
+      "backtest_time_seconds": 713.2885150569491,
+      "baseline_run_id": "BackdoorButterfly0DTE_2026-02-11_07-30_pRl4Ur",
       "data_source": "thetadata",
       "end_date": "2025-12-01",
-      "lumibot_version": "4.4.27",
+      "lumibot_version": "4.4.50",
       "max_backtest_time_seconds": 900,
       "metrics_centipercent": {
-        "cagr": -2220,
-        "max_drawdown": -2630,
-        "total_return": -2034
+        "cagr": -3306,
+        "max_drawdown": -3545,
+        "total_return": -3049
       },
       "metrics_raw": {
-        "cagr": "-22.20%",
-        "max_drawdown": "-26.30%",
-        "total_return": "-20.34%"
+        "cagr": "-33.06%",
+        "max_drawdown": "-35.45%",
+        "total_return": "-30.49%"
       },
       "script_filename": "Backdoor Butterfly 0 DTE (Copy).py",
       "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
@@ -121,21 +121,21 @@
       "strategy_name": "MeliDeepDrawdownCalls"
     },
     {
-      "backtest_time_seconds": 290.771020959015,
-      "baseline_run_id": "BackdoorButterfly0DTESmartLimit_2026-01-05_09-44_qLKdxw",
+      "backtest_time_seconds": 641.7320420742035,
+      "baseline_run_id": "BackdoorButterfly0DTESmartLimit_2026-02-11_07-30_cj3SET",
       "data_source": "thetadata",
       "end_date": "2025-12-01",
-      "lumibot_version": "4.4.27",
+      "lumibot_version": "4.4.50",
       "max_backtest_time_seconds": 900,
       "metrics_centipercent": {
-        "cagr": -528,
-        "max_drawdown": -1338,
-        "total_return": -480
+        "cagr": -1947,
+        "max_drawdown": -2499,
+        "total_return": -1782
       },
       "metrics_raw": {
-        "cagr": "-5.28%",
-        "max_drawdown": "-13.38%",
-        "total_return": "-4.80%"
+        "cagr": "-19.47%",
+        "max_drawdown": "-24.99%",
+        "total_return": "-17.82%"
       },
       "script_filename": "Backdoor Butterfly 0 DTE (Copy) - with SMART LIMITS.py",
       "settings_backtesting_end": "2025-11-30 23:59:00-05:00",

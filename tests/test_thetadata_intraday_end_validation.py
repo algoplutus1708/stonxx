@@ -223,3 +223,45 @@ def test_intraday_index_minute_clamps_end_requirement_to_last_trading_session_cl
         source._update_pandas_data(asset, quote_asset, 5, "minute", dt, require_quote_data=False, require_ohlc_data=True)
 
     assert "[THETA][CACHE][STALE]" not in caplog.text
+
+
+def test_index_minute_fetch_bounds_end_to_dt_not_backtest_end(monkeypatch):
+    """Regression: index minute fetches must be bounded to the simulation timestamp.
+
+    For intraday backtests we fetch and validate coverage incrementally as `dt` advances.
+    If the request end is forced to the full backtest end up-front, early iterations can fail
+    with large coverage gaps even when the data path is otherwise healthy.
+    """
+
+    tz = pytz.timezone("America/New_York")
+    dt = tz.localize(datetime(2025, 1, 2, 10, 15))
+
+    source = ThetaDataBacktestingPandas(
+        datetime_start=tz.localize(datetime(2025, 1, 1, 0, 0)),
+        datetime_end=tz.localize(datetime(2025, 12, 1, 0, 0)),
+        username="test",
+        password="test",
+        tzinfo=tz,
+    )
+    monkeypatch.setattr(source, "get_datetime", lambda: dt)
+    asset = Asset("SPX", asset_type=Asset.AssetType.INDEX)
+    quote_asset = Asset("USD", asset_type="forex")
+
+    calls = []
+
+    def _fake_get_price_data(_fetch_asset, _start, _end, **_kwargs):
+        calls.append({"start": _start, "end": _end})
+        idx = pd.DatetimeIndex([dt])
+        df = pd.DataFrame(
+            {"open": [6000.0], "high": [6000.0], "low": [6000.0], "close": [6000.0], "volume": [0.0]},
+            index=idx,
+        )
+        return df
+
+    monkeypatch.setattr(thetadata_helper, "get_price_data", _fake_get_price_data)
+
+    source._update_pandas_data(asset, quote_asset, 60, "minute", dt, require_quote_data=False, require_ohlc_data=True)
+
+    assert calls, "Expected _update_pandas_data() to fetch OHLC via thetadata_helper.get_price_data()"
+    assert calls[0]["end"] == dt
+    assert calls[0]["end"] != source.datetime_end
