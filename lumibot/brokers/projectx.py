@@ -82,7 +82,7 @@ class ProjectX(Broker):
         1: "open",             # Open (active order on exchange)
         2: "filled",           # Filled (completely executed)
         3: "cancelled",        # Cancelled
-        4: "expired",          # Expired (map to cancelled for Lumibot)
+        4: "expired",          # Expired (mapped to canceled in adapter conversion)
         5: "rejected",         # Rejected (will be aliased to "error")
         6: "new",              # Pending (new order, not yet on exchange)
         # Extended statuses that may exist in some ProjectX implementations:
@@ -922,6 +922,11 @@ class ProjectX(Broker):
             if status.startswith("unknown_status_"):
                 # Downgrade to debug to avoid adapter-level noise
                 self.logger.debug(f"Unknown order status ID: {status_id} for order {broker_order.get('id')}")
+
+            # Broker "expired" is an order-lifecycle terminal cancel state, not option-contract expiration settlement.
+            # Keep adapter behavior stable for ProjectX by treating it as canceled.
+            if status == "expired":
+                status = "cancelled"
 
             # Get the broker's order ID
             broker_order_id = str(broker_order.get("id"))
