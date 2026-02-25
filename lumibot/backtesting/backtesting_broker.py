@@ -1310,18 +1310,22 @@ class BacktestingBroker(Broker):
         if not isinstance(parameters, dict):
             parameters = {}
 
+        default_enabled = getattr(self, "_option_early_assignment_default_enabled", False)
+        default_max_dte_days = getattr(self, "_option_early_assignment_default_max_dte_days", 1)
+        default_max_extrinsic = getattr(self, "_option_early_assignment_default_max_extrinsic", 0.05)
+
         enabled = self._coerce_to_bool(
             parameters.get("option_early_assignment_enabled"),
-            self._option_early_assignment_default_enabled,
+            default_enabled,
         )
         max_dte_days = self._coerce_to_int(
             parameters.get("option_early_assignment_max_dte_days"),
-            self._option_early_assignment_default_max_dte_days,
+            default_max_dte_days,
             minimum=1,
         )
         max_extrinsic = self._coerce_to_float(
             parameters.get("option_early_assignment_max_extrinsic"),
-            self._option_early_assignment_default_max_extrinsic,
+            default_max_extrinsic,
             minimum=0.0,
         )
         return enabled, max_dte_days, max_extrinsic
@@ -1398,6 +1402,9 @@ class BacktestingBroker(Broker):
         enabled, max_dte_days, max_extrinsic = self._resolve_early_assignment_config(strategy)
         if not enabled:
             return
+
+        if not hasattr(self, "_option_early_assignment_last_eval"):
+            self._option_early_assignment_last_eval = {}
 
         now = getattr(self, "datetime", None)
         if now is None:
