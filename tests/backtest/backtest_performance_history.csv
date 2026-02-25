@@ -7390,3 +7390,13 @@ timestamp,test_name,data_source,trading_days,execution_time_seconds,git_commit,l
 2026-02-09T23:40:29.033635,test_passing_trader_class_into_backtest_creates_trader_class,unknown,,0.107,799ebcd3,4.4.48,,,,,Auto-tracked from test_passing_trader_into_backtest
 2026-02-10T01:55:03.496205,test_acceptance_backdoor_butterfly,unknown,,156.99,6f5263b9,4.4.48,,,,,Auto-tracked from test_acceptance_backtests_ci
 2026-02-10T01:56:06.036091,test_acceptance_meli_deep_drawdown,unknown,,62.442,6f5263b9,4.4.48,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-02-25T12:56:33.894386,test_acceptance_tqqq_sma200,unknown,,15.516,75386b99,4.4.51,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-02-25T13:02:30.867907,test_acceptance_tqqq_sma200,unknown,,13.887,75386b99,4.4.51,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-02-25T13:08:36.500216,test_acceptance_aapl_deep_dip_calls,unknown,,48.508,75386b99,4.4.51,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-02-25T13:08:51.331912,test_acceptance_leaps_alpha_picks,unknown,,11.822,75386b99,4.4.51,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-02-25T13:09:57.904239,test_acceptance_aapl_deep_dip_calls,unknown,,47.896,75386b99,4.4.51,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-02-25T13:10:11.926664,test_acceptance_leaps_alpha_picks,unknown,,13.925,75386b99,4.4.51,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-02-25T13:10:27.031122,test_acceptance_tqqq_sma200,unknown,,14.989,75386b99,4.4.51,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-02-25T13:17:12.685160,test_acceptance_backdoor_butterfly,unknown,,405.562,75386b99,4.4.51,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-02-25T13:22:22.241544,test_acceptance_aapl_deep_dip_calls,unknown,,52.439,75386b99,4.4.51,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-02-25T13:22:38.583578,test_acceptance_leaps_alpha_picks,unknown,,13.15,75386b99,4.4.51,,,,,Auto-tracked from test_acceptance_backtests_ci

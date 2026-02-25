@@ -29,6 +29,7 @@ class _OptionSettlementStrategyStub:
         self.name = name
         self._name = name
         self.cash = float(cash)
+        self.parameters = {}
         self.minutes_before_closing = 0
         self.buy_trading_fees = []
         self.sell_trading_fees = []
@@ -393,6 +394,93 @@ class TestBacktestingBroker:
         assert "cash_settled" in option_events["type"].tolist()
         assert stock_events.empty
         assert strategy.cash == 11_000.0
+
+    def test_option_early_assignment_short_call_delivers_stock_before_expiry(self):
+        start = dt(2023, 8, 1)
+        end = dt(2023, 8, 2)
+        data_source = PandasData(datetime_start=start, datetime_end=end, pandas_data={})
+        broker = BacktestingBroker(data_source=data_source)
+        strategy = _OptionSettlementStrategyStub(broker=broker, cash=50_000.0)
+        strategy.parameters.update(
+            {
+                "option_early_assignment_enabled": True,
+                "option_early_assignment_max_dte_days": 30,
+                "option_early_assignment_max_extrinsic": 0.05,
+            }
+        )
+
+        underlying = Asset(symbol="AAPL", asset_type="stock")
+        option = Asset(
+            symbol="AAPL",
+            asset_type="option",
+            expiration=datetime.date(2023, 8, 15),
+            strike=100,
+            right=Asset.OptionRight.CALL,
+            multiplier=100,
+            underlying_asset=underlying,
+        )
+        broker._filled_positions.append(Position(strategy.name, option, quantity=-1))
+
+        def _mock_last_price(asset):
+            if asset.asset_type == Asset.AssetType.OPTION:
+                return 10.02  # intrinsic=10, extrinsic=0.02 -> should assign
+            return 110.0
+
+        broker.get_last_price = MagicMock(side_effect=_mock_last_price)
+        broker.process_early_assignment_contracts(strategy, force=True)
+
+        events = broker._trade_event_log_df
+        option_events = events[(events["symbol"] == "AAPL") & (events["asset.asset_type"] == "option")]
+        stock_events = events[(events["symbol"] == "AAPL") & (events["asset.asset_type"] == "stock")]
+
+        assert "assigned" in option_events["status"].tolist()
+        assert "assigned" in option_events["type"].tolist()
+        assert "fill" in stock_events["status"].tolist()
+        assert "assigned" in stock_events["type"].tolist()
+        assert broker.get_tracked_position(strategy.name, option) is None
+        assert broker.get_tracked_position(strategy.name, underlying).quantity == -100.0
+
+    def test_option_early_assignment_skips_when_extrinsic_is_high(self):
+        start = dt(2023, 8, 1)
+        end = dt(2023, 8, 2)
+        data_source = PandasData(datetime_start=start, datetime_end=end, pandas_data={})
+        broker = BacktestingBroker(data_source=data_source)
+        strategy = _OptionSettlementStrategyStub(broker=broker, cash=50_000.0)
+        strategy.parameters.update(
+            {
+                "option_early_assignment_enabled": True,
+                "option_early_assignment_max_dte_days": 30,
+                "option_early_assignment_max_extrinsic": 0.05,
+            }
+        )
+
+        underlying = Asset(symbol="MSFT", asset_type="stock")
+        option = Asset(
+            symbol="MSFT",
+            asset_type="option",
+            expiration=datetime.date(2023, 8, 15),
+            strike=100,
+            right=Asset.OptionRight.CALL,
+            multiplier=100,
+            underlying_asset=underlying,
+        )
+        broker._filled_positions.append(Position(strategy.name, option, quantity=-1))
+
+        def _mock_last_price(asset):
+            if asset.asset_type == Asset.AssetType.OPTION:
+                return 12.5  # intrinsic=10, extrinsic=2.5 -> should not assign
+            return 110.0
+
+        broker.get_last_price = MagicMock(side_effect=_mock_last_price)
+        broker.process_early_assignment_contracts(strategy, force=True)
+
+        events = getattr(broker, "_trade_event_log_df", pd.DataFrame())
+        if not events.empty:
+            option_events = events[(events["symbol"] == "MSFT") & (events["asset.asset_type"] == "option")]
+            assert "assigned" not in option_events["status"].tolist()
+
+        assert broker.get_tracked_position(strategy.name, option) is not None
+        assert broker.get_tracked_position(strategy.name, underlying) is None
 
 
 # New Test Class for Time Advancement Logic

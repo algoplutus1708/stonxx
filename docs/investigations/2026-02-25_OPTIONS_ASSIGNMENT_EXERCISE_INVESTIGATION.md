@@ -177,7 +177,7 @@ Net: chart overlays will drop assignment/exercise/cash-settled lifecycle rows un
    - attempt protective close/liquidation pre-expiration cutoff,
    - if still unsupported, apply broker-like DNE/abandon behavior for longs,
    - avoid force-opening unbounded negative balances by default.
-5. **Early assignment:** optional heuristic model (not hard default), deterministic and explainable.
+5. **Early assignment:** deterministic heuristic model for short physical-settlement options, opt-in and configurable per strategy.
 
 ---
 
@@ -203,11 +203,15 @@ Net: chart overlays will drop assignment/exercise/cash-settled lifecycle rows un
   - DNE-like suppression for unsupported long exercise.
 - Add explicit strategy/broker config knobs for strictness.
 
-## Phase 3: Optional early assignment model
+## Phase 3: Early assignment model (Implemented, opt-in)
 
-- Add opt-in early assignment model for short American-style equity/ETF options.
-- Deterministic heuristic baseline (e.g., deep ITM + low extrinsic near expiry; ex-dividend bias for calls).
-- Keep index options excluded from early physical assignment.
+- Added deterministic early-assignment heuristic for short American-style equity/ETF options.
+- Opt-in model checks near-close, ITM moneyness, DTE window, and low extrinsic threshold.
+- Configurable through `strategy.parameters`:
+  - `option_early_assignment_enabled`
+  - `option_early_assignment_max_dte_days`
+  - `option_early_assignment_max_extrinsic`
+- Index options remain excluded from early physical assignment and continue cash-settlement handling.
 
 ---
 

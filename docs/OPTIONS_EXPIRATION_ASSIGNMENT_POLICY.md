@@ -1,7 +1,7 @@
 # Options Expiration, Exercise, Assignment, and Settlement Policy
 
 **Last Updated:** 2026-02-25
-**Status:** Active policy (Phase 1 implemented on 2026-02-25; early-assignment model still optional/future)
+**Status:** Active policy (expiration + early-assignment heuristic implemented on 2026-02-25)
 **Audience:** LumiBot maintainers, strategy authors, BotSpot consumers
 
 ---
@@ -74,11 +74,16 @@ This keeps accounting correct and preserves auditability in:
 
 ## Early Assignment Policy
 
-Early assignment should be supported as an **optional model**.
+Early assignment is implemented as a deterministic heuristic for short, physically-settled options.
 
-- Default mode should prioritize deterministic expiration handling.
-- Optional early assignment mode can apply deterministic heuristics for short American-style equity/ETF options.
-- Do not apply early assignment logic to cash-settled index options.
+- Scope: short ITM equity/ETF options only (index options remain cash-settled and excluded).
+- Timing: evaluated near close, before expiration, within a configurable DTE window.
+- Trigger: assignment occurs when extrinsic value is below a configurable threshold.
+- Default settings:
+  - `option_early_assignment_enabled=False`
+  - `option_early_assignment_max_dte_days=1`
+  - `option_early_assignment_max_extrinsic=0.05`
+- Settings can be overridden through `strategy.parameters` (recommended when explicitly modeling early-assignment risk).
 
 ---
 

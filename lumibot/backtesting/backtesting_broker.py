@@ -133,7 +133,18 @@ class BacktestingBroker(Broker):
     # Metainfo
     IS_BACKTESTING_BROKER = True
 
-    def __init__(self, data_source, option_source=None, connect_stream=True, max_workers=20, config=None, **kwargs):
+    def __init__(
+        self,
+        data_source,
+        option_source=None,
+        connect_stream=True,
+        max_workers=20,
+        config=None,
+        option_early_assignment_enabled=False,
+        option_early_assignment_max_dte_days=1,
+        option_early_assignment_max_extrinsic=0.05,
+        **kwargs,
+    ):
         super().__init__(name="backtesting", data_source=data_source,
                          option_source=option_source, connect_stream=connect_stream, **kwargs)
         # Calling init methods
@@ -175,6 +186,24 @@ class BacktestingBroker(Broker):
         # This can add overhead and widen CSV outputs, so keep it disabled by default and gate behind
         # `LUMIBOT_BACKTEST_AUDIT=1`.
         self._backtest_audit_enabled = self._truthy_env(os.environ.get("LUMIBOT_BACKTEST_AUDIT"))
+
+        # Early-assignment model (short physical-settled options only).
+        # Opt-in by default; can be enabled per strategy via parameters.
+        self._option_early_assignment_default_enabled = self._coerce_to_bool(
+            option_early_assignment_enabled,
+            False,
+        )
+        self._option_early_assignment_default_max_dte_days = self._coerce_to_int(
+            option_early_assignment_max_dte_days,
+            1,
+            minimum=1,
+        )
+        self._option_early_assignment_default_max_extrinsic = self._coerce_to_float(
+            option_early_assignment_max_extrinsic,
+            0.05,
+            minimum=0.0,
+        )
+        self._option_early_assignment_last_eval = {}
         # Track end-of-data to prevent infinite loops when end date is in the future
         self._end_of_trading_days_reached = False
 
@@ -1242,6 +1271,61 @@ class BacktestingBroker(Broker):
             return max(0.0, float(underlying_price) - float(option_asset.strike))
         return max(0.0, float(option_asset.strike) - float(underlying_price))
 
+    @staticmethod
+    def _coerce_to_bool(value, default: bool) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            value_norm = value.strip().lower()
+            if value_norm in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+            if value_norm in {"0", "false", "f", "no", "n", "off"}:
+                return False
+        return bool(value)
+
+    @staticmethod
+    def _coerce_to_int(value, default: int, minimum: int | None = None) -> int:
+        try:
+            result = int(value)
+        except Exception:
+            result = int(default)
+        if minimum is not None:
+            result = max(minimum, result)
+        return result
+
+    @staticmethod
+    def _coerce_to_float(value, default: float, minimum: float | None = None) -> float:
+        try:
+            result = float(value)
+        except Exception:
+            result = float(default)
+        if minimum is not None:
+            result = max(minimum, result)
+        return result
+
+    def _resolve_early_assignment_config(self, strategy) -> tuple[bool, int, float]:
+        parameters = getattr(strategy, "parameters", None)
+        if not isinstance(parameters, dict):
+            parameters = {}
+
+        enabled = self._coerce_to_bool(
+            parameters.get("option_early_assignment_enabled"),
+            self._option_early_assignment_default_enabled,
+        )
+        max_dte_days = self._coerce_to_int(
+            parameters.get("option_early_assignment_max_dte_days"),
+            self._option_early_assignment_default_max_dte_days,
+            minimum=1,
+        )
+        max_extrinsic = self._coerce_to_float(
+            parameters.get("option_early_assignment_max_extrinsic"),
+            self._option_early_assignment_default_max_extrinsic,
+            minimum=0.0,
+        )
+        return enabled, max_dte_days, max_extrinsic
+
     def _is_cash_settled_index_option(self, option_asset: Asset, underlying_asset: Asset) -> bool:
         if getattr(underlying_asset, "asset_type", None) == Asset.AssetType.INDEX:
             return True
@@ -1280,6 +1364,127 @@ class BacktestingBroker(Broker):
             filled_quantity=Decimal(str(quantity)),
             strategy=strategy,
         )
+
+    def _get_underlying_delivery_side(self, option_asset: Asset, option_quantity: float) -> str:
+        if option_asset.right == Asset.OptionRight.CALL:
+            return Order.OrderSide.BUY if option_quantity > 0 else Order.OrderSide.SELL
+        return Order.OrderSide.SELL if option_quantity > 0 else Order.OrderSide.BUY
+
+    def _get_option_market_price_for_assignment(self, option_asset: Asset) -> float | None:
+        try:
+            option_price = self.get_last_price(option_asset)
+        except Exception:
+            return None
+        if option_price is None:
+            return None
+        try:
+            option_price = float(option_price)
+        except Exception:
+            return None
+        if math.isnan(option_price) or option_price <= 0:
+            return None
+        return option_price
+
+    def _run_backtest_option_lifecycle_tasks(self, strategy) -> None:
+        # Run conservative early-assignment checks near close.
+        self.process_early_assignment_contracts(strategy)
+
+        # Daily-cadence backtests rely on this path for expiration settlement.
+        timestep = getattr(getattr(self, "data_source", None), "_timestep", None)
+        if timestep == "day":
+            self.process_expired_option_contracts(strategy)
+
+    def process_early_assignment_contracts(self, strategy, force: bool = False) -> None:
+        enabled, max_dte_days, max_extrinsic = self._resolve_early_assignment_config(strategy)
+        if not enabled:
+            return
+
+        now = getattr(self, "datetime", None)
+        if now is None:
+            source = getattr(self, "data_source", None)
+            get_datetime = getattr(source, "get_datetime", None)
+            if callable(get_datetime):
+                now = get_datetime()
+        if now is None:
+            return
+
+        current_date = now.date()
+        strategy_name = getattr(strategy, "name", None)
+
+        if not force:
+            time_to_close = self.get_time_to_close()
+            if time_to_close is None:
+                return
+
+            seconds_before_closing = int(max(0, getattr(strategy, "minutes_before_closing", 0)) * 60)
+            if time_to_close > seconds_before_closing:
+                return
+
+            if self._option_early_assignment_last_eval.get(strategy_name) == current_date:
+                return
+
+        self._option_early_assignment_last_eval[strategy_name] = current_date
+
+        positions = list(self.get_tracked_positions(strategy_name))
+        for position in positions:
+            asset = getattr(position, "asset", None)
+            if asset is None or getattr(asset, "asset_type", None) != Asset.AssetType.OPTION:
+                continue
+            if float(position.quantity) >= 0:
+                continue
+            if asset.expiration is None:
+                continue
+
+            days_to_expiry = (asset.expiration - current_date).days
+            if days_to_expiry <= 0 or days_to_expiry > max_dte_days:
+                continue
+
+            contracts = abs(float(position.quantity))
+            if contracts <= 0:
+                continue
+
+            underlying_asset = self._resolve_underlying_asset_for_option(asset, strategy)
+            underlying_price, underlying_asset = self._get_underlying_price_for_settlement(underlying_asset, strategy)
+
+            if self._is_cash_settled_index_option(asset, underlying_asset):
+                continue
+
+            intrinsic_per_contract = self._intrinsic_value_per_contract(asset, underlying_price)
+            if intrinsic_per_contract <= 0:
+                continue
+
+            option_price = self._get_option_market_price_for_assignment(asset)
+            if option_price is None:
+                continue
+
+            extrinsic_per_contract = max(0.0, option_price - intrinsic_per_contract)
+            if extrinsic_per_contract > max_extrinsic:
+                continue
+
+            logger.info(
+                "[OPTION_EARLY_ASSIGNMENT] Assigning short %s dte=%s intrinsic=%.4f extrinsic=%.4f",
+                asset,
+                days_to_expiry,
+                intrinsic_per_contract,
+                extrinsic_per_contract,
+            )
+
+            option_quantity = float(position.quantity)
+            self._cancel_open_orders_for_asset(strategy_name, asset, set())
+            self._dispatch_option_expiration_event(
+                position,
+                strategy,
+                self.ASSIGNED,
+                price=intrinsic_per_contract,
+            )
+            self._dispatch_underlying_delivery_fill(
+                strategy=strategy,
+                underlying_asset=underlying_asset,
+                side=self._get_underlying_delivery_side(asset, option_quantity),
+                quantity=contracts * float(asset.multiplier),
+                strike_price=float(asset.strike),
+                settlement_kind=self.ASSIGNED,
+            )
 
     def _can_support_long_exercise(self, strategy, underlying_asset: Asset, option_asset: Asset, contracts: float) -> bool:
         shares = float(contracts) * float(option_asset.multiplier)
@@ -1331,11 +1536,7 @@ class BacktestingBroker(Broker):
         else:
             option_event_type = self.ASSIGNED
 
-        if position.asset.right == Asset.OptionRight.CALL:
-            underlying_side = Order.OrderSide.BUY if position.quantity > 0 else Order.OrderSide.SELL
-        else:
-            underlying_side = Order.OrderSide.SELL if position.quantity > 0 else Order.OrderSide.BUY
-
+        option_quantity = float(position.quantity)
         self._dispatch_option_expiration_event(
             position,
             strategy,
@@ -1346,7 +1547,7 @@ class BacktestingBroker(Broker):
         self._dispatch_underlying_delivery_fill(
             strategy=strategy,
             underlying_asset=underlying_asset,
-            side=underlying_side,
+            side=self._get_underlying_delivery_side(position.asset, option_quantity),
             quantity=contracts * float(position.asset.multiplier),
             strike_price=float(position.asset.strike),
             settlement_kind=option_event_type,
@@ -1681,6 +1882,7 @@ class BacktestingBroker(Broker):
         unprocessed_bucket = getattr(self, "_unprocessed_orders", None)
         new_bucket = getattr(self, "_new_orders", None)
         if not unprocessed_bucket and not new_bucket:
+            self._run_backtest_option_lifecycle_tasks(strategy)
             return
 
         def _iter_bucket(bucket):
@@ -1700,6 +1902,7 @@ class BacktestingBroker(Broker):
                 pending_orders.append(order)
 
         if not pending_orders:
+            self._run_backtest_option_lifecycle_tasks(strategy)
             return
 
         # Prefetching: Track assets and schedule prefetch
@@ -2676,18 +2879,7 @@ class BacktestingBroker(Broker):
                     )
                 continue
 
-        # Expired contracts settlement is only meaningful at (or after) the end of a session.
-        #
-        # Calling `process_expired_option_contracts()` on every bar is extremely expensive in long
-        # intraday backtests (it scans positions + active orders) and does not change behavior
-        # because the function intentionally skips settlement until after the close.
-        #
-        # - Intraday backtests: settlement is handled once per day by `StrategyExecutor._strategy_sleep()`
-        #   when it advances the clock to the close.
-        # - Daily backtests: `process_pending_orders()` runs once per day, so it is safe to settle here.
-        timestep = getattr(getattr(self, "data_source", None), "_timestep", None)
-        if timestep == "day":
-            self.process_expired_option_contracts(strategy)
+        self._run_backtest_option_lifecycle_tasks(strategy)
 
     def _coerce_price(self, value):
         """Convert numeric inputs to float when possible for safe comparisons."""
