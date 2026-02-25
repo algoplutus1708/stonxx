@@ -393,7 +393,7 @@ class Alpaca(Broker):
             asset = Asset.symbol2asset(position.symbol)
         else:
             asset = Asset(
-                symbol=position.symbol,
+                symbol=self._normalize_symbol_for_internal(position.symbol, asset_type=Asset.AssetType.STOCK),
             )
 
         quantity = position.qty
@@ -503,15 +503,6 @@ class Alpaca(Broker):
             else:
                 raise ValueError(f"Order symbol is missing in response for order id {getattr(response, 'id', None)}")
 
-        # Parse crypto symbol format
-        if "/" in resp_symbol:
-            symbol = resp_symbol.split("/")[0]
-            quote = resp_symbol.split("/")[1]
-            if quote != 'USD':
-                raise ValueError(f"Order has non-USD quote for symbol {symbol}/{quote} in response for order id {getattr(response, 'id', None)}")
-        else:
-            symbol = resp_symbol
-
         # Retrieve order fields, falling back to raw JSON for multi-leg legs
         if isinstance(response, dict):
             resp_raw = response
@@ -533,6 +524,18 @@ class Alpaca(Broker):
                     asset_class_value = first_leg.get('asset_class')
                 else:
                     asset_class_value = getattr(first_leg, 'asset_class', None)
+
+        mapped_asset_type = self.map_asset_type(asset_class_value)
+
+        # Parse symbol format based on the asset class. Only crypto uses slash pairs here.
+        if "/" in resp_symbol and mapped_asset_type == Asset.AssetType.CRYPTO:
+            symbol, quote = resp_symbol.split("/", 1)
+            if quote != "USD":
+                raise ValueError(
+                    f"Order has non-USD quote for symbol {symbol}/{quote} in response for order id {getattr(response, 'id', None)}"
+                )
+        else:
+            symbol = self._normalize_symbol_for_internal(resp_symbol, asset_type=mapped_asset_type)
         # Quantity and side
         qty_value = getattr(response, 'qty', None) or resp_raw.get('qty')
         side_value = getattr(response, 'side', None) or resp_raw.get('side')
@@ -585,7 +588,7 @@ class Alpaca(Broker):
             strategy_name,
             Asset(
                 symbol=symbol,
-                asset_type=self.map_asset_type(asset_class_value),
+                asset_type=mapped_asset_type,
             ),
             quantity=float(Decimal(qty_value)),
             side=side_value,
@@ -813,7 +816,7 @@ class Alpaca(Broker):
         elif order.asset.asset_type == Asset.AssetType.CRYPTO:
             trade_symbol = f"{order.asset.symbol}/{order.quote.symbol}"
         else:
-            trade_symbol = order.asset.symbol
+            trade_symbol = self._normalize_symbol_for_broker(order.asset.symbol, asset_type=order.asset.asset_type)
 
         # If order class is OCO, set to type limit (Alpaca wants this for OCO), Bracket becomes 'market'
         alpaca_type = order.order_type

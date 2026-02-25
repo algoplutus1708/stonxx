@@ -27,6 +27,7 @@ from lumibot.tools.parquet_utils import (
     is_parquet_required,
     write_parquet_with_logging,
 )
+from lumibot.tools.symbol_normalization import normalize_symbol_for_broker, normalize_symbol_for_internal
 from ..data_sources import DataSource
 from ..entities import Asset, Order, Position, Quote
 from ..entities.chains import normalize_option_chains
@@ -111,6 +112,20 @@ class Broker(ABC):
     @staticmethod
     def _truthy_env(value: str | None) -> bool:
         return (value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    def _normalize_symbol_for_internal(self, symbol: object, asset_type: object = Asset.AssetType.STOCK):
+        """Normalize a broker/native symbol into LumiBot's canonical internal format."""
+        return normalize_symbol_for_internal(symbol, asset_type=asset_type)
+
+    def _normalize_symbol_for_broker(
+        self,
+        symbol: object,
+        asset_type: object = Asset.AssetType.STOCK,
+        broker_name: str | None = None,
+    ):
+        """Normalize an internal symbol into this broker's preferred native format."""
+        effective_broker_name = broker_name or getattr(self, "name", "")
+        return normalize_symbol_for_broker(symbol, broker_name=effective_broker_name, asset_type=asset_type)
 
     def __init__(self, name="", connect_stream=True, data_source: DataSource = None, option_source: DataSource = None,
                  config=None, max_workers=20, extended_trading_minutes=0, cleanup_config=None):

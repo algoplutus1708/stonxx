@@ -500,8 +500,11 @@ class Tradier(Broker):
         if len(set([order.asset.symbol for order in orders])) > 1:
             raise ValueError("All orders in a multi-leg order must have the same symbol.")
 
-        # Get the symbol from the first order
-        symbol = orders[0].asset.symbol
+        # Use broker-native class-share notation for the underlying symbol.
+        symbol = self._normalize_symbol_for_broker(
+            orders[0].asset.symbol,
+            asset_type=orders[0].asset.asset_type,
+        )
 
         # Create the legs for the multi-leg order
         legs = []
@@ -530,7 +533,9 @@ class Tradier(Broker):
         )
 
         # Each leg uses a different option asset, just use the base symbol. This matches later Tradier API response.
-        parent_asset = Asset(symbol=symbol)
+        parent_asset = Asset(
+            symbol=self._normalize_symbol_for_internal(symbol, asset_type=Asset.AssetType.STOCK)
+        )
         parent_order = Order(
             identifier=order_response["id"],
             asset=parent_asset,
@@ -585,7 +590,7 @@ class Tradier(Broker):
                     parent_option_symbol = create_options_symbol(
                         order.asset.symbol, order.asset.expiration, order.asset.right, order.asset.strike
                     ) if order.asset.asset_type == Asset.AssetType.OPTION else None
-                    parent_stock_symbol = order.asset.symbol \
+                    parent_stock_symbol = self._normalize_symbol_for_broker(order.asset.symbol, asset_type=order.asset.asset_type) \
                         if order.asset.asset_type != Asset.AssetType.OPTION else None
 
                     # Add the parent order to the legs list
@@ -613,7 +618,7 @@ class Tradier(Broker):
                     child_option_symbol = create_options_symbol(
                         order.asset.symbol, order.asset.expiration, order.asset.right, order.asset.strike
                     ) if child_order.asset.asset_type == Asset.AssetType.OPTION else None
-                    child_stock_symbol = order.asset.symbol \
+                    child_stock_symbol = self._normalize_symbol_for_broker(order.asset.symbol, asset_type=order.asset.asset_type) \
                         if child_order.asset.asset_type != Asset.AssetType.OPTION else None
 
                     # Create the leg
@@ -644,8 +649,7 @@ class Tradier(Broker):
                     return None
 
             elif order.asset is not None and order.asset.asset_type == Asset.AssetType.STOCK:
-                # Make sure the symbol is upper case
-                symbol = order.asset.symbol.upper()
+                symbol = self._normalize_symbol_for_broker(order.asset.symbol, asset_type=order.asset.asset_type)
 
                 # Place the order
                 order_response = self.tradier.orders.order(
@@ -661,7 +665,7 @@ class Tradier(Broker):
 
             elif order.asset is not None and order.asset.asset_type == Asset.AssetType.OPTION:
                 tradier_side = self._lumi_side2tradier(order)
-                stock_symbol = order.asset.symbol
+                stock_symbol = self._normalize_symbol_for_broker(order.asset.symbol, asset_type=order.asset.asset_type)
                 option_symbol = create_options_symbol(
                     order.asset.symbol, order.asset.expiration, order.asset.right, order.asset.strike
                 )
@@ -773,7 +777,7 @@ class Tradier(Broker):
         # Loop through each row in the dataframe
         for _, row in positions_df.iterrows():
             # Get the symbol/quantity and create the position asset
-            symbol = row["symbol"]
+            symbol = self._normalize_symbol_for_internal(row["symbol"], asset_type=Asset.AssetType.STOCK)
             quantity = row["quantity"]
             asset = Asset.symbol2asset(symbol)  # Parse the symbol. Handles 'stock' and 'option' types
 
@@ -882,7 +886,7 @@ class Tradier(Broker):
         asset = (
             Asset.symbol2asset(option_symbol)
             if option_symbol and not pd.isna(option_symbol)
-            else Asset.symbol2asset(symbol)
+            else Asset.symbol2asset(self._normalize_symbol_for_internal(symbol, asset_type=Asset.AssetType.STOCK))
         )
 
         # Get the reason_description if it exists
