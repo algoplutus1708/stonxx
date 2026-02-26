@@ -1384,8 +1384,13 @@ class Strategy(_Strategy):
         self.log_message("Warning: get_tracked_orders() is deprecated, please use get_orders() instead.")
         return self.get_orders()
 
-    def get_orders(self):
+    def get_orders(self, identifiers: list[str] = None):
         """Get all the current open orders.
+
+        Parameters
+        ----------
+        identifiers : list of str
+            A list of order identifiers to filter the orders by. If None, returns all tracked orders for the strategy.
 
         Returns
         -------
@@ -1411,7 +1416,11 @@ class Strategy(_Strategy):
         >>>         self.cancel_order(order)
 
         """
-        return self.broker.get_tracked_orders(self.name)
+        all_orders = self.broker.get_tracked_orders(self.name)
+        if identifiers:
+            filtered_orders = [order for order in all_orders if order.identifier in identifiers]
+            return filtered_orders
+        return all_orders
 
     def get_tracked_assets(self):
         """Get the list of assets for positions

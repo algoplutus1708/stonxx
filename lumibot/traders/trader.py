@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from lumibot.tools.lumibot_logger import get_logger
+from lumibot.tools.lumibot_logger import get_logger, set_console_log_level
 
 # Overloading time.sleep to warn users against using it
 
@@ -320,6 +320,7 @@ class Trader:
                 set_log_level("ERROR")
             else:
                 set_log_level("INFO")
+                set_console_log_level("ERROR")  # Set console log level to ERROR while keeping file logs at INFO
                 # When quiet_logs=False, allow INFO logs to console (respects BACKTESTING_QUIET_LOGS)
         else:
             # Live trades should always have full logging for both console and file
@@ -337,7 +338,8 @@ class Trader:
 
         # Setting file logging if specified
         if self.logfile:
-            add_file_handler(str(self.logfile), level="DEBUG" if self.debug else "INFO")
+            add_file_handler(str(self.logfile), level="DEBUG" if self.debug else "INFO",
+                             is_backtest=self.is_backtest_broker)
 
         # Disable Interactive Brokers logs
         for log_name, log_obj in logging.Logger.manager.loggerDict.items():

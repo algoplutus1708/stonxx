@@ -5,6 +5,7 @@ Provides futures trading functionality through ProjectX broker integration.
 Supports multiple underlying brokers (TSX, TOPONE, etc.) via ProjectX gateway.
 """
 
+import threading
 from datetime import datetime, timedelta
 from typing import Dict, List
 
@@ -152,7 +153,6 @@ class ProjectX(Broker):
         self.streaming_client = None
 
         # Order/position caches
-        self._orders_cache = {}  # Store orders by their IDs
         self._positions_cache = {}  # Store positions
         # Bracket tracking maps (synthetic implementation)
         self._bracket_parent_by_child_id = {}
@@ -160,6 +160,12 @@ class ProjectX(Broker):
         # Asset cache for contract ID lookups
         self._asset_cache = {}
         self._contract_cache = {}
+
+        # Lock to serialize order-update event dispatch and prevent race conditions
+        # when "fill" and "new" websocket events arrive concurrently for the same order
+        # (e.g. instantly-filling market orders). Use RLock so bracket-spawn callbacks
+        # that re-enter dispatch don't deadlock.
+        self._order_update_lock = threading.RLock()
 
         # Orders configuration
         self.order_lookback_days = 30  # Look back period for fetching historical orders
@@ -317,16 +323,16 @@ class ProjectX(Broker):
             if contract_id:
                 tick_size = self.client.get_contract_tick_size(contract_id)
 
-                # Round prices to tick size
+                # Round prices to tick size and handle Decimal case that can't be serialized
                 if limit_price is not None:
-                    limit_price = self.client.round_to_tick_size(limit_price, tick_size)
+                    limit_price = self.client.round_to_tick_size(float(limit_price), tick_size)
                 if stop_price is not None:
-                    stop_price = self.client.round_to_tick_size(stop_price, tick_size)
+                    stop_price = self.client.round_to_tick_size(float(stop_price), tick_size)
 
             response = self.client.order_modify(
                 account_id=self.account_id,
                 order_id=int(order.identifier),
-                size=order.quantity,
+                size=int(order.quantity),
                 limit_price=limit_price,
                 stop_price=stop_price
             )
@@ -473,7 +479,7 @@ class ProjectX(Broker):
                         try:
                             if not order._synthetic_bracket.get('children_submitted'):
                                 # Ensure cache copy gets meta for subsequent events
-                                cached = self._orders_cache.get(order.identifier)
+                                cached = self.get_tracked_order(order.identifier)
                                 if cached and not hasattr(cached, '_synthetic_bracket'):
                                     cached._synthetic_bracket = order._synthetic_bracket
                                     cached._is_bracket_parent = True
@@ -495,10 +501,8 @@ class ProjectX(Broker):
                 
                 # Step 3: Add to _unprocessed_orders FIRST (following gold standard pattern)
                 # This is CRITICAL - must happen before _process_trade_event
+                # Also caches the order for quick lookup during event processing
                 self._unprocessed_orders.append(order)
-                
-                # Step 4: Cache for quick lookups (optional optimization)
-                self._orders_cache[order.identifier] = order
                 
                 # Step 5: Process the NEW_ORDER event (moves from unprocessed to new)
                 try:
@@ -613,15 +617,11 @@ class ProjectX(Broker):
                         self.logger.debug(f"Skipping non-dict order payload: {type(broker_order)}")
                         continue
                     order_id = broker_order.get('id', 'unknown')
-                    status = broker_order.get('status', 'unknown')
-                    order_type = broker_order.get('type', 'unknown')
-                    contract_id = broker_order.get('contractId', 'unknown')
 
                     # Minimal logging - only log issues, not every successful conversion
                     order = self._convert_broker_order_to_lumibot_order(broker_order)
                     if order is not None:
                         recent_orders.append(order)
-                        self._orders_cache[order.identifier] = order
                         conversion_successes += 1
                     else:
                         self.logger.debug(f"❌ Order {order_id} conversion returned None")
@@ -744,21 +744,19 @@ class ProjectX(Broker):
     def _pull_broker_order(self, identifier: str) -> Order:
         """Get a broker order representation by its id."""
         # ProjectX doesn't have a single order endpoint, use cached orders
-        if identifier in self._orders_cache:
-            order = self._orders_cache[identifier]
-            # Safety check to ensure we don't return None orders
-            if order is not None:
-                return order
+        cached_order = self.get_tracked_order(identifier)
+        # Safety check to ensure we don't return None orders
+        if cached_order is not None:
+            return cached_order
         return None
 
     def _pull_broker_all_orders(self) -> List[dict]:
         """Get all orders from broker, including recently filled ones via trades."""
         try:
-            # Use a tighter time window around "now" as recommended by the other AI
-            # This helps catch recently placed orders and avoids missing them
-            end_date = datetime.now() + timedelta(seconds=30)  # Look slightly ahead for clock skew
-            start_date = datetime.now() - timedelta(minutes=5)  # Look back 5 minutes for recent orders
-            
+            # Get all orders from today to catch any recent activity
+            end_date = datetime.now(LUMIBOT_DEFAULT_PYTZ).replace(hour=23, minute=59, second=59)
+            start_date = end_date.replace(hour=0, minute=0, second=0)
+
             self.logger.debug(f"Searching orders: account={self.account_id}, "
                             f"start={start_date.isoformat()}, end={end_date.isoformat()}")
 
@@ -934,7 +932,7 @@ class ProjectX(Broker):
             # Get the broker's order ID
             broker_order_id = str(broker_order.get("id"))
             # If we have a cached order, reuse critical lifecycle info & prevent status downgrade
-            cached_order = self._orders_cache.get(broker_order_id) if hasattr(self, '_orders_cache') else None
+            cached_order = self.get_tracked_order(broker_order_id)
             if cached_order:
                 # Prevent status regression (e.g., filled -> new) from out-of-order stream messages
                 terminal_statuses = {"fill", "filled", "canceled", "cancelled", "error"}
@@ -1166,7 +1164,13 @@ class ProjectX(Broker):
         return order_type
 
     def _update_orders_cache(self):
-        """Update the orders cache with latest data."""
+        """
+        Update the orders cache with latest data.
+        DEPRICATION WARNING: This method is no longer needed with using stored broker orders since double caching
+        caused more issues than it solved. The core Broker's get_tracked_order directly returns the latest broker
+        order data, so this cache update is redundant and can be removed in future versions. Keeping it here for now
+        to avoid breaking changes, but it will no longer be called or maintained.
+        """
         try:
             orders = self._get_orders_at_broker()
             for order in orders:
@@ -1188,26 +1192,33 @@ class ProjectX(Broker):
     # ========== Event Dispatch Methods ==========
 
     def _detect_and_dispatch_order_changes(self, new_order):
-        """Detect status changes and dispatch appropriate events."""
+        """Detect status changes and dispatch appropriate events.
+
+        This method acquires ``_order_update_lock`` to serialize concurrent
+        websocket callbacks (e.g. a "fill" and a "new" event arriving at the
+        same time for a market order that fills instantly).  Using an RLock
+        allows bracket-spawn helpers that re-enter dispatch to proceed without
+        deadlocking.
+        """
         try:
-            if new_order.identifier in self._orders_cache:
-                cached_order = self._orders_cache[new_order.identifier]
-                
-                # Preserve strategy name from cached order
-                if not new_order.strategy and cached_order.strategy:
-                    new_order.strategy = cached_order.strategy
-                    
-                if cached_order.status != new_order.status:
-                    self.logger.debug(f"Order status change detected: {new_order.identifier} {cached_order.status} -> {new_order.status}")
-                    self._dispatch_status_change(cached_order, new_order)
-            else:
-                # First time seeing this order
-                if new_order.status == "new" or new_order.status == "open":
-                    # New order being tracked for first time
-                    self._process_trade_event(new_order, self.NEW_ORDER)
+            with self._order_update_lock:
+                cached_order = self.get_tracked_order(new_order.identifier)
+                if cached_order:
+                    # Preserve strategy name from cached order
+                    if not new_order.strategy and cached_order.strategy:
+                        new_order.strategy = cached_order.strategy
+
+                    if cached_order.status != new_order.status:
+                        self.logger.debug(f"Order status change detected: {new_order.identifier} {cached_order.status} -> {new_order.status}")
+                        self._dispatch_status_change(cached_order, new_order)
                 else:
-                    # Order was created before strategy started - handle initial state
-                    self._handle_pre_existing_order(new_order)
+                    # First time seeing this order
+                    if new_order.status == "new" or new_order.status == "open":
+                        # New order being tracked for first time
+                        self._process_trade_event(new_order, self.NEW_ORDER)
+                    else:
+                        # Order was created before strategy started - handle initial state
+                        self._handle_pre_existing_order(new_order)
         except Exception as e:
             self.logger.error(f"Error detecting order changes for {new_order.identifier}: {e}")
 
@@ -1215,92 +1226,108 @@ class ProjectX(Broker):
         """Dispatch appropriate event based on status change."""
         try:
             status = new_order.status.lower()
-            
-            # Map Project X statuses to Lumibot events - After STATUS_ALIAS_MAP normalization
-            # Note: statuses have already been normalized through STATUS_ALIAS_MAP in Order class
-            if status == "new" or status == "open":
-                # New or Open orders trigger NEW_ORDER event
-                self._process_trade_event(new_order, self.NEW_ORDER)
-            elif status in ("fill", "filled"):
-                # Filled orders (status=2 becomes "filled" then aliased to "fill")
-                # Ensure bracket metadata is preserved
-                if getattr(cached_order, '_is_bracket_parent', False) and not getattr(new_order, '_is_bracket_parent', False):
-                    new_order._is_bracket_parent = True
-                restore_bracket_meta_if_needed(new_order, {getattr(cached_order,'id',None): cached_order} if cached_order else {}, getattr(self, '_bracket_meta', {}), self.logger)
-                if getattr(cached_order, '_is_bracket_child', False) and not getattr(new_order, '_is_bracket_child', False):
-                    new_order._is_bracket_child = True
-                    if hasattr(cached_order, '_bracket_parent_id'):
-                        new_order._bracket_parent_id = getattr(cached_order, '_bracket_parent_id')
 
-                price = getattr(new_order, 'avg_fill_price', None)
-                if price is None:
-                    price = getattr(cached_order, 'avg_fill_price', None)
-                if price is None:
-                    price = getattr(new_order, 'limit_price', None) or getattr(new_order, 'stop_price', None)
-                if price is None:
-                    price = getattr(cached_order, 'limit_price', None) or getattr(cached_order, 'stop_price', None)
-                quantity = getattr(new_order, 'filled_quantity', None)
-                if (quantity is None or quantity == 0):
-                    quantity = getattr(cached_order, 'filled_quantity', None)
-                if (quantity is None or quantity == 0):
-                    quantity = getattr(new_order, 'quantity', None) or getattr(cached_order, 'quantity', None)
-                
-                if price is None:
-                    self.logger.debug(f"[FILL PRICE MISSING] Using 0.0 placeholder for order {new_order.identifier}")
-                    price = 0.0
-                if quantity is None:
-                    quantity = getattr(new_order, 'quantity', None) or getattr(cached_order, 'quantity', 0)
-                self._process_trade_event(
-                    new_order, 
-                    self.FILLED_ORDER, 
-                    price=price, 
-                    filled_quantity=quantity,
-                    multiplier=new_order.asset.multiplier if new_order.asset else 1
-                )
-                # Bracket parent: spawn children after processing fill event (even if price fallback)
-                # Use helper _is_bracket_parent to fall back on stored meta map if attribute missing
-                if self._is_bracket_parent(new_order) and not getattr(new_order, '_bracket_children_submitted', False):
-                    self.logger.debug(f"[BRACKET SPAWN CHECK] parent_id={new_order.identifier} has_meta={hasattr(new_order,'_synthetic_bracket')} meta={getattr(new_order,'_synthetic_bracket',None)}")
-                    try:
-                        self._maybe_spawn_bracket_children(new_order)
-                    except Exception as be:
-                        self.logger.error(f"Bracket child spawn failed for parent {new_order.identifier}: {be}")
-                # Bracket child: handle sibling cancellation
-                if getattr(new_order, '_is_bracket_child', False):
-                    try:
-                        self._handle_bracket_child_fill(new_order)
-                    except Exception as ce:
-                        self.logger.error(f"Error handling bracket child fill {new_order.identifier}: {ce}")
-            elif status == "canceled":
-                # Cancelled orders (status=3 becomes "cancelled" then aliased to "canceled")
-                # Also handles expired (status=4 becomes "expired" then aliased to "canceled")
-                self._process_trade_event(new_order, self.CANCELED_ORDER)
-            elif status == "error":
-                # Rejected orders (status=5 becomes "rejected" then aliased to "error")
-                self._process_trade_event(new_order, self.ERROR_ORDER)
-                # If bracket child errors, deactivate bracket
-                if getattr(new_order, '_is_bracket_child', False):
-                    parent_id = self._bracket_parent_by_child_id.get(new_order.identifier)
-                    parent = self._orders_cache.get(parent_id) if parent_id else None
-                    if parent and getattr(parent, '_synthetic_bracket', None):
-                        parent._synthetic_bracket['active'] = False
-            elif status == "partial_fill":
-                # Partially filled orders (status=7 if supported)
-                price = getattr(new_order, 'avg_fill_price', None) or getattr(new_order, 'limit_price', None)
-                quantity = getattr(new_order, 'filled_quantity', None) or getattr(new_order, 'quantity', None)
-                
-                if price is not None and quantity is not None:
+            if not new_order.equivalent_status(cached_order):
+                # Map Project X statuses to Lumibot events - After STATUS_ALIAS_MAP normalization
+                # Note: statuses have already been normalized through STATUS_ALIAS_MAP in Order class
+                if status == "new" or status == "open":
+                    # Guard against the "fill-before-new" race condition: a market order that
+                    # fills instantly can deliver the "filled" websocket event before the "new"
+                    # event (or both arrive concurrently on different threads).
+                    # With _order_update_lock held in _detect_and_dispatch_order_changes we
+                    # avoid most races, but we also check here as a belt-and-suspenders defence:
+                    # skip NEW_ORDER if the cached order is already in a terminal state so we
+                    # never fire NEW_ORDER after FILLED_ORDER / CANCELED_ORDER / ERROR_ORDER.
+                    _terminal_statuses = {"fill", "filled", "canceled", "cancelled", "error", "rejected"}
+                    cached_status = cached_order.status.lower() if cached_order else ""
+                    if cached_order and cached_status in _terminal_statuses:
+                        self.logger.debug(
+                            f"Suppressing late 'new/open' event for order {new_order.identifier}: "
+                            f"cached status is already '{cached_status}' (fill-before-new race condition)"
+                        )
+                    elif not cached_order:
+                        # New or Open orders trigger NEW_ORDER event
+                        self._process_trade_event(new_order, self.NEW_ORDER)
+                elif status in ("fill", "filled"):
+                    # Filled orders (status=2 becomes "filled" then aliased to "fill")
+                    # Ensure bracket metadata is preserved
+                    if getattr(cached_order, '_is_bracket_parent', False) and not getattr(new_order, '_is_bracket_parent', False):
+                        new_order._is_bracket_parent = True
+                    restore_bracket_meta_if_needed(new_order, {getattr(cached_order,'id',None): cached_order} if cached_order else {}, getattr(self, '_bracket_meta', {}), self.logger)
+                    if getattr(cached_order, '_is_bracket_child', False) and not getattr(new_order, '_is_bracket_child', False):
+                        new_order._is_bracket_child = True
+                        if hasattr(cached_order, '_bracket_parent_id'):
+                            new_order._bracket_parent_id = getattr(cached_order, '_bracket_parent_id')
+
+                    price = getattr(new_order, 'avg_fill_price', None)
+                    if price is None:
+                        price = getattr(cached_order, 'avg_fill_price', None)
+                    if price is None:
+                        price = getattr(new_order, 'limit_price', None) or getattr(new_order, 'stop_price', None)
+                    if price is None:
+                        price = getattr(cached_order, 'limit_price', None) or getattr(cached_order, 'stop_price', None)
+                    quantity = getattr(new_order, 'filled_quantity', None)
+                    if (quantity is None or quantity == 0):
+                        quantity = getattr(cached_order, 'filled_quantity', None)
+                    if (quantity is None or quantity == 0):
+                        quantity = getattr(new_order, 'quantity', None) or getattr(cached_order, 'quantity', None)
+
+                    if price is None:
+                        self.logger.debug(f"[FILL PRICE MISSING] Using 0.0 placeholder for order {new_order.identifier}")
+                        price = 0.0
+                    if quantity is None:
+                        quantity = getattr(new_order, 'quantity', None) or getattr(cached_order, 'quantity', 0)
                     self._process_trade_event(
-                        new_order,
-                        self.PARTIALLY_FILLED_ORDER,
+                        cached_order,  # Update the cached order to prevent duplicate orders being added.
+                        self.FILLED_ORDER,
                         price=price,
-                        filled_quantity=quantity, 
+                        filled_quantity=quantity,
                         multiplier=new_order.asset.multiplier if new_order.asset else 1
                     )
+                    # Bracket parent: spawn children after processing fill event (even if price fallback)
+                    # Use helper _is_bracket_parent to fall back on stored meta map if attribute missing
+                    if self._is_bracket_parent(new_order) and not getattr(new_order, '_bracket_children_submitted', False):
+                        self.logger.debug(f"[BRACKET SPAWN CHECK] parent_id={new_order.identifier} has_meta={hasattr(new_order,'_synthetic_bracket')} meta={getattr(new_order,'_synthetic_bracket',None)}")
+                        try:
+                            self._maybe_spawn_bracket_children(new_order)
+                        except Exception as be:
+                            self.logger.error(f"Bracket child spawn failed for parent {new_order.identifier}: {be}")
+                    # Bracket child: handle sibling cancellation
+                    if getattr(new_order, '_is_bracket_child', False):
+                        try:
+                            self._handle_bracket_child_fill(new_order)
+                        except Exception as ce:
+                            self.logger.error(f"Error handling bracket child fill {new_order.identifier}: {ce}")
+                elif status == "canceled":
+                    # Cancelled orders (status=3 becomes "cancelled" then aliased to "canceled")
+                    # Also handles expired (status=4 becomes "expired" then aliased to "canceled")
+                    self._process_trade_event(cached_order, self.CANCELED_ORDER)
+                elif status == "error":
+                    # Rejected orders (status=5 becomes "rejected" then aliased to "error")
+                    self._process_trade_event(cached_order, self.ERROR_ORDER)
+                    # If bracket child errors, deactivate bracket
+                    if getattr(new_order, '_is_bracket_child', False):
+                        parent_id = self._bracket_parent_by_child_id.get(new_order.identifier)
+                        cached_parent = self.get_tracked_order(parent_id) if parent_id else None
+                        if cached_parent and getattr(cached_parent, '_synthetic_bracket', None):
+                            cached_parent._synthetic_bracket['active'] = False
+                elif status == "partial_fill":
+                    # Partially filled orders (status=7 if supported)
+                    price = getattr(new_order, 'avg_fill_price', None) or getattr(new_order, 'limit_price', None)
+                    quantity = getattr(new_order, 'filled_quantity', None) or getattr(new_order, 'quantity', None)
+
+                    if price is not None and quantity is not None:
+                        self._process_trade_event(
+                            cached_order,
+                            self.PARTIALLY_FILLED_ORDER,
+                            price=price,
+                            filled_quantity=quantity,
+                            multiplier=new_order.asset.multiplier if new_order.asset else 1
+                        )
+                    else:
+                        self.logger.warning(f"Partial fill event missing price ({price}) or quantity ({quantity}) data for order {new_order.identifier}")
                 else:
-                    self.logger.warning(f"Partial fill event missing price ({price}) or quantity ({quantity}) data for order {new_order.identifier}")
-            else:
-                self.logger.debug(f"Unknown or unhandled order status for event dispatch: {status}")
+                    self.logger.debug(f"Unknown or unhandled order status for event dispatch: {status}")
                 
         except Exception as e:
             self.logger.error(f"Error dispatching status change for order {new_order.identifier}: {e}")
@@ -1418,7 +1445,7 @@ class ProjectX(Broker):
         parent_id = self._bracket_parent_by_child_id.get(child.identifier)
         if not parent_id:
             return
-        parent = self._orders_cache.get(parent_id)
+        parent = self.get_tracked_order(parent_id)
         if not parent or not getattr(parent, '_synthetic_bracket', None):
             return
         meta = parent._synthetic_bracket
@@ -1431,8 +1458,9 @@ class ProjectX(Broker):
             if v != child.identifier:
                 sibling_id = v
                 break
-        if sibling_id and sibling_id in self._orders_cache:
-            sibling_order = self._orders_cache[sibling_id]
+
+        sibling_order = self.get_tracked_order(sibling_id)
+        if sibling_order:
             # Cancel only if not terminal already
             sibling_status = (getattr(sibling_order, 'status', '') or '').lower()
             if sibling_status not in {"fill", "filled", "canceled", "cancelled", "error"}:
@@ -1490,14 +1518,10 @@ class ProjectX(Broker):
                 order_data = item.get('data', item)  # Use item itself if no 'data' key
                     
                 # Process order data from streaming
-                
                 order = self._convert_broker_order_to_lumibot_order(order_data)
                 if order is not None:
                     # KEY FIX: Detect status changes and dispatch lifecycle events
                     self._detect_and_dispatch_order_changes(order)
-                    
-                    # Update cache after processing events
-                    self._orders_cache[order.identifier] = order
                     self.logger.debug(f"Order update processed: {order.identifier} -> {order.status}")
         except Exception as e:
             self.logger.error(f"Error handling order update: {e}", exc_info=True)
@@ -1532,33 +1556,43 @@ class ProjectX(Broker):
                 trade_data = item.get('data', item)  # Use item itself if no 'data' key
                     
                 # Process trade data from streaming
-                
+
                 # Extract order ID from trade - trades use 'orderId' to reference the order
                 order_id = str(trade_data.get("orderId")) if trade_data.get("orderId") else None
-                
-                if order_id and order_id in self._orders_cache:
-                    order = self._orders_cache[order_id]
-                    
-                    # Update order with fill information from trade
-                    fill_price = trade_data.get("price")
-                    fill_size = trade_data.get("size")
-                    
-                    if fill_price and fill_size:
-                        # Mark order as filled based on trade data
-                        order.status = "filled"
-                        order.filled_quantity = fill_size
-                        order.avg_fill_price = fill_price
-                        
-                        # Dispatch fill event - pass same order twice since it's the updated version
-                        self._dispatch_status_change(order, order)
-                        
-                        self.logger.debug(f"Trade fill processed for order {order_id}: "
-                                        f"{fill_size} @ {fill_price}")
-                elif order_id:
-                    self.logger.debug(f"Trade for unknown order {order_id} - might be pre-existing")
-            
+
+                # Acquire the order-update lock per item so this fill dispatch is
+                # serialized against any concurrent _handle_order_update call for
+                # the same order (race condition with instantly-filling market orders).
+                with self._order_update_lock:
+                    cached_order = self.get_tracked_order(order_id)
+                    if cached_order:
+
+                        # Update order with fill information from trade
+                        fill_price = trade_data.get("price")
+                        fill_size = trade_data.get("size")
+
+                        if fill_price and fill_size:
+                            # Idempotency guard: skip if already marked filled to avoid
+                            # duplicate FILLED_ORDER events from concurrent callbacks.
+                            if cached_order.status.lower() in ("fill", "filled"):
+                                self.logger.debug(
+                                    f"Trade fill skipped for order {order_id}: already filled"
+                                )
+                            else:
+                                # Mark order as filled based on trade data
+                                cached_order.status = "filled"
+                                cached_order.filled_quantity = fill_size
+                                cached_order.avg_fill_price = fill_price
+
+                                # Dispatch fill event - pass same order twice since it's the updated version
+                                self._dispatch_status_change(cached_order, cached_order)
+
+                                self.logger.debug(f"Trade fill processed for order {order_id}: "
+                                                f"{fill_size} @ {fill_price}")
+                    elif order_id:
+                        self.logger.debug(f"Trade for unknown order {order_id} - might be pre-existing")
+
             # Trade updates can trigger order and position cache updates
-            self._update_orders_cache()
             self._update_positions_cache()
         except Exception as e:
             self.logger.error(f"Error handling trade update: {e}", exc_info=True)

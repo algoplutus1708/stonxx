@@ -628,7 +628,7 @@ class StrategyLoggerAdapter(logging.LoggerAdapter):
             self.extra = extra_dict
 
 
-def _ensure_handlers_configured():
+def _ensure_handlers_configured(is_backtest=False):
     """
     Ensure that the root logger has the appropriate handlers configured.
     This is called once globally to set up consistent formatting, but we also
@@ -642,6 +642,14 @@ def _ensure_handlers_configured():
     - LUMIBOT_ERROR_CSV_PATH: Path for CSV error log file (default: logs/errors.csv)
     - BACKTESTING_QUIET_LOGS: Enable quiet logs for backtesting (true/false)
     - LUMIWEALTH_API_KEY: API key for Lumiwealth/Botspot error reporting (when set, enables automatic error reporting)
+
+    Parameters
+    ----------
+    is_backtest : bool, optional
+        Whether we are in a backtesting (default False). This can also be determined from the IS_BACKTESTING
+        environment variable, but is provided here as an optional parameter for cases
+        where we might want to explicitly control this behavior without relying on environment variables.
+
     """
     global _handlers_configured
 
@@ -652,7 +660,7 @@ def _ensure_handlers_configured():
     except AttributeError:
         log_level = logging.INFO
 
-    is_backtesting = os.environ.get("IS_BACKTESTING", "").lower() == "true"
+    is_backtesting = is_backtest or os.environ.get("IS_BACKTESTING", "").lower() == "true"
 
     # Determine the effective file (root) log level and console level
     if is_backtesting:
@@ -929,7 +937,7 @@ def set_console_log_level(level: str):
                                      f"DEBUG, INFO, WARNING, ERROR, CRITICAL")
 
 
-def add_file_handler(file_path: str, level: str = 'INFO'):
+def add_file_handler(file_path: str, level: str = 'INFO', is_backtest: bool = False):
     """
     Add a file handler to the root logger to also log to a file.
     
@@ -939,13 +947,16 @@ def add_file_handler(file_path: str, level: str = 'INFO'):
         Path to the log file.
     level : str, optional
         Log level for the file handler. Defaults to 'INFO'.
+    is_backtest : bool, optional
+        Whether this is for backtesting (default False). This will ensure that the file handler respects
+        the backtesting quiet logs/console setting if applicable.
         
     Examples
     --------
     >>> from lumibot.tools.lumibot_logger import add_file_handler
     >>> add_file_handler('/path/to/lumibot.log', 'DEBUG')
     """
-    _ensure_handlers_configured()
+    _ensure_handlers_configured(is_backtest=is_backtest)
     
     try:
         file_level = getattr(logging, level.upper())

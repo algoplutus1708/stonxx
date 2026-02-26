@@ -985,10 +985,35 @@ class Broker(ABC):
             if pos.quantity != 0.0:
                 self._filled_positions.append(pos)
 
+    def _clean_order_trackers(self, broker_order):
+        """
+        ProjectX has a race condition where an order is filled and added to new trackers at the same time and the
+        'new' queue never gets cleared. This function is used to clean the order trackers of any duplicated orders.
+        Keep orders that are completed (i.e. filled, canceled, error) and remove any duplicates from the 'new' and
+        'unprocessed' trackers.
+        """
+        if not broker_order.is_active():
+            self._new_orders.remove(broker_order.identifier, key="identifier")
+            self._unprocessed_orders.remove(broker_order.identifier, key="identifier")
+            self._partially_filled_orders.remove(broker_order.identifier, key="identifier")
+        elif broker_order in self._partially_filled_orders:
+            self._new_orders.remove(broker_order.identifier, key="identifier")
+            self._unprocessed_orders.remove(broker_order.identifier, key="identifier")
+        elif broker_order in self._new_orders:
+            self._unprocessed_orders.remove(broker_order.identifier, key="identifier")
+
     def _process_new_order(self, order):
-        # Check if this order already exists in self._new_orders based on the identifier
-        if order in self._new_orders:
-            return order
+        # Don't duplicate orders in the new orders tracker. Check if an order with the same identifier already exists
+        # in the tracked orders.
+        existing_order = self.get_tracked_order(order.identifier)
+        if existing_order:
+            # Check if this order already exists in self._new_orders based on the identifier - Do nothing
+            if existing_order in self._new_orders:
+                return existing_order
+            if existing_order not in self._unprocessed_orders:
+                return existing_order  # Exists in another tracker, return it without adding to prevent duplicates
+            else:
+                order = existing_order  # Use the existing order object from unprocessed and update status
 
         self._unprocessed_orders.remove(order.identifier, key="identifier")
         order.status = self.NEW_ORDER
@@ -1386,6 +1411,9 @@ class Broker(ABC):
 
     def get_tracked_order(self, identifier, use_placeholders=False):
         """get a tracked order given an identifier"""
+        if identifier is None:
+            return None
+
         tracked_orders = list(self._tracked_orders) + (self._placeholder_orders.get_list() if use_placeholders else [])
         for order in tracked_orders:
             if order.identifier == identifier:

@@ -341,7 +341,17 @@ class StrategyExecutor(Thread):
             for order in orders_broker:
                 # Check against existing orders.
                 order_lumi = [ord_lumi for ord_lumi in orders_lumi if ord_lumi.identifier == order.identifier]
-                order_lumi = order_lumi[0] if len(order_lumi) > 0 else None
+                if len(order_lumi) > 1:
+                    self.strategy.logger.warning(
+                        f"Multiple orders found in lumibot with the same identifier {order.identifier}. "
+                        f"This should not happen and indicates a bug in the order tracking. This is manifesting as "
+                        f"a race condition with ProjectX where a 'new' order event is being added along with a 'fill' "
+                        f"and the 'new' queue never gets cleared causing duplicate orders to be added to lumibot. "
+                        f"Orders: {order_lumi}"
+                    )
+                    order_lumi = self.broker._clean_order_trackers(order)
+                else:
+                    order_lumi = order_lumi[0] if len(order_lumi) > 0 else None
 
                 if order_lumi:
                     # Compare the orders.
@@ -424,6 +434,9 @@ class StrategyExecutor(Thread):
                             self.broker._process_partially_filled_order(order, order.avg_fill_price, order.quantity)
                         elif order.status == Order.OrderStatus.NEW:
                             self.broker._process_new_order(order)
+                        elif order.status == Order.OrderStatus.ERROR:
+                            self.broker._process_new_order(order)
+                            self.broker._process_error_order(order, order.error_message)
                     else:
                         # Add to order in lumibot.
                         self.broker._process_new_order(order)
@@ -459,7 +472,7 @@ class StrategyExecutor(Thread):
                                 continue
                         
                         # Check if it's a market order that might have filled instantly
-                        if order_lumi.order_type and order_lumi.order_type.lower() == "market":
+                        if order_lumi.order_type and order_lumi.order_type == Order.OrderType.MARKET:
                             self.strategy.logger.info(
                                 f"Market order {order_lumi} (id={order_lumi.identifier}) not found in broker, "
                                 f"likely filled instantly - skipping cancel"
