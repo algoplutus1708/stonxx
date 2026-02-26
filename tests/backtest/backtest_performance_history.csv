@@ -7410,3 +7410,5 @@ timestamp,test_name,data_source,trading_days,execution_time_seconds,git_commit,l
 2026-02-25T15:27:29.206787,test_yahoo_finance_dividends,unknown,,0.208,60296881,4.4.51,,,,,Auto-tracked from test_dividends
 2026-02-25T15:27:29.479293,test_stock_oco,unknown,,0.176,60296881,4.4.51,,,,,Auto-tracked from test_example_strategies
 2026-02-25T15:27:31.252728,test_bracket_positions_remain_bounded,unknown,,0.816,60296881,4.4.51,,,,,Auto-tracked from test_pandas_backtest
+2026-02-25T23:28:26.210560,test_acceptance_ibkr_crypto_btc_usd,unknown,,5.329,27b3d0dd,4.4.51,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-02-25T23:28:35.155493,test_acceptance_ibkr_mes_futures_acceptance,unknown,,7.129,27b3d0dd,4.4.51,,,,,Auto-tracked from test_acceptance_backtests_ci
