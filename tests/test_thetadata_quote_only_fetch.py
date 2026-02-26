@@ -19,7 +19,7 @@ def test_thetadata_quote_only_fetch_skips_ohlc(monkeypatch):
     from lumibot.entities import Asset
 
     monkeypatch.setattr(ThetaDataBacktestingPandas, "kill_processes_by_name", lambda *_a, **_k: None)
-    monkeypatch.setattr("lumibot.tools.thetadata_queue_client.set_queue_client_id", lambda *_a, **_k: None)
+    monkeypatch.setattr("lumibot.tools.data_downloader_queue_client.set_queue_client_id", lambda *_a, **_k: None)
     monkeypatch.setattr("lumibot.tools.thetadata_helper.reset_theta_terminal_tracking", lambda *_a, **_k: None)
 
     start = datetime(2024, 1, 1, tzinfo=pytz.UTC)
@@ -67,7 +67,7 @@ def test_thetadata_quote_only_cache_does_not_satisfy_ohlc_requirements(monkeypat
     from lumibot.entities import Asset
 
     monkeypatch.setattr(ThetaDataBacktestingPandas, "kill_processes_by_name", lambda *_a, **_k: None)
-    monkeypatch.setattr("lumibot.tools.thetadata_queue_client.set_queue_client_id", lambda *_a, **_k: None)
+    monkeypatch.setattr("lumibot.tools.data_downloader_queue_client.set_queue_client_id", lambda *_a, **_k: None)
     monkeypatch.setattr("lumibot.tools.thetadata_helper.reset_theta_terminal_tracking", lambda *_a, **_k: None)
 
     start = datetime(2024, 1, 1, tzinfo=pytz.UTC)
@@ -128,7 +128,7 @@ def test_thetadata_quote_only_merge_preserves_existing_ohlc(monkeypatch):
     from lumibot.entities import Asset, Data
 
     monkeypatch.setattr(ThetaDataBacktestingPandas, "kill_processes_by_name", lambda *_a, **_k: None)
-    monkeypatch.setattr("lumibot.tools.thetadata_queue_client.set_queue_client_id", lambda *_a, **_k: None)
+    monkeypatch.setattr("lumibot.tools.data_downloader_queue_client.set_queue_client_id", lambda *_a, **_k: None)
     monkeypatch.setattr("lumibot.tools.thetadata_helper.reset_theta_terminal_tracking", lambda *_a, **_k: None)
 
     start = datetime(2024, 1, 1, tzinfo=pytz.UTC)

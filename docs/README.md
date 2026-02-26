@@ -6,6 +6,29 @@ This folder contains **human-authored** documentation for the LumiBot trading an
 
 ---
 
+## Backtesting Definitions (Accuracy + Speed)
+
+**Accuracy (gold standard):** a backtest is “accurate” if we can replay a period that was traded live and reproduce the broker’s realized behavior (fills + PnL) within defined tolerances (tick size, fees model). Vendor parity (e.g., DataBento artifact baselines) is a regression signal, not “truth”.
+
+### Accuracy validation ladder (Tier 3 is the real gold standard)
+
+- **Tier 1 (regression):** vendor parity / stored artifact baselines (e.g., DataBento-era runs) to detect drift.
+- **Tier 2 (audit):** manual reviews around known hard edges (session gaps, holidays/early closes, rolls, rounding).
+- **Tier 3 (gold):** **live replay baseline** — replay an interval that was traded live and reproduce broker fills + realized PnL within tolerances.
+
+**Speed:** a backtest is “fast” when warm-cache runs are queue-free and complete in bounded wall time, with evidence (request counts, cache hit rate, iterations/sec, and wall-time split: data wait vs compute vs artifacts).
+
+**Resilience:** a backtest is “resilient” when:
+- simulation completion is not masked by post-processing failures (tearsheets/stats/plots),
+- artifacts are as complete as possible even after failures (e.g., `trades.csv` and `stats.csv` still upload),
+- failure modes are classified (simulation vs postprocess vs upload), and
+- run metadata makes debugging easy (include `lumibot_version` in `settings.json` / `completion.json` whenever possible).
+
+If you’re coordinating IBKR speed + crash hardening work, start with:
+- `docs/handoffs/2026-01-26_IBKR_SPEED_RESILIENCE_MASTER_HANDOFF.md`
+
+---
+
 ## File Index
 
 ### Core Documentation
@@ -13,9 +36,14 @@ This folder contains **human-authored** documentation for the LumiBot trading an
 | File | Purpose | When to Read |
 |------|---------|--------------|
 | `BACKTESTING_ARCHITECTURE.md` | **START HERE** - Data flow diagrams, component relationships, how backtests execute | Before modifying any backtesting code |
+| `BACKTESTING_ACCURACY_VALIDATION.md` | Accuracy validation ladder (Tier 1/2/3) + how to build live replay baselines | When defining “accuracy” for a project |
 | `BACKTESTING_PERFORMANCE.md` | How to measure and improve backtest speed (startup, downloader, caching, parity, cost) | When investigating slowness or production/local parity |
+| `BACKTESTING_SPEED_PLAYBOOK.md` | Step-by-step SOP for performance work (router-mode, evidence, tests, ledgers) | When doing speed improvements (Theta/IBKR/etc.) |
+| `BACKTESTING_SECOND_LEVEL_ROADMAP.md` | Roadmap for “seconds-level” backtesting (fills magnifier, event-driven clock); implementation notes in `investigations/bot_manager.md` | When planning second-level support |
 | `ENV_VARS.md` | Complete environment variable reference with defaults and examples | When adding/changing env vars or debugging config issues |
 | `ACCEPTANCE_BACKTESTS.md` | Release gate criteria - what must pass before deployment | Before any release or version bump |
+| `BROKER_ORDER_SEMANTICS.md` | What live brokers allow/reject (extended hours, order types, etc.) | When matching live broker behavior |
+| `BACKTESTING_SESSION_GAPS_AND_DATA_GAPS.md` | How we handle missing bars, session gaps, early closes, and multi-asset markets | When debugging “fills during closed market” issues |
 | `BACKTESTING_TESTS.md` | Test suite organization and how to run backtest-related tests | When writing or debugging tests |
 | `THETADATA_CACHE_VALIDATION.md` | How ThetaData caching works, cache invalidation, version bumping | When debugging stale data or cache issues |
 | `REMOTE_CACHE.md` | S3 remote cache architecture and configuration | When debugging cache sync or S3 issues |
@@ -85,6 +113,11 @@ Brief 2-3 sentence summary of the document's purpose and key points.
 ### File Naming Convention (MANDATORY)
 
 **All documentation files MUST use UPPERCASE names.**
+
+Exceptions:
+- Some local/private coordination notes or legacy files may not follow this (e.g., `docs/investigations/bot_manager.md`).
+- When promoting an investigation into long-lived documentation, prefer the standard date-first investigation format:
+  `docs/investigations/YYYY-MM-DD_TOPIC.md`.
 
 | Location | Pattern | Example |
 |----------|---------|---------|

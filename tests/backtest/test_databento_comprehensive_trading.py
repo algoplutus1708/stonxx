@@ -33,6 +33,10 @@ from lumibot.credentials import DATABENTO_CONFIG
 
 DATABENTO_API_KEY = DATABENTO_CONFIG.get("API_KEY")
 
+# Live DataBento API integration tests. Excluded from the default CI unit run
+# (`-m "not apitest and not downloader"`) unless explicitly enabled.
+pytestmark = [pytest.mark.apitest]
+
 # Expected contract specifications
 CONTRACT_SPECS = {
     "MES": {"multiplier": 5, "margin": 1300},

@@ -9,4 +9,5 @@ Reference documentation for specialized Lumibot features.
    vars
    futures
    smart_limit
+   options_helper
    environment_variables

@@ -59,6 +59,26 @@ To run a backtest, you can use the following code snippet:
 python -m lumibot.example_strategies.stock_buy_and_hold
 ```
 
+## Backtesting data sources (env override)
+
+You can select a backtesting data source via the `BACKTESTING_DATA_SOURCE` environment variable (this overrides any explicit `datasource_class` in code):
+
+```bash
+# Single-provider backtesting (examples)
+export BACKTESTING_DATA_SOURCE=thetadata
+export BACKTESTING_DATA_SOURCE=ibkr
+```
+
+Multi-provider routing (by asset type) is supported by setting a JSON mapping:
+
+```bash
+# Example: ThetaData for stocks/options/indexes, IBKR for futures/crypto
+export BACKTESTING_DATA_SOURCE='{"default":"thetadata","stock":"thetadata","option":"thetadata","index":"thetadata","future":"ibkr","crypto":"ibkr"}'
+
+# Example: route crypto to CCXT via a specific exchange id (if desired)
+export BACKTESTING_DATA_SOURCE='{"default":"thetadata","crypto":"coinbase"}'
+```
+
 ## Run an Example Strategy
 
 We made a small example strategy to show you how to use Lumibot in this GitHub repository: [Example Algorithm GitHub](https://github.com/Lumiwealth-Strategies/stock_example_algo)

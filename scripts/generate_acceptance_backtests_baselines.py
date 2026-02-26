@@ -114,6 +114,26 @@ CASES: List[Case] = [
         baseline_run_id="SPXShortStraddle_2026-01-05_09-49_35TJJl",
         max_backtest_time_seconds=600,
     ),
+    Case(
+        slug="ibkr_crypto_acceptance_btc_usd",
+        strategy_name="IbkrCryptoAcceptance",
+        script_filename="IBKR Crypto Acceptance.py",
+        start_date="2025-12-15",
+        end_date="2025-12-18",
+        data_source="ibkr",
+        baseline_run_id="IbkrCryptoAcceptance_2026-01-14_17-39_k9nEa1",
+        max_backtest_time_seconds=180,
+    ),
+    Case(
+        slug="ibkr_mes_futures_acceptance",
+        strategy_name="IbkrMesFuturesAcceptance",
+        script_filename="IBKR MES Futures Acceptance.py",
+        start_date="2025-12-08",
+        end_date="2025-12-11",
+        data_source="ibkr",
+        baseline_run_id="IbkrMesFuturesAcceptance_2026-01-14_17-39_N8iDK2",
+        max_backtest_time_seconds=300,
+    ),
 ]
 
 

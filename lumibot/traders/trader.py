@@ -1,6 +1,7 @@
 import logging  # Needed for logging infrastructure setup
 import os
 import signal
+import threading
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -148,7 +149,16 @@ class Trader:
 
         profiling = self._get_backtest_profiling_config(strat=strat, base_filename=base_filename)
 
-        signal.signal(signal.SIGINT, self._stop_pool)
+        # When running tests in parallel, this signal line causes tests to fail
+        # if they don't run in the main thread. Since real strategies only run in the main thread
+        # its safe to check for that before calling.
+        try:
+            if threading.current_thread() is threading.main_thread():
+                signal.signal(signal.SIGINT, self._stop_pool)
+        except ValueError:
+            # Not in main thread: skip custom SIGINT handler
+            pass
+
         self._set_logger()
         self._init_pool()
 

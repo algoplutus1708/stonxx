@@ -34,12 +34,30 @@ BACKTESTING_START / BACKTESTING_END
 - Purpose: Default date range used when dates are not passed in code.
 - Format: ``YYYY-MM-DD``
 
+BACKTESTING_BUDGET
+^^^^^^^^^^^^^^^^^^
+
+- Purpose: Override the starting cash used for backtests (initial portfolio cash).
+- Format: Positive number. Accepted examples: ``500``, ``5000``, ``5k``, ``1_000_000``, ``$10,000``.
+- Notes:
+  - When set, this value is preferred over any ``budget=`` passed in strategy code, so it can be controlled per-run via injected environment variables.
+  - Default (when unset and no code budget is provided): ``100000``.
+
 BACKTESTING_DATA_SOURCE
 ^^^^^^^^^^^^^^^^^^^^^^^
 
 - Purpose: Select the backtesting datasource **even if your code passes a `datasource_class`**.
 - Values (case-insensitive):
   - ``thetadata``, ``yahoo``, ``polygon``, ``alpaca``, ``ccxt``, ``databento``
+  - ``ibkr`` / ``interactivebrokersrest`` / ``interactive_brokers_rest`` (IBKR Client Portal REST)
+  - ``router`` (multi-provider routing; defaults to Theta for stock/option/index and IBKR for futures/crypto)
+  - JSON mapping (multi-provider routing by asset type), e.g. ``{"default":"thetadata","stock":"thetadata","option":"thetadata","index":"thetadata","future":"ibkr","crypto":"ibkr"}``
+
+    - Provider values are case/whitespace/_/- insensitive.
+    - Supported values include ``thetadata``, ``ibkr``, ``polygon``, ``alpaca``, and ``ccxt``.
+    - For CCXT, you may use ``ccxt`` (auto-select exchange from existing env/credentials) **or** specify a CCXT exchange id directly (for example: ``coinbase``, ``kraken``, ``binance``, ``kucoin``).
+    - Routing keys are the canonical asset types (``future``, ``cont_future``, ``crypto``, etc.). Common plural aliases like ``futures``/``cont_futures`` are accepted.
+
   - ``none`` to disable the env override and rely on code.
 
 Testing / CI guardrails
@@ -48,7 +66,7 @@ Testing / CI guardrails
 LUMIBOT_ACCEPTANCE_TRIPWIRE
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-- Purpose: **Acceptance backtests only** — when truthy, a Python startup hook aborts the subprocess the moment it attempts to call the remote Data Downloader.
+- Purpose: **Acceptance backtests only** — when truthy, a Python startup hook aborts the subprocess the moment it attempts to call a remote data service.
 - Values: truthy enables (``1``, ``true``, ``yes``); unset/``0`` disables.
 - Notes:
   - This is an engineering/CI guardrail to enforce “warm-cache” acceptance backtests. It should not be used for normal production backtests.
@@ -62,6 +80,17 @@ SHOW_PLOT / SHOW_INDICATORS / SHOW_TEARSHEET
 
 - Purpose: Enable/disable artifact generation.
 - Values: ``True`` / ``False`` (string).
+
+LUMIBOT_BACKTEST_PARQUET_MODE
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Control parquet export semantics for backtest artifacts (indicators/trades/stats/trade events).
+- Values:
+  - ``best_effort`` (default): parquet failures log warnings; CSV remains the compatibility layer.
+  - ``required``: parquet export failures raise and should fail the backtest (artifact contract mode).
+- Notes:
+  - This is primarily intended for BotManager/BotSpot backtests where downstream tools depend on Parquet for performance.
+  - When set to ``required``, a parquet export error should fail the backtest so missing artifacts are never silently ignored.
 
 BACKTESTING_QUIET_LOGS
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -125,27 +154,6 @@ BACKTESTING_PROFILE
   - ``yappi`` (supported)
 - Output:
   - Produces a ``*_profile_yappi.csv`` artifact alongside other backtest artifacts.
-
-ThetaData via remote downloader
--------------------------------
-
-DATADOWNLOADER_BASE_URL
-^^^^^^^^^^^^^^^^^^^^^^^
-
-- Purpose: Points LumiBot at a remote downloader service that can fetch ThetaData on demand.
-- Example: ``http://data-downloader.lumiwealth.com:8080``
-
-DATADOWNLOADER_API_KEY / DATADOWNLOADER_API_KEY_HEADER
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-- Purpose: Authentication for the downloader service.
-- Values: provided by your runtime environment (**do not hardcode**).
-
-DATADOWNLOADER_SKIP_LOCAL_START
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-- Purpose: Prevent any local downloader/ThetaTerminal bootstrap logic from running (production backtests must use the remote downloader).
-- Values: ``1`` / ``true`` enable; unset/``0`` disable.
 
 ThetaData option-chain building (performance)
 ---------------------------------------------
@@ -397,6 +405,34 @@ IB_API_URL
 - Purpose: Base URL for IB REST API endpoint.
 - Values: URL string.
 
+IBKR_HISTORY_SOURCE
+^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Select which IBKR Client Portal history source to use for OHLC bars in IBKR REST backtests.
+- Values: ``Trades`` / ``Midpoint`` / ``Bid_Ask`` (case-insensitive; hyphen/underscore variants accepted).
+- Default: ``Trades``.
+
+IBKR_FUTURES_EXCHANGE
+^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Fallback futures exchange for IBKR REST when ``exchange=`` is not provided and automatic exchange routing cannot resolve a unique venue.
+- Values: Exchange code string (for example: ``CME``, ``CBOT``, ``COMEX``, ``NYMEX``).
+- Default: ``CME``.
+
+IBKR_CRYPTO_VENUE
+^^^^^^^^^^^^^^^^^
+
+- Purpose: Default IBKR crypto venue when backtesting spot crypto via IBKR REST.
+- Values: Venue/exchange string (for example: ``ZEROHASH``).
+- Default: ``ZEROHASH``.
+
+LUMIBOT_IBKR_ENABLE_FUTURES_BID_ASK
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Opt-in derivation of per-bar futures bid/ask quotes using IBKR ``Bid_Ask`` + ``Midpoint`` history sources.
+- Values: ``true``/``false`` (or ``1``/``0``).
+- Default: disabled.
+
 Schwab broker
 -------------
 
@@ -558,6 +594,14 @@ THETADATA_USERNAME / THETADATA_PASSWORD
 - Values: Obtain from ThetaData (**do not hardcode**).
 - Note: Required for ThetaData backtesting and live data.
 
+THETADATA_BASE_URL
+^^^^^^^^^^^^^^^^^^
+
+- Purpose: Base URL for the local ThetaTerminal REST API.
+- Default: ``http://127.0.0.1:25503``
+- Values: URL string.
+- Note: You typically do not need to set this; LumiBot auto-manages a local ThetaTerminal for ThetaData usage.
+
 DATABENTO_API_KEY
 ^^^^^^^^^^^^^^^^^
 
@@ -585,7 +629,7 @@ LUMIWEALTH_API_KEY
 - Values: Obtain from LumiWealth (**do not hardcode**).
 
 Runtime telemetry (memory/health)
---------------------------------
+---------------------------------
 
 LUMIBOT_TELEMETRY
 ^^^^^^^^^^^^^^^^^

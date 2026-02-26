@@ -2,9 +2,21 @@
 
 ## Overview
 
-LumiBot is a trading and backtesting framework. This document focuses on the **backtesting architecture**, specifically how data flows from external sources (Yahoo, ThetaData, Polygon) into the backtesting engine.
+LumiBot is a trading and backtesting framework. This document focuses on the **backtesting architecture**, specifically how data flows from external sources (Yahoo, ThetaData, IBKR Client Portal REST, Polygon) into the backtesting engine.
 
 **CORE PRINCIPLE: Backtesting must mimic live broker behavior.**
+
+**Accuracy (gold standard):** if we can replay a period that was traded live and reproduce the broker’s realized behavior (fills + PnL) within defined tolerances (tick size, fees model).
+
+### Accuracy validation ladder (Tier 3 is the real gold standard)
+
+- **Tier 1 (regression):** vendor parity / stored artifact baselines (e.g., DataBento-era runs) to detect drift.
+- **Tier 2 (audit):** manual reviews around known hard edges (session gaps, holidays/early closes, rolls, rounding).
+- **Tier 3 (gold):** **live replay baseline** — replay an interval that was traded live and reproduce broker fills + realized PnL within tolerances.
+
+**Speed:** warm-cache runs are queue-free and complete in bounded wall time, with evidence (request counts, cache hit rate, iterations/sec, and wall-time split: data wait vs compute vs artifacts).
+
+**Resilience:** simulation completion must not be masked by post-processing failures (stats/tearsheets/plots). When post-processing fails, the run should still produce as many artifacts as possible and classify the failure (simulation vs postprocess vs upload), so operators can trust the trade stream even when reporting breaks.
 
 If the backtest execution model (data semantics, fill model, order handling, fees, pricing) diverges meaningfully from how real brokers behave, the backtest is not trustworthy.
 
@@ -17,7 +29,7 @@ We optimize for:
 - Handoffs: `docs/handoffs/`
 - Investigations: `docs/investigations/`
 - Performance + parity + startup: `docs/BACKTESTING_PERFORMANCE.md`
-- Latest session handoff: `docs/handoffs/2025-12-26_THETADATA_SESSION_HANDOFF.md`
+- Latest session handoff (IBKR speed + resilience): `docs/handoffs/2026-01-26_IBKR_SPEED_RESILIENCE_MASTER_HANDOFF.md`
 
 ## Directory Structure
 
@@ -27,6 +39,8 @@ lumibot/
 │   ├── backtesting_broker.py        # Core BacktestingBroker class
 │   ├── yahoo_backtesting.py         # Yahoo Finance adapter
 │   ├── thetadata_backtesting_pandas.py  # ThetaData adapter
+│   ├── interactive_brokers_rest_backtesting.py # IBKR (Client Portal REST) adapter
+│   ├── routed_backtesting.py        # Multi-provider router (Theta + IBKR)
 │   ├── polygon_backtesting.py       # Polygon.io adapter
 │   └── pandas_backtesting.py        # Base class for pandas-based sources
 │
@@ -39,6 +53,7 @@ lumibot/
 │
 ├── tools/                 # Helper modules for data fetching
 │   ├── thetadata_helper.py          # ThetaData API & caching (IMPORTANT)
+│   ├── ibkr_helper.py               # IBKR API (via downloader) & caching
 │   ├── yahoo_helper.py              # Yahoo Finance API
 │   ├── polygon_helper.py            # Polygon.io API & caching
 │   └── backtest_cache.py            # S3/local cache management
@@ -69,22 +84,22 @@ lumibot/
 │                                                                          │
 │  BACKTESTING_DATA_SOURCE env var OVERRIDES explicit datasource_class    │
 │                                                                          │
-│  Options: yahoo, thetadata, polygon, alpaca, ccxt, databento             │
+│  Options: yahoo, thetadata, ibkr, router, polygon, alpaca, ccxt, databento │
 │  Set to "none" to use explicit class from code                          │
 └─────────────────────────────────────────────────────────────────────────┘
                                     │
                     ┌───────────────┼───────────────┐
                     ▼               ▼               ▼
-           ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-           │    Yahoo     │ │  ThetaData   │ │   Polygon    │
-           │  Backtesting │ │  Backtesting │ │  Backtesting │
-           └──────────────┘ └──────────────┘ └──────────────┘
-                    │               │               │
-                    ▼               ▼               ▼
-           ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-           │ YahooHelper  │ │ thetadata_   │ │  polygon_    │
-           │              │ │   helper     │ │   helper     │
-           └──────────────┘ └──────────────┘ └──────────────┘
+           ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+           │    Yahoo     │ │  ThetaData   │ │    IBKR      │ │   Polygon    │
+           │  Backtesting │ │  Backtesting │ │  Backtesting │ │  Backtesting │
+           └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘
+                    │               │               │               │
+                    ▼               ▼               ▼               ▼
+           ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+           │ YahooHelper  │ │ thetadata_   │ │  ibkr_helper │ │  polygon_    │
+           │              │ │   helper     │ │              │ │   helper     │
+           └──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘
                     │               │               │
                     ▼               ▼               ▼
            ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
@@ -158,8 +173,10 @@ DataSource (ABC)
 **Flow:**
 1. `ThetaDataBacktestingPandas` inherits from `PandasData`
 2. Calls `thetadata_helper.get_price_data()` to fetch data
-3. Data comes from **Data Downloader** (remote HTTP service)
-4. Uses S3 cache for performance
+3. Data comes from either:
+   - a **local ThetaTerminal** (default / public), or
+   - the internal **Data Downloader** service (when `DATADOWNLOADER_BASE_URL` is set).
+4. Uses S3 cache for performance (when enabled)
 
 **Key Functions:**
 - `get_price_data()` - Main entry point (line 1248)
@@ -167,9 +184,14 @@ DataSource (ABC)
 
 ### ThetaData Data Downloader (remote service)
 
-Backtests are intended to use the **remote downloader** service, not a locally-started ThetaTerminal.
+This is an **internal/proprietary** service that can proxy ThetaData requests and provide queuing/concurrency controls.
 
-- Base URL: `http://data-downloader.lumiwealth.com:8080`
+- Selection rule:
+  - If `DATADOWNLOADER_BASE_URL` is set, LumiBot routes ThetaData through the downloader queue and **must not** manage
+    any local ThetaTerminal process (single-session constraint).
+  - Otherwise, LumiBot auto-manages a local ThetaTerminal.
+
+- Base URL (internal): `http://localhost:8080` (local) or `https://<your-downloader-host>:8080` (remote)
 - Avoid hard-coded downloader IPs (they can change on redeploy)
 - Local downloader code checkout: `Documents/Development/botspot_data_downloader`
 
@@ -339,6 +361,61 @@ ThetaData’s EOD day data is keyed by trading date, but returned timestamps may
   - placeholder rows.
 
 Primary location: `lumibot/tools/thetadata_helper.py` (day-index alignment helpers).
+
+## Intraday Bars: Session-Close Coverage (CRITICAL)
+
+ThetaData index/stock intraday (minute/hour) feeds are often **regular-session (RTH) bounded**.
+For example, SPX index minute OHLC typically yields ~391 bars/day and ends at the trading session close (or early close).
+
+**Failure mode (performance + correctness):**
+- If the backtest “required end coverage” timestamp is interpreted literally as `23:59` (or `18:59` ET due to UTC-midnight transport),
+  the cache can never be considered “complete” for an RTH-bounded feed.
+- This can trigger an endless loop of:
+  - `[THETA][CACHE][STALE] prefetch_complete but coverage insufficient` and
+  - `Submitted to queue ... v3/index/history/ohlc ...`
+  even on “warm” runs.
+
+**Fix direction (implemented for ThetaData index intraday):**
+- Define “coverage complete” for index intraday by the **last trading session close at or before** the end requirement
+  (holiday/weekend/early-close safe), rather than requiring bars through an arbitrary end datetime.
+
+See:
+- `docs/investigations/2026-01-13_SPX_INTRADAY_STALE_LOOP_FIX.md`
+
+## ThetaData Coverage Gap: NDX Underlying (CRITICAL)
+
+ThetaData provides **NDX options** history, but does **not** provide the **NDX index underlying** (price/OHLC) history.
+In practice, `v3/index/history/*` requests for `NDX` can return placeholder all-zero OHLC rows or `NO_DATA`.
+
+**Failure mode:**
+- Strategies that trade NDX options still require an underlying price series for:
+  - signals / indicators,
+  - moneyness checks,
+  - strike selection heuristics,
+  - portfolio valuation / cash settlement.
+- When NDX underlying history is empty/placeholder-only, the backtest can repeatedly refetch and never progress.
+
+**Platform fix (ThetaDataBacktesting only):**
+- LumiBot proxies `Asset("NDX", asset_type=INDEX)` underlying bars/quotes via `QQQ` and scales into NDX “points” units.
+- This keeps **NDX options** as the traded root while supplying a fast, usable underlying proxy.
+- The proxy is **explicit**: logs include a `[THETA][INDEX_PROXY]` warning (once per run).
+- **Invariant:** `Asset("NDX")` defaults to `stock` by design and is **not** treated as an index. Only explicit `asset_type=INDEX` triggers the proxy.
+
+**Limitations / drift:**
+- The scaling factor is a stable heuristic (ETF fees/dividend timing can cause slow drift over long horizons).
+- If you need higher-fidelity calibration, add a daily factor calibration path derived from NDX options EOD (still Theta-only).
+
+## ThetaData v3 Payload Variants (Downloader Mode)
+
+When routed through the BotSpot Data Downloader, Theta v3 responses are not fully stable across terminal versions:
+- **v2-style envelope:** `{"header":{"format":[...]}, "response":[[...], ...]}`
+- **row-style:** `{"response":[{"timestamp": "...", ...}, ...]}` (no `header`)
+- **nested option history:** `{"response":[{"contract": {...}, "data":[{...}, ...]}]}`
+
+LumiBot normalizes these shapes in `lumibot/tools/thetadata_helper.py` so downstream history parsing:
+- builds `DataFrame`s with explicit columns,
+- produces a `datetime` index consistently, and
+- avoids “NO_DATA”/472 loops caused by mis-parsed quote payloads (especially for NDX options backtests).
 
 **Split Handling (FIXED - Nov 28, 2025)**
 
@@ -564,14 +641,38 @@ Used primarily by ThetaData:
 Each data source has its own local cache:
 - ThetaData: Parquet files in `~/Library/Caches/lumibot/`
 - Polygon: Feather files in `LUMIBOT_CACHE_FOLDER/polygon/`
+- IBKR: Parquet files in `LUMIBOT_CACHE_FOLDER/ibkr/`
 
 ## Environment Variables
 
 ### Data Source Selection
 ```bash
-BACKTESTING_DATA_SOURCE=thetadata  # Options: yahoo, thetadata, polygon, etc.
+BACKTESTING_DATA_SOURCE=thetadata  # Options: yahoo, thetadata, ibkr, router, polygon, etc.
                                     # Set to "none" to use code-specified class
 ```
+
+### IBKR Backtesting (Client Portal REST)
+
+IBKR backtesting uses the shared Data Downloader and is cached locally (and optionally mirrored to S3) just like ThetaData.
+
+- Single-provider: `BACKTESTING_DATA_SOURCE=ibkr`
+- Multi-provider routing (Theta for stock/option/index; IBKR for futures/crypto):
+  ```bash
+  export BACKTESTING_DATA_SOURCE='{"default":"thetadata","stock":"thetadata","option":"thetadata","index":"thetadata","future":"ibkr","crypto":"ibkr"}'
+  ```
+  - You can also route crypto to CCXT by using either:
+    - `{"crypto":"ccxt"}` (auto-select exchange from existing env/credentials), or
+    - a CCXT exchange id directly, e.g. `{"crypto":"coinbase"}` or `{"crypto":"kraken"}`.
+
+#### Crypto daily bars (important semantics)
+
+IBKR's `bar=1d` history for crypto is not a clean midnight-to-midnight 24/7 day series, and its timestamps can lag the
+simulation clock used by daily-cadence strategies. To keep daily backtests stable (no “stale end of data” refresh loops),
+LumiBot derives **crypto daily bars** from intraday history and aligns them to midnight day buckets in `LUMIBOT_DEFAULT_PYTZ`
+(default: `America/New_York`).
+
+**Note:** IBKR crypto history is often effectively **24/5** (weekends can be missing). For daily backtests, LumiBot
+forward-fills short gaps (≤ 3 days) from the prior close so the daily clock can advance without “missing BTC day” churn.
 
 ### Backtest output artifacts (HTML/CSV)
 ```bash
@@ -585,7 +686,7 @@ BACKTESTING_QUIET_LOGS=false  # useful when debugging (otherwise logs may be emp
 ```bash
 THETADATA_USERNAME=xxx
 THETADATA_PASSWORD=xxx
-DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080  # Data Downloader URL (preferred)
+DATADOWNLOADER_BASE_URL=http://localhost:8080  # Data Downloader URL (set to your environment)
 DATADOWNLOADER_API_KEY=xxx
 DATADOWNLOADER_API_KEY_HEADER=X-Downloader-Key  # default header name used by downloader
 DATADOWNLOADER_SKIP_LOCAL_START=true  # Don't start local ThetaTerminal
@@ -604,7 +705,7 @@ LUMIBOT_CACHE_MODE=readwrite
 ### ThetaData Rules (from AGENTS.md)
 
 1. **NEVER run ThetaTerminal locally** - Only use the Data Downloader
-2. **Use the shared downloader endpoint** - Set `DATADOWNLOADER_BASE_URL`
+2. **Use the downloader endpoint from your environment** - Set `DATADOWNLOADER_BASE_URL`
 3. **Respect queue/backoff** - Handle `{"error":"queue_full"}` responses
 4. **Long commands need safe-timeout** - Use `safe-timeout` wrapper
 

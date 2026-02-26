@@ -28,6 +28,10 @@ from lumibot.credentials import DATABENTO_CONFIG
 
 DATABENTO_API_KEY = DATABENTO_CONFIG.get("API_KEY")
 
+# Live DataBento API integration test. Excluded from the default CI unit run
+# (`-m "not apitest and not downloader"`) unless explicitly enabled.
+pytestmark = [pytest.mark.apitest]
+
 # Expected MES contract specs
 MES_MULTIPLIER = 5  # $5 per point
 MES_MARGIN = 1300  # ~$1,300 initial margin per contract

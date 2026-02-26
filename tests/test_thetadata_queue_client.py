@@ -9,7 +9,6 @@ Tests cover:
 - Local tracking of pending requests
 - Error handling
 """
-import os
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -17,12 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-# Need to set env var before importing to control QUEUE_ENABLED
-os.environ["THETADATA_USE_QUEUE"] = "true"
-os.environ["DATADOWNLOADER_BASE_URL"] = "http://test-server:8080"
-os.environ["DATADOWNLOADER_API_KEY"] = "test-api-key"
-
-from lumibot.tools.thetadata_queue_client import (
+from lumibot.tools.data_downloader_queue_client import (
     QUEUE_POLL_INTERVAL,
     QUEUE_TIMEOUT,
     QueueClient,
@@ -31,6 +25,19 @@ from lumibot.tools.thetadata_queue_client import (
     is_queue_enabled,
     queue_request,
 )
+
+
+@pytest.fixture(autouse=True)
+def _queue_client_test_env(monkeypatch):
+    """Isolate env mutations so other tests (e.g., acceptance backtests) aren't polluted."""
+    monkeypatch.setenv("THETADATA_USE_QUEUE", "true")
+    monkeypatch.setenv("DATADOWNLOADER_BASE_URL", "http://test-server:8080")
+    monkeypatch.setenv("DATADOWNLOADER_API_KEY", "test-api-key")
+    yield
+    # Reset the module singleton so state cannot leak across tests.
+    import lumibot.tools.data_downloader_queue_client as queue_module
+
+    queue_module._queue_client = None
 
 
 class TestQueueClientInit:
@@ -455,7 +462,6 @@ class TestGlobalFunctions:
 
     def test_is_queue_enabled(self):
         """Test is_queue_enabled returns correct value."""
-        # We set THETADATA_USE_QUEUE=true at module import
         assert is_queue_enabled() is True
 
     def test_get_queue_client_returns_singleton(self):
@@ -464,7 +470,7 @@ class TestGlobalFunctions:
         client2 = get_queue_client()
         assert client1 is client2
 
-    @patch('lumibot.tools.thetadata_queue_client.QueueClient.execute_request')
+    @patch('lumibot.tools.data_downloader_queue_client.QueueClient.execute_request')
     def test_queue_request_calls_client(self, mock_execute):
         """Test queue_request uses the client correctly."""
         mock_execute.return_value = ({"data": "test"}, 200)
@@ -477,7 +483,7 @@ class TestGlobalFunctions:
         assert result == {"data": "test"}
         mock_execute.assert_called_once()
 
-    @patch("lumibot.tools.thetadata_queue_client.QueueClient.execute_request")
+    @patch("lumibot.tools.data_downloader_queue_client.QueueClient.execute_request")
     def test_queue_request_parses_query_from_url_when_querystring_none(self, mock_execute):
         """Test queue_request parses query params from URL when querystring is None."""
         mock_execute.return_value = ({"data": "test"}, 200)

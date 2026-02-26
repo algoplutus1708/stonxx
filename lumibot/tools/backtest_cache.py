@@ -101,6 +101,12 @@ class BacktestCacheManager:
         # downloaded in this process so we can safely reuse the local copy for the remainder of the run.
         self._downloaded_remote_keys: set[str] = set()
         self._downloaded_remote_keys_lock = threading.Lock()
+        # Negative cache for remote keys that are missing in S3. Some backtest code paths can
+        # repeatedly request the same cache file (especially when coverage metadata thrashes).
+        # Without a miss-cache we end up doing thousands of failing S3 calls, which can dominate
+        # cold-local/warm-S3 production runs.
+        self._missing_remote_keys: set[str] = set()
+        self._missing_remote_keys_lock = threading.Lock()
 
         # Lightweight per-process accounting so we can quantify S3 hydration cost in production.
         # NOTE: This deliberately avoids logging per-object at INFO (too spammy); we log a single
@@ -163,6 +169,13 @@ class BacktestCacheManager:
                         self._downloaded_remote_keys.add(remote_key)
                     return False
 
+            # If we've already observed this remote key missing in S3 during the current process,
+            # don't keep re-hitting S3 (miss storms can dominate option-heavy runs).
+            if not local_path.exists() and not force_download:
+                with self._missing_remote_keys_lock:
+                    if remote_key in self._missing_remote_keys:
+                        return False
+
             with self._downloaded_remote_keys_lock:
                 already_downloaded = remote_key in self._downloaded_remote_keys
 
@@ -194,7 +207,31 @@ class BacktestCacheManager:
 
         try:
             started = time.perf_counter()
-            client.download_file(self._settings.bucket, remote_key, str(tmp_path))
+            if hasattr(client, "get_object"):
+                # PERF: `boto3`'s `download_file` uses the high-level S3Transfer manager which can add
+                # substantial overhead when hydrating thousands of *small* cache objects (common in
+                # option-heavy backtests, where each contract has its own parquet file).
+                #
+                # Streaming `get_object` directly to disk avoids that overhead and is materially faster
+                # for small objects. We still write via a temp file + atomic rename to keep the cache
+                # consistent if a download is interrupted.
+                response = client.get_object(Bucket=self._settings.bucket, Key=remote_key)
+                body = response.get("Body")
+                if body is None:
+                    raise RuntimeError(f"S3 get_object missing Body for key={remote_key!r}")
+                with tmp_path.open("wb") as handle:
+                    while True:
+                        chunk = body.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                try:
+                    body.close()
+                except Exception:
+                    pass
+            else:
+                # Test doubles may only implement the legacy `download_file` API.
+                client.download_file(self._settings.bucket, remote_key, str(tmp_path))
             elapsed = time.perf_counter() - started
             downloaded_bytes = 0
             try:
@@ -229,6 +266,8 @@ class BacktestCacheManager:
                 logger.debug(
                     "[REMOTE_CACHE][MISS] %s (reason=%s)", remote_key, self._describe_error(exc)
                 )
+                with self._missing_remote_keys_lock:
+                    self._missing_remote_keys.add(remote_key)
                 # In S3 mode, we intentionally leave no local cache on a miss to force fresh fetch.
                 if local_path.exists():
                     try:

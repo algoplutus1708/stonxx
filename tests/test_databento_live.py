@@ -19,6 +19,8 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+pytestmark = pytest.mark.apitest
+
 
 @pytest.mark.skipif(
     not os.environ.get('DATABENTO_API_KEY'),

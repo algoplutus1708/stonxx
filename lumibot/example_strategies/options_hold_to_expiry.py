@@ -35,7 +35,14 @@ class OptionsHoldToExpiry(Strategy):
         bars = self.get_historical_prices(underlying_asset, 1, "day")
         underlying_price = None
         if bars is not None and getattr(bars, "df", None) is not None and not bars.df.empty:
-            underlying_price = float(bars.df["close"].iloc[-1])
+            close_value = bars.df["close"].iloc[-1]
+            if close_value is not None:
+                try:
+                    underlying_price = float(close_value)
+                    if underlying_price != underlying_price:  # NaN guard
+                        underlying_price = None
+                except Exception:
+                    underlying_price = None
         self.log_message(f"The value of {buy_symbol} is {underlying_price}")
         if underlying_price is None:
             return

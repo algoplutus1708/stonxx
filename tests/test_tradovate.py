@@ -1005,12 +1005,11 @@ class TestTradovateTokenRenewal:
             
         print("✅ Automatic retry on 401 test passed")
     
-    @pytest.mark.skipif(not os.environ.get('TRADOVATE_USERNAME'), reason="This test requires Tradovate credentials")
     def test_get_balances_with_token_renewal(self):
         """Test that _get_balances_at_broker handles token renewal correctly."""
         from lumibot.brokers.tradovate import Tradovate
         from lumibot.entities import Asset
-        from unittest.mock import patch, MagicMock, Mock
+        from unittest.mock import patch, Mock
         
         # Mock the broker initialization
         with patch.object(Tradovate, '_get_tokens') as mock_get_tokens, \
@@ -1041,32 +1040,32 @@ class TestTradovateTokenRenewal:
             
             broker = Tradovate(config=config)
             
-            # Mock requests.request to simulate 401 then success
+            # Mock the internal request method to avoid real network calls.
             call_count = 0
-            def mock_post(*args, **kwargs):
+
+            def mock_request(*args, **kwargs):
                 nonlocal call_count
                 call_count += 1
-                
+
                 response = Mock()
                 if call_count == 1:
-                    # First call: 401 error
                     response.status_code = 401
-                    response.raise_for_status.side_effect = requests.exceptions.HTTPError()
-                    response.raise_for_status.side_effect.response = response
+                    response.raise_for_status.side_effect = requests.exceptions.HTTPError(
+                        response=response
+                    )
                     return response
-                else:
-                    # Second call: success
-                    response.status_code = 200
-                    response.json.return_value = {
-                        "totalCashValue": 100000,
-                        "netLiq": 105000
-                    }
-                    response.raise_for_status.return_value = None
-                    return response
-            
-            # Force token to be expired  
+
+                response.status_code = 200
+                response.json.return_value = {
+                    "totalCashValue": 100000,
+                    "netLiq": 105000,
+                }
+                response.raise_for_status.return_value = None
+                return response
+
+            # Force token to be "about to expire" so _check_and_renew_token() renews on 401.
             broker.token_acquired_time = time.time() - (broker.token_lifetime * 0.95)
-            
+
             # Update the mock to return new tokens when called again
             mock_get_tokens.return_value = {
                 'accessToken': 'renewed_token',
@@ -1074,8 +1073,8 @@ class TestTradovateTokenRenewal:
                 'hasMarketData': True
             }
             
-            with patch('requests.get', side_effect=mock_post) as mock_get:
-                # Call get_balances (which uses GET request)
+            with patch.object(broker, "_request", side_effect=mock_request):
+                # Call get_balances (which uses POST request)
                 quote_asset = Asset("USD", asset_type=Asset.AssetType.FOREX)
                 cash, positions_value, portfolio_value = broker._get_balances_at_broker(quote_asset, None)
                 
@@ -1085,8 +1084,6 @@ class TestTradovateTokenRenewal:
                 assert portfolio_value == 105000
                 assert call_count == 2  # Should have retried
                 assert broker.trading_token == 'renewed_token'
-            
-        print("✅ Get balances with token renewal test passed")
     
     def test_proactive_token_check(self):
         """Test the public check_token_expiry method."""

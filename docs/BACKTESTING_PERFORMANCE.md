@@ -2,11 +2,28 @@
 
 > A practical, evidence-driven guide to **measuring**, **debugging**, and **improving** backtesting performance end‑to‑end (strategy → data → cache → artifacts → UI), while preserving broker‑like correctness.
 
-**Last Updated:** 2026-01-07  
+**Last Updated:** 2026-01-26  
 **Status:** Active  
 **Audience:** Developers, AI Agents (engineering docs)  
 
 ---
+
+## Backtesting Definitions (Accuracy + Speed)
+
+**Accuracy (gold standard):** if we can replay a period that was traded live and reproduce the broker’s realized behavior (fills + PnL) within defined tolerances (tick size, fees model). Vendor parity (e.g., DataBento artifacts) is a regression signal, not “truth”.
+
+### Accuracy validation ladder (Tier 3 is the real gold standard)
+
+- **Tier 1 (regression):** vendor parity / stored artifact baselines (e.g., DataBento-era runs) to detect drift.
+- **Tier 2 (audit):** manual reviews around known hard edges (session gaps, holidays/early closes, rolls, rounding).
+- **Tier 3 (gold):** **live replay baseline** — replay an interval that was traded live and reproduce broker fills + realized PnL within tolerances.
+
+**Speed:** warm-cache runs are queue-free and complete in bounded wall time, with evidence (request counts, cache hit rate, iterations/sec, and wall-time split: data wait vs compute vs artifacts).
+
+**Resilience:** backtests should not “fail” solely because post-processing (stats/tearsheets/plots) crashed. When post-processing fails, the run should still:
+- preserve the trade stream (`trades.csv`) and portfolio stats (`stats.csv`) when available,
+- classify the failure (simulation vs postprocess vs upload),
+- and emit actionable diagnostics rather than silently omitting artifacts.
 
 ## Overview
 
@@ -208,6 +225,28 @@ Speed work without evidence becomes cargo cult. Every investigation should captu
 
 ---
 
+## 3.1a) Seconds-mode performance notes (futures-first)
+
+Seconds-level backtesting can mean either:
+- seconds for fills only (strategy cadence stays on minutes), or
+- true seconds strategy loops (strategy runs each second timestamp).
+
+True seconds loops change the economics:
+- the iteration count can increase by ~60× (or more) vs minute,
+- any per-iteration overhead that was “fine” at minute scale becomes catastrophic,
+- one stray per-tick downloader request can turn a run from minutes into hours.
+
+Recommended posture:
+- Use an **event-driven clock** (advance on timestamps that exist in the dataset), not “every integer second”.
+- Treat “prefetch once → slice forever” as a hard invariant.
+- Avoid per-tick pandas churn (`pd.to_datetime`, `DataFrame.copy`, merges).
+
+If you are implementing seconds-mode, read:
+- `docs/BACKTESTING_SECOND_LEVEL_ROADMAP.md`
+- `docs/investigations/bot_manager.md` (current implementation plan; futures-first)
+
+---
+
 ## 3.1) Investigation report template (date-first, shareable, sanitized)
 
 When a performance issue takes more than ~30 minutes to diagnose, write it up as an investigation.
@@ -391,6 +430,23 @@ If warm run #2 still submits a lot of the same request types:
 **First action**
 - confirm effective env vars (settings.json / logs)
 - identify which request types are missing from S3
+
+### Pattern B2 — IBKR historical futures “conid registry missing” thrash (cont_future)
+
+**Symptoms**
+- backtest window is historical (contract months are now expired)
+- repeated errors like “IBKR cont_future requires conids for explicit contract months …”
+- frequent submits to `ibkr/trsrv/futures` even though the backtest never makes progress on data
+- wall time explodes (minutes → hours) and logs become extremely repetitive
+
+**Likely cause**
+- `ibkr/conids.json` is missing in the active S3 cache namespace (fresh cache version/prefix), but
+  IBKR Client Portal cannot discover conids for expired contracts.
+
+**First action**
+- check that the conid registry exists in S3 for the active cache namespace/version
+- if running a fresh cache version, ensure the registry is seeded (see
+  `docs/investigations/2026-01-27_ROUTER_IBKR_SPEED.md`)
 
 ### Pattern C — Low submits but still slow
 
@@ -603,8 +659,32 @@ Forward-filling may keep the backtest running, but it can also mask missing data
 
 **Fix patterns**
 - ensure the underlying minute OHLC coverage is correct for the requested trading calendar
+- for Theta index minute OHLC (RTH-bounded), treat **session close** as “complete coverage” (do not require 23:59/UTC-midnight bars)
 - ensure option quotes are requested at times where quotes exist
 - add negative caching for known-missing slices to avoid retry storms
+
+See also:
+- `docs/investigations/2026-01-13_SPX_INTRADAY_STALE_LOOP_FIX.md` (production “ETA days” incident, root cause, fix, and regression tests)
+
+### 7.8 Case study: “ETA days” SPX intraday STALE loop (10×–100× lever)
+
+If you ever see a backtest that appears “stuck” and the logs show:
+- `[THETA][CACHE][STALE] prefetch_complete but coverage insufficient` repeating
+- extremely high `Submitted to queue` rates for `v3/index/history/ohlc` (SPX minute OHLC)
+
+...the fastest path to a 10× win is almost always to restore the warm invariant:
+- **warm means** `queue_submits == 0` (same S3 namespace, fresh local disk cache)
+
+This specific failure mode was fixed by clamping the intraday “coverage required” end timestamp for index assets to the **last trading session close at or before** the end requirement (holiday/weekend/early-close safe). See:
+- `docs/investigations/2026-01-13_SPX_INTRADAY_STALE_LOOP_FIX.md`
+
+#### Why this matters for “S3 vs EBS/EFS” discussions
+
+Before pursuing storage changes, validate whether warm runs are actually warm and where time goes:
+- If “warm” still submits to the downloader, storage changes do not help (you’re dominated by queue work).
+- If “warm” has `queue_submits≈0`, profile with yappi to see if the run is CPU-bound or S3-IO-bound.
+
+In a prod-like warm baseline for the client benchmark `SPX0DTEHybridStrangle`, yappi showed `s3_io` was ~1% and `pandas_numpy` dominated. That implies EBS/EFS would not produce an order-of-magnitude speedup for warm runs of that strategy (CPU/artifacts are the next levers).
 
 ---
 
@@ -998,8 +1078,17 @@ See:
 
 ### 17.3 “OptionsHelper delta selection explodes request volume”
 
-- Problem: naive delta-to-strike selection can probe many strikes and flood the downloader.
-- Fix direction: bounded search + fast-paths + memoization; avoid per-strike quote probes.
+- Problem: naive delta-to-strike selection can probe many strikes and flood the downloader (for example: building a large candidate strike list and calling `get_greeks()` per strike to “hunt” a 20Δ contract).
+- Fix direction:
+  - Prefer `OptionsHelper.find_strike_for_delta(...)` for delta-based strike selection (bounded probing + caching; avoids scanning many strikes).
+  - Cache selected expiry/strikes in `self.vars` for the trading day so intraday retries don’t recompute unless the underlying has moved materially.
+- Observed impact (cold-cache example, 1 day window; numbers vary by symbol/interval):
+  - `get_greeks()` calls: ~94 → ~13
+  - downloader queue submissions: ~560 → ~212
+  - wall time: ~75s → ~32s
+
+See:
+- `docs/investigations/2026-01-09_PRODLIKE_LOCAL_BENCHMARK_RUNS_WEEK_WINDOW.md`
 
 ### 17.4 “Corporate actions fetch storms”
 

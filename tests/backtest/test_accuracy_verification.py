@@ -20,6 +20,8 @@ from lumibot.tools import polygon_helper, thetadata_helper
 # Load environment variables from .env file
 load_dotenv()
 
+pytestmark = [pytest.mark.downloader]
+
 # Get credentials from environment variables
 POLYGON_API_KEY = os.environ.get("POLYGON_API_KEY")
 THETADATA_USERNAME = os.environ.get("THETADATA_USERNAME")
@@ -70,10 +72,8 @@ def _fetch_day_ohlc_polygon(symbol: str, start: datetime.datetime, end: datetime
     )
 
 
-@pytest.mark.skipif(
-    not POLYGON_API_KEY or not THETADATA_USERNAME or not THETADATA_PASSWORD,
-    reason="Requires both Polygon and ThetaData credentials"
-)
+@pytest.mark.apitest
+@pytest.mark.downloader
 class TestAccuracyVerification:
     """Accuracy verification test suite"""
 

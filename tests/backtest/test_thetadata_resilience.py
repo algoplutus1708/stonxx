@@ -1,7 +1,7 @@
 import pandas as pd
 import pytz
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from lumibot.entities import Asset
@@ -96,7 +96,11 @@ def test_s3_truncated_cache_forces_refetch(monkeypatch, tmp_path):
     assert len(fetch_calls) == 1, "EOD data should be re-fetched when the S3 cache is truncated."
     # Note: S3 upload may not be triggered in test mode with stubbed cache manager
     # The important check is that refetch happened (tested above)
-    assert result.index.max().date() >= end.date()
+    # Many LumiBot call sites represent an end-exclusive window as a midnight timestamp on the
+    # following day. ThetaData coverage logic treats midnight end bounds as end-exclusive for
+    # trading-day coverage (to avoid spurious "missing last day" refetches).
+    expected_end = end - timedelta(seconds=1) if end.time() == datetime.min.time() else end
+    assert result.index.max().date() >= expected_end.date()
     backtest_cache.reset_backtest_cache_manager(for_testing=True)
 
 

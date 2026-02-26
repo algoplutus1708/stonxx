@@ -51,7 +51,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Tuple, Optional
-from functools import lru_cache
 from enum import Enum
 
 # Import LUMIWEALTH_API_KEY from credentials
@@ -569,6 +568,9 @@ _logger_registry: Dict[str, logging.Logger] = {}
 _strategy_logger_registry: Dict[str, 'StrategyLoggerAdapter'] = {}
 _handlers_configured = False
 _config_lock = threading.Lock()
+# PERF: `StrategyLoggerAdapter.isEnabledFor()` is called extremely frequently in backtests. Avoid
+# per-call environment lookups by caching the effective "quiet logs" mode during logger setup.
+_BACKTESTING_QUIET_LOGS_ENABLED = False
 
 
 class StrategyLoggerAdapter(logging.LoggerAdapter):
@@ -590,17 +592,9 @@ class StrategyLoggerAdapter(logging.LoggerAdapter):
         return f"[{self.strategy_name}] {msg}", kwargs
     
     def isEnabledFor(self, level):
-        """Override to respect BACKTESTING_QUIET_LOGS for strategy loggers"""
-        # BACKTESTING_QUIET_LOGS only applies during backtesting, not live trading
-        is_backtesting = os.environ.get("IS_BACKTESTING", "").lower() == "true"
-        
-        if is_backtesting:
-            # During backtesting, check quiet logs setting
-            quiet_logs = os.environ.get("BACKTESTING_QUIET_LOGS", "true").lower() == "true"  # Default to True
-            if quiet_logs and level < logging.ERROR:
-                return False
-        
-        # For live trading, always show messages
+        """Respect BACKTESTING_QUIET_LOGS without per-call environment lookups."""
+        if _BACKTESTING_QUIET_LOGS_ENABLED and level < logging.ERROR:
+            return False
         return self.logger.isEnabledFor(level)
     
     def info(self, msg, *args, **kwargs):
@@ -651,7 +645,7 @@ def _ensure_handlers_configured(is_backtest=False):
         where we might want to explicitly control this behavior without relying on environment variables.
 
     """
-    global _handlers_configured
+    global _handlers_configured, _BACKTESTING_QUIET_LOGS_ENABLED
 
     # Resolve baseline log level from the environment (default INFO)
     default_level = os.environ.get('LUMIBOT_LOG_LEVEL', 'INFO').upper()
@@ -668,7 +662,10 @@ def _ensure_handlers_configured(is_backtest=False):
         if backtesting_quiet is None:
             backtesting_quiet = "true"
 
-        if backtesting_quiet.lower() == "true":
+        quiet_logs_enabled = backtesting_quiet.lower() == "true"
+        _BACKTESTING_QUIET_LOGS_ENABLED = quiet_logs_enabled
+
+        if quiet_logs_enabled:
             # Quiet mode: only ERROR+ messages to console and file
             console_level = logging.ERROR
             effective_log_level = logging.ERROR
@@ -677,12 +674,16 @@ def _ensure_handlers_configured(is_backtest=False):
             console_level = log_level
             effective_log_level = log_level
     else:
+        _BACKTESTING_QUIET_LOGS_ENABLED = False
         console_level = log_level
         effective_log_level = log_level
 
     def _apply_levels(root_logger: logging.Logger):
         """Ensure root level and console handler levels reflect the desired state."""
         root_logger.setLevel(effective_log_level)
+        # Some environments/tests toggle `propagate` to avoid duplicate output. For Lumibot's unified logger we want
+        # records to remain capturable by upstream handlers (pytest caplog, app-level root handlers, etc.).
+        root_logger.propagate = True
 
         console_handlers = [
             handler
@@ -751,7 +752,6 @@ def _ensure_handlers_configured(is_backtest=False):
         _handlers_configured = True
 
 
-@lru_cache(maxsize=128)
 def get_logger(name: str) -> logging.Logger:
     """
     Get a logger instance for the given name with consistent Lumibot formatting.

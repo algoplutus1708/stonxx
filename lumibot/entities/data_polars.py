@@ -84,6 +84,7 @@ class DataPolars:
     MIN_TIMESTEP = "minute"
     TIMESTEP_MAPPING = [
         {"timestep": "day", "representations": ["1D", "day"]},
+        {"timestep": "hour", "representations": ["1H", "hour"]},
         {"timestep": "minute", "representations": ["1M", "minute"]},
     ]
 
@@ -102,7 +103,7 @@ class DataPolars:
         self.asset = asset
         self.symbol = self.asset.symbol
 
-        if self.asset.asset_type == "crypto" and quote is None:
+        if "crypto" == self.asset.asset_type and quote is None:
             raise ValueError(
                 f"A crypto asset {self.symbol} was added to data without a corresponding"
                 f"`quote` asset. Please add the quote asset. For example, if trying to add "
@@ -118,9 +119,9 @@ class DataPolars:
                 f"The quote asset for DataPolars must be an Asset object. You provided a {type(self.quote)} object."
             )
 
-        if timestep not in ["minute", "day"]:
+        if timestep not in ["minute", "hour", "day"]:
             raise ValueError(
-                f"Timestep must be either 'minute' or 'day', the value you entered ({timestep}) is not currently supported."
+                f"Timestep must be one of 'minute', 'hour', or 'day'. You entered: {timestep}"
             )
 
         self.timestep = timestep
@@ -289,8 +290,8 @@ class DataPolars:
             (pl.col("datetime") >= date_start_aligned) & (pl.col("datetime") <= date_end_aligned)
         )
 
-        # Filter by trading hours if minute data
-        if self.timestep == "minute":
+        # Filter by trading hours if intraday data
+        if self.timestep in {"minute", "hour"}:
             df = df.filter(
                 (pl.col("datetime").dt.time() >= trading_hours_start) &
                 (pl.col("datetime").dt.time() <= trading_hours_end)
@@ -540,6 +541,12 @@ class DataPolars:
                 timeshift_converted = int(timeshift.total_seconds() / (24 * 3600))
                 logger.debug(f"[TIMESHIFT_CONVERT] asset={self.symbol} timestep=day total_seconds={timeshift.total_seconds()} converted={timeshift_converted}")
                 timeshift = timeshift_converted
+            elif ts == "hour":
+                timeshift_converted = int(timeshift.total_seconds() / 3600)
+                logger.debug(
+                    f"[TIMESHIFT_CONVERT] asset={self.symbol} timestep=hour total_seconds={timeshift.total_seconds()} converted={timeshift_converted}"
+                )
+                timeshift = timeshift_converted
             else:  # minute
                 timeshift_converted = int(timeshift.total_seconds() / 60)
                 logger.debug(f"[TIMESHIFT_CONVERT] asset={self.symbol} timestep=minute total_seconds={timeshift.total_seconds()} converted={timeshift_converted}")
@@ -586,11 +593,16 @@ class DataPolars:
         quantity, timestep = parse_timestep_qty_and_unit(timestep)
         num_periods = length
 
-        if timestep == "minute" and self.timestep == "day":
-            raise ValueError("You are requesting minute data from a daily data source. This is not supported.")
+        if timestep == "minute" and self.timestep in {"day", "hour"}:
+            raise ValueError(
+                "You are requesting minute data from a higher-timeframe data source. This is not supported."
+            )
 
-        if timestep != "minute" and timestep != "day":
-            raise ValueError(f"Only minute and day are supported for timestep. You provided: {timestep}")
+        if timestep == "hour" and self.timestep == "day":
+            raise ValueError("You are requesting hour data from a daily data source. This is not supported.")
+
+        if timestep not in {"minute", "hour", "day"}:
+            raise ValueError(f"Only minute, hour, and day are supported for timestep. You provided: {timestep}")
 
         agg_column_map = {
             "open": "first",
@@ -604,9 +616,24 @@ class DataPolars:
             unit = "D"
             data = self._get_bars_dict(dt, length=length, timestep="minute", timeshift=timeshift)
 
+        elif timestep == "day" and self.timestep == "hour":
+            length = length * 24
+            unit = "D"
+            data = self._get_bars_dict(dt, length=length, timestep="hour", timeshift=timeshift)
+
         elif timestep == 'day' and self.timestep == 'day':
             unit = "D"
             data = self._get_bars_dict(dt, length=length, timestep=timestep, timeshift=timeshift)
+
+        elif timestep == "hour" and self.timestep == "minute":
+            length = length * 60 * quantity
+            unit = "h"
+            data = self._get_bars_dict(dt, length=length, timestep="minute", timeshift=timeshift)
+
+        elif timestep == "hour" and self.timestep == "hour":
+            unit = "h"
+            length = length * quantity
+            data = self._get_bars_dict(dt, length=length, timestep="hour", timeshift=timeshift)
 
         else:
             unit = "min"
@@ -625,7 +652,7 @@ class DataPolars:
         df_result = df_result.dropna()
 
         # Remove partial day data from the current day
-        if timestep == "day" and self.timestep == "minute":
+        if timestep == "day" and self.timestep in {"minute", "hour"}:
             df_result = df_result[df_result.index < dt.replace(hour=0, minute=0, second=0, microsecond=0)]
 
         # Only return the last n rows
@@ -635,37 +662,39 @@ class DataPolars:
 
     def get_bars_between_dates(self, timestep=MIN_TIMESTEP, exchange=None, start_date=None, end_date=None):
         """Returns a dataframe of all the data available between the start and end dates."""
-        if timestep == "minute" and self.timestep == "day":
-            raise ValueError("You are requesting minute data from a daily data source. This is not supported.")
+        quantity, timestep = parse_timestep_qty_and_unit(timestep)
 
-        if timestep != "minute" and timestep != "day":
-            raise ValueError(f"Only minute and day are supported for timestep. You provided: {timestep}")
-
-        if timestep == "day" and self.timestep == "minute":
-            dict = self._get_bars_between_dates_dict(timestep=timestep, start_date=start_date, end_date=end_date)
-
-            if dict is None:
-                return None
-
-            df = pd.DataFrame(dict).set_index("datetime")
-
-            df_result = df.resample("D").agg(
-                {
-                    "open": "first",
-                    "high": "max",
-                    "low": "min",
-                    "close": "last",
-                    "volume": "sum",
-                }
+        if timestep == "minute" and self.timestep in {"day", "hour"}:
+            raise ValueError(
+                "You are requesting minute data from a higher-timeframe data source. This is not supported."
             )
 
-            return df_result
+        if timestep == "hour" and self.timestep == "day":
+            raise ValueError("You are requesting hour data from a daily data source. This is not supported.")
 
-        else:
-            dict = self._get_bars_between_dates_dict(timestep=timestep, start_date=start_date, end_date=end_date)
+        if timestep not in {"minute", "hour", "day"}:
+            raise ValueError(f"Only minute, hour, and day are supported for timestep. You provided: {timestep}")
 
-            if dict is None:
-                return None
+        data = self._get_bars_between_dates_dict(timestep=timestep, start_date=start_date, end_date=end_date)
+        if data is None:
+            return None
 
-            df = pd.DataFrame(dict).set_index("datetime")
+        df = pd.DataFrame(data).set_index("datetime")
+        if df is None or df.empty:
             return df
+
+        if timestep == "minute" and int(quantity) == 1:
+            return df
+
+        agg = {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+        if "dividend" in df.columns:
+            agg["dividend"] = "sum"
+
+        unit_code = "min" if timestep == "minute" else "h" if timestep == "hour" else "D"
+        return df.resample(f"{int(quantity)}{unit_code}").agg(agg).dropna()

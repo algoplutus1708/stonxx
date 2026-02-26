@@ -34,7 +34,7 @@ def test_build_historical_chain_prefetches_head_and_tail_only(monkeypatch):
     expirations = [(as_of + timedelta(days=i)).isoformat() for i in range(100)]
 
     fake_queue = _FakeQueueClient()
-    monkeypatch.setattr("lumibot.tools.thetadata_queue_client.get_queue_client", lambda: fake_queue)
+    monkeypatch.setattr("lumibot.tools.data_downloader_queue_client.get_queue_client", lambda: fake_queue)
 
     def fake_get_request(*, url, headers, querystring):
         if url.endswith(thetadata_helper.OPTION_LIST_ENDPOINTS["expirations"]):

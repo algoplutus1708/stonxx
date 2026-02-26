@@ -23,6 +23,11 @@ from termcolor import colored
 
 from lumibot.constants import LUMIBOT_DEFAULT_PYTZ
 from lumibot.tools.lumibot_logger import get_logger, get_strategy_logger
+from lumibot.tools.parquet_utils import (
+    coerce_object_columns_to_json_strings,
+    is_parquet_required,
+    write_parquet_with_logging,
+)
 
 from ..backtesting import (
     AlpacaBacktesting,
@@ -31,6 +36,7 @@ from ..backtesting import (
     DataBentoDataBacktesting,
     InteractiveBrokersRESTBacktesting,
     PolygonDataBacktesting,
+    RoutedBacktestingPandas,
     ThetaDataBacktesting,
     ThetaDataBacktestingPandas,
     YahooDataBacktesting,
@@ -46,7 +52,6 @@ from ..credentials import (
     DISCORD_WEBHOOK_URL,
     HIDE_POSITIONS,
     HIDE_TRADES,
-    INTERACTIVE_BROKERS_REST_CONFIG,
     LIVE_CONFIG,
     LOG_BACKTEST_PROGRESS_TO_FILE,
     LUMIWEALTH_API_KEY,
@@ -432,6 +437,9 @@ class _Strategy:
         # Initialize the chart lines list
         self._chart_lines_list = []
 
+        # Initialize the chart OHLC list
+        self._chart_ohlc_list = []
+
         # Hold the asset objects for strings for stocks only.
         self._asset_mapping = dict()
 
@@ -465,8 +473,52 @@ class _Strategy:
             # Set initial positions if live trading.
             self.broker._set_initial_positions(self)
         else:
-            # If budget is not provided to run_backtest, default it
+            # Determine initial cash ("budget") for backtesting.
+            # NOTE: In BotSpot/BotManager runs we often inject settings via environment variables.
+            # If BACKTESTING_BUDGET is provided, prefer it (even if strategy code passed an explicit budget)
+            # so the starting cash can be controlled per-run without forcing a code change.
             effective_budget = budget
+            env_budget_raw = os.environ.get("BACKTESTING_BUDGET")
+            if env_budget_raw is not None:
+                trimmed = env_budget_raw.strip()
+                if trimmed and trimmed.lower() not in ("none", "null"):
+                    normalized = (
+                        trimmed.replace("$", "")
+                        .replace(",", "")
+                        .replace("_", "")
+                        .strip()
+                    )
+                    multiplier = 1.0
+                    suffix = normalized[-1:].lower()
+                    if suffix in ("k", "m", "b") and len(normalized) > 1:
+                        normalized = normalized[:-1].strip()
+                        if suffix == "k":
+                            multiplier = 1_000.0
+                        elif suffix == "m":
+                            multiplier = 1_000_000.0
+                        elif suffix == "b":
+                            multiplier = 1_000_000_000.0
+                    try:
+                        parsed = float(normalized) * multiplier
+                        if not math.isfinite(parsed) or parsed <= 0:
+                            raise ValueError("budget must be a finite positive number")
+                        effective_budget = parsed
+                        self.logger.info(
+                            colored(
+                                f"Using BACKTESTING_BUDGET={effective_budget:g} as starting backtest cash",
+                                "green",
+                            )
+                        )
+                    except Exception:
+                        self.logger.warning(
+                            colored(
+                                f"Invalid BACKTESTING_BUDGET value: {env_budget_raw!r}. "
+                                "Expected a positive number like 500, 5000, 5k, 1_000_000, or $10,000. "
+                                "Ignoring and falling back to budget/default.",
+                                "yellow",
+                            )
+                        )
+
             if effective_budget is None:
                 effective_budget = 100000  # Default budget
 
@@ -680,7 +732,7 @@ class _Strategy:
             try:
                 broker_balances = self.broker._get_balances_at_broker(self._quote_asset, self)
             except Exception as e:
-                self.logger.error(f"Error getting broker balances: {e}")
+                self.logger.info(f"Error getting broker balances: {e}", exc_info=True)
                 return False
 
             if broker_balances is not None:
@@ -695,7 +747,7 @@ class _Strategy:
                 return True
 
             else:
-                self.logger.error(
+                self.logger.warning(
                     "Unable to get balances (cash, portfolio value, etc) from broker. "
                     "Please check your broker and your broker configuration."
                 )
@@ -748,7 +800,7 @@ class _Strategy:
                     else (position.asset, self._quote_asset)
                 )
                 quantity = position.quantity
-                price = prices.get(asset, 0)
+                price = prices.get(asset)
 
                 # If the asset is the quote asset, then we already have included it from cash
                 # Eg. if we have a position of USDT and USDT is the quote_asset then we already consider it as cash
@@ -757,9 +809,22 @@ class _Strategy:
                         self._quote_asset,
                         self._quote_asset,
                     ):
-                        price = 0
+                        continue
                     elif isinstance(asset, Asset) and asset == self._quote_asset:
-                        price = 0
+                        continue
+
+                # Normalize "missing" prices to None so forward-fill fallback can apply.
+                # Some data sources return 0 or NaN for "no price" (common on non-trading timestamps).
+                if price is not None:
+                    try:
+                        price_float = float(price)
+                    except (TypeError, ValueError):
+                        price = None
+                    else:
+                        if (not math.isfinite(price_float)) or price_float == 0:
+                            price = None
+                        else:
+                            price = price_float
 
                 # Track valid prices for forward-fill fallback
                 if price is not None:
@@ -905,13 +970,16 @@ class _Strategy:
                     else:
                         quote = get_quote(base_asset, timestep=timestep_hint or "minute")
                     quote_mark = _thetadata_quote_mark(quote)
-                    if quote_mark is not None:
-                        return quote_mark
+                    day_quote_mark = quote_mark
+                    if timestep_hint != "day":
+                        if quote_mark is not None:
+                            return quote_mark
 
                     # Daily-cadence fallback: intraday quote snapshots are the most robust source
-                    # of option marks when EOD/history endpoints are missing for a contract.
+                    # of option marks. Even when day quotes exist, they can be stale in some
+                    # provider/cache states; prefer snapshot mark when available.
                     if timestep_hint == "day":
-                        # Only attempt snapshot-only fallback when it's safe to do so.
+                        # Only attempt snapshot-only lookup when it's safe to do so.
                         #
                         # Some unit tests (and custom sources) override `get_quote()` at the class
                         # level and treat repeated calls as an error (or always return the same
@@ -919,17 +987,33 @@ class _Strategy:
                         # ThetaDataBacktestingPandas implementation is guaranteed to understand
                         # `snapshot_only`. For non-bound callables (e.g., instance-level stubs used
                         # by tests), allow the fallback.
+                        can_try_snapshot = True
                         func = getattr(get_quote, "__func__", None)
                         if func is not None and func is not ThetaDataBacktestingPandas.get_quote:
-                            return None
-                        quote_kwargs = {"timestep": "minute", "snapshot_only": True}
-                        if quote_asset is not None:
-                            quote = get_quote(base_asset, quote=quote_asset, **quote_kwargs)
-                        else:
-                            quote = get_quote(base_asset, **quote_kwargs)
-                        quote_mark = _thetadata_quote_mark(quote)
-                        if quote_mark is not None:
-                            return quote_mark
+                            can_try_snapshot = False
+                        if can_try_snapshot:
+                            quote_kwargs = {"timestep": "minute", "snapshot_only": True}
+                            if quote_asset is not None:
+                                quote = get_quote(base_asset, quote=quote_asset, **quote_kwargs)
+                            else:
+                                quote = get_quote(base_asset, **quote_kwargs)
+                            quote_mark = _thetadata_quote_mark(quote)
+                            if quote_mark is not None:
+                                return quote_mark
+
+                        # If snapshot probing failed, avoid forcing day-quote marks for established
+                        # positions when we already have a prior valid mark to forward-fill from.
+                        # This prevents stale day quotes from creating artificial intraday MTM cliffs.
+                        has_last_known_price = False
+                        try:
+                            has_last_known_price = base_asset in getattr(self, "_last_known_prices", {})
+                        except Exception:
+                            has_last_known_price = False
+
+                        if day_quote_mark is not None:
+                            if has_last_known_price:
+                                return None
+                            return day_quote_mark
             except Exception as e:
                 self.logger.debug("ThetaData quote-mark lookup failed for %s: %s", base_asset, e)
             return None
@@ -1287,6 +1371,20 @@ class _Strategy:
                     os.makedirs(stats_directory)
 
                 self._stats.to_csv(self._stats_file)
+                stats_parquet_file = (
+                    self._stats_file[:-4] + ".parquet" if self._stats_file.lower().endswith(".csv") else self._stats_file + ".parquet"
+                )
+                required = bool(self.is_backtesting) and is_parquet_required()
+                write_parquet_with_logging(
+                    df=self._stats,
+                    path=stats_parquet_file,
+                    artifact="stats",
+                    logger=self.logger,
+                    index=True,
+                    required=required,
+                    compression="zstd",
+                    sanitizer=coerce_object_columns_to_json_strings,
+                )
 
             self._strategy_returns_df = day_deduplicate(self._stats)
 
@@ -1304,6 +1402,10 @@ class _Strategy:
             # is at the start of the day, so the graph cuts short. This may be needed
             # for other timeframes as well
             backtesting_end_adjusted = self._backtesting_end
+            try:
+                from lumibot.backtesting.routed_backtesting import RoutedBacktestingPandas
+            except Exception:
+                RoutedBacktestingPandas = None  # type: ignore[misc,assignment]
 
             # If we are using the polgon data source, then get the benchmark returns from polygon
             if type(self.broker.data_source) == PolygonDataBacktesting:
@@ -1369,7 +1471,155 @@ class _Strategy:
 
                 self._benchmark_returns_df = df
 
-            if type(self.broker.data_source) == AlpacaBacktesting:
+            # IBKR backtests:
+            # - For crypto benchmarks, prefer the IBKR data source (Yahoo crypto tickers are inconsistent).
+            # - For equity benchmarks (e.g., SPY), prefer Yahoo to avoid IBKR history flakiness impacting
+            #   tearsheet generation (benchmark is cosmetic; strategy stats are authoritative).
+            elif str(getattr(self.broker.data_source, "SOURCE", "") or "").upper() == "INTERACTIVEBROKERSREST":
+                def _fallback_benchmark_from_strategy() -> None:
+                    """Fallback: use the strategy equity curve as a benchmark so tearsheets remain available."""
+                    try:
+                        if self._strategy_returns_df is None or self._strategy_returns_df.empty:
+                            return
+                        if "portfolio_value" not in self._strategy_returns_df.columns:
+                            return
+                        series = self._strategy_returns_df["portfolio_value"].astype(float).copy()
+                        first = float(series.dropna().iloc[0]) if not series.dropna().empty else None
+                        if first is None or first == 0:
+                            return
+                        bench = pd.DataFrame(index=self._strategy_returns_df.index)
+                        # Match the shape expected by plotting + tearsheet code:
+                        # - `plot_returns()` expects a `return` column
+                        # - tearsheets typically consume `symbol_cumprod`
+                        bench["return"] = series.pct_change(fill_method=None)
+                        bench["symbol_cumprod"] = (1 + bench["return"]).cumprod()
+                        self._benchmark_returns_df = bench
+                        self.logger.warning(
+                            "IBKR benchmark bars unavailable; using strategy equity curve as benchmark for tearsheet generation."
+                        )
+                    except Exception:
+                        return
+
+                benchmark_asset = self._benchmark_asset
+                if isinstance(benchmark_asset, str):
+                    parts = [p.strip() for p in benchmark_asset.split("/") if p.strip()]
+                    if len(parts) == 2:
+                        benchmark_asset = (
+                            Asset(symbol=parts[0], asset_type="crypto"),
+                            Asset(symbol=parts[1], asset_type="forex"),
+                        )
+                    else:
+                        try:
+                            self._benchmark_returns_df = get_symbol_returns(
+                                benchmark_asset,
+                                self._backtesting_start,
+                                backtesting_end_adjusted,
+                            )
+                        except Exception:
+                            _fallback_benchmark_from_strategy()
+                        return
+                elif isinstance(benchmark_asset, Asset) and str(getattr(benchmark_asset, "asset_type", "")).lower() == "stock":
+                    try:
+                        self._benchmark_returns_df = get_symbol_returns(
+                            benchmark_asset.symbol,
+                            self._backtesting_start,
+                            backtesting_end_adjusted,
+                        )
+                    except Exception:
+                        _fallback_benchmark_from_strategy()
+                    return
+
+                timestep = "minute"
+                if "D" in str(self._sleeptime):
+                    timestep = "day"
+
+                bars = self.broker.data_source.get_historical_prices_between_dates(
+                    benchmark_asset,
+                    timestep,
+                    start_date=self._backtesting_start,
+                    end_date=backtesting_end_adjusted,
+                    quote=self._quote_asset,
+                )
+                if bars is None or getattr(bars, "df", None) is None:
+                    self.logger.error(f"Couldn't get benchmark bars from IBKR data source: {benchmark_asset}")
+                    _fallback_benchmark_from_strategy()
+                    return
+                df = bars.df
+                if df is None or df.empty or "close" not in df.columns:
+                    self.logger.error(f"IBKR benchmark bars empty/invalid: {benchmark_asset}")
+                    _fallback_benchmark_from_strategy()
+                    return
+                df = df.copy()
+                df["return"] = df["close"].pct_change(fill_method=None)
+                df["symbol_cumprod"] = (1 + df["return"]).cumprod()
+                self._benchmark_returns_df = df
+
+            # Router backtests (prod-like Theta+IBKR routing):
+            # Prefer the routed data source over Yahoo so benchmarks remain cacheable and don't
+            # require external network access (Yahoo can be rate-limited and slow).
+            elif RoutedBacktestingPandas is not None and isinstance(self.broker.data_source, RoutedBacktestingPandas):
+                def _fallback_benchmark_from_strategy() -> None:
+                    """Fallback: use the strategy equity curve as a benchmark so tearsheets remain available."""
+                    try:
+                        if self._strategy_returns_df is None or self._strategy_returns_df.empty:
+                            return
+                        if "portfolio_value" not in self._strategy_returns_df.columns:
+                            return
+                        series = self._strategy_returns_df["portfolio_value"].astype(float).copy()
+                        first = float(series.dropna().iloc[0]) if not series.dropna().empty else None
+                        if first is None or first == 0:
+                            return
+                        bench = pd.DataFrame(index=self._strategy_returns_df.index)
+                        bench["return"] = series.pct_change(fill_method=None)
+                        bench["symbol_cumprod"] = (1 + bench["return"]).cumprod()
+                        self._benchmark_returns_df = bench
+                        self.logger.warning(
+                            "Router benchmark bars unavailable; using strategy equity curve as benchmark for tearsheet generation."
+                        )
+                    except Exception:
+                        return
+
+                benchmark_asset = self._benchmark_asset
+                if isinstance(benchmark_asset, str):
+                    parts = [p.strip() for p in benchmark_asset.split("/") if p.strip()]
+                    if len(parts) == 2:
+                        benchmark_asset = (
+                            Asset(symbol=parts[0], asset_type="crypto"),
+                            Asset(symbol=parts[1], asset_type="forex"),
+                        )
+                    else:
+                        # Keep behavior consistent with Yahoo benchmarks: use daily series.
+                        benchmark_asset = Asset(symbol=benchmark_asset, asset_type="stock")
+
+                # Use daily bars for benchmark across intraday strategies to keep tearsheet cost bounded.
+                timestep = "day"
+
+                try:
+                    bars = self.broker.data_source.get_historical_prices_between_dates(
+                        benchmark_asset,
+                        timestep,
+                        start_date=self._backtesting_start,
+                        end_date=backtesting_end_adjusted,
+                        quote=self._quote_asset,
+                    )
+                except Exception:
+                    bars = None
+
+                if bars is None or getattr(bars, "df", None) is None:
+                    self.logger.error(f"Couldn't get benchmark bars from Router data source: {benchmark_asset}")
+                    _fallback_benchmark_from_strategy()
+                    return
+                df = bars.df
+                if df is None or df.empty or "close" not in df.columns:
+                    self.logger.error(f"Router benchmark bars empty/invalid: {benchmark_asset}")
+                    _fallback_benchmark_from_strategy()
+                    return
+                df = df.copy()
+                df["return"] = df["close"].pct_change(fill_method=None)
+                df["symbol_cumprod"] = (1 + df["return"]).cumprod()
+                self._benchmark_returns_df = df
+
+            elif type(self.broker.data_source) == AlpacaBacktesting:
                 benchmark_asset = self._benchmark_asset
 
                 df = self.broker.data_source.get_historical_prices_between_dates(
@@ -1467,9 +1717,6 @@ class _Strategy:
                             "OPTION_DATA_SOURCE",
                             type(self.broker.option_source).__name__,
                         )
-                    base_url = os.environ.get("DATADOWNLOADER_BASE_URL")
-                    if base_url:
-                        strategy_parameters.setdefault("DATADOWNLOADER_BASE_URL", base_url)
             except Exception:
                 # Never fail tearsheet generation due to metadata/diagnostics.
                 pass
@@ -1751,11 +1998,23 @@ class _Strategy:
         # datasource_class argument was provided.
         env_override_raw = os.environ.get("BACKTESTING_DATA_SOURCE")
         env_override_name = None
+        env_override_routing = None
 
         if env_override_raw is not None:
             trimmed = env_override_raw.strip()
             if trimmed and trimmed.lower() != "none":
-                env_override_name = trimmed.lower()
+                if trimmed.startswith("{") and trimmed.endswith("}"):
+                    try:
+                        parsed = json.loads(trimmed)
+                    except Exception:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        env_override_name = "router"
+                        env_override_routing = parsed
+                    else:
+                        env_override_name = trimmed.lower()
+                else:
+                    env_override_name = trimmed.lower()
         elif datasource_class is None:
             # No override provided and no class in code – fall back to the default
             # configured in credentials (ThetaData unless the project overrides it).
@@ -1769,6 +2028,12 @@ class _Strategy:
                 "alpaca": AlpacaBacktesting,
                 "ccxt": CcxtBacktesting,
                 "databento": DataBentoDataBacktesting,
+                "ibkr": InteractiveBrokersRESTBacktesting,
+                "interactivebrokersrest": InteractiveBrokersRESTBacktesting,
+                "interactive_brokers_rest": InteractiveBrokersRESTBacktesting,
+                "router": RoutedBacktestingPandas,
+                "thetadata_ibkr": RoutedBacktestingPandas,
+                "theta_ibkr": RoutedBacktestingPandas,
             }
 
             if env_override_name not in datasource_map:
@@ -1779,6 +2044,20 @@ class _Strategy:
                 )
 
             datasource_class = datasource_map[env_override_name]
+
+            if env_override_routing is not None:
+                if config is None:
+                    config = {}
+                if isinstance(config, dict):
+                    merged = dict(config)
+                    merged["backtesting_data_routing"] = env_override_routing
+                    config = merged
+                else:
+                    try:
+                        setattr(config, "backtesting_data_routing", env_override_routing)
+                    except Exception:
+                        pass
+
             label = env_override_raw or _DEFAULT_BACKTESTING_DATA_SOURCE
             get_logger(__name__).info(colored(
                 f"Using BACKTESTING_DATA_SOURCE setting for backtest data: {label}",
@@ -1906,7 +2185,9 @@ class _Strategy:
                 log_backtest_progress_to_file=LOG_BACKTEST_PROGRESS_TO_FILE,
                 **kwargs,
             )
-        elif datasource_class.__name__ == 'ThetaDataBacktesting' or (optionsource_class and optionsource_class.__name__ == 'ThetaDataBacktesting'):
+        elif issubclass(datasource_class, ThetaDataBacktestingPandas) or (
+            optionsource_class and issubclass(optionsource_class, ThetaDataBacktestingPandas)
+        ):
             data_source = datasource_class(
                 backtesting_start,
                 backtesting_end,
@@ -1924,7 +2205,7 @@ class _Strategy:
             data_source = datasource_class(
                 backtesting_start,
                 backtesting_end,
-                config=INTERACTIVE_BROKERS_REST_CONFIG,
+                config=config,
                 auto_adjust=auto_adjust,
                 pandas_data=pandas_data,
                 show_progress_bar=show_progress_bar,
@@ -2084,6 +2365,8 @@ class _Strategy:
         )
         # Create chart lines dataframe
         chart_lines_df = pd.DataFrame(self._chart_lines_list)
+        # Create chart OHLC dataframe
+        chart_ohlc_df = pd.DataFrame(getattr(self, "_chart_ohlc_list", []))
         # Create chart markers dataframe
         chart_markers_df = pd.DataFrame(self._chart_markers_list)
 
@@ -2093,6 +2376,7 @@ class _Strategy:
                 indicators_file,
                 chart_markers_df,
                 chart_lines_df,
+                chart_ohlc_df,
                 f"{self._log_strat_name()}Strategy Indicators",
                 show_indicators=show_indicators,
             )
@@ -2285,16 +2569,13 @@ class _Strategy:
             self.logger.debug(f"Cloud response: Status={response.status_code}, Headers={dict(response.headers)}")
 
         except requests.exceptions.ConnectionError as e:
-            self.logger.warning(f"Connection error when sending to cloud: {e}")
-            self.logger.debug(traceback.format_exc())
+            self.logger.info(f"Connection error when sending to cloud: {e}", exc_info=True)
             return False
         except requests.exceptions.Timeout as e:
-            self.logger.warning(f"Timeout error when sending to cloud: {e}")
-            self.logger.debug(traceback.format_exc())
+            self.logger.info(f"Timeout error when sending to cloud: {e}", exc_info=True)
             return False
         except requests.exceptions.RequestException as e:
-            self.logger.warning(f"Request error when sending to cloud: {e}")
-            self.logger.debug(traceback.format_exc())
+            self.logger.info(f"Request error when sending to cloud: {e}", exc_info=True)
             return False
         except Exception as e:
             self.logger.error(f"Unexpected error when sending to cloud: {e}")

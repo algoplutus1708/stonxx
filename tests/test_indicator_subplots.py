@@ -9,7 +9,7 @@ import pytest
 from lumibot.backtesting import PandasDataBacktesting
 from lumibot.strategies.strategy import Strategy
 from lumibot.entities import Asset
-from lumibot.tools.indicators import _build_trade_marker_tooltip, plot_returns
+from lumibot.tools.indicators import _build_trade_marker_tooltip, plot_indicators, plot_returns
 
 from tests.fixtures import pandas_data_fixture
 
@@ -281,6 +281,113 @@ def test_plot_returns_preserves_cash_settled_status(tmp_path, monkeypatch):
     trades_csv = pd.read_csv(plot_path.with_suffix(".csv"))
     assert "cash_settled" in trades_csv["status"].tolist()
 
+    trades_parquet = pd.read_parquet(plot_path.with_suffix(".parquet"))
+    assert "cash_settled" in trades_parquet["status"].tolist()
+
+
+def test_plot_returns_preserves_assignment_and_exercise_statuses(tmp_path, monkeypatch):
+    plot_path = tmp_path / "plot_assignment_exercise.html"
+
+    def _fake_write_html(self, file, auto_open=True, **kwargs):
+        return file
+
+    monkeypatch.setattr(go.Figure, "write_html", _fake_write_html, raising=False)
+
+    idx = pd.to_datetime(
+        ["2025-09-20 00:00:00-04:00", "2025-09-21 00:00:00-04:00"]
+    ).tz_convert("UTC")
+
+    strategy_df = pd.DataFrame(
+        {
+            "return": [0.0, 0.0],
+            "cash": [100000, 100000],
+            "positions": [[], []],
+        },
+        index=idx,
+    )
+
+    benchmark_df = pd.DataFrame(
+        {
+            "return": [0.0, 0.0],
+            "open": [1.0, 1.0],
+            "high": [1.0, 1.0],
+            "low": [1.0, 1.0],
+            "close": [1.0, 1.0],
+        },
+        index=idx,
+    )
+
+    trades_df = pd.DataFrame(
+        [
+            {
+                "time": "2025-09-20 00:00:00-04:00",
+                "side": "buy",
+                "status": "assigned",
+                "filled_quantity": 1,
+                "symbol": "AAPL",
+                "asset.asset_type": "option",
+                "asset.right": "PUT",
+                "asset.strike": 100,
+                "asset.expiration": "2025-09-20",
+                "price": 5.0,
+                "type": "assigned",
+                "asset.multiplier": 100,
+                "trade_cost": pd.NA,
+            },
+            {
+                "time": "2025-09-21 00:00:00-04:00",
+                "side": "buy",
+                "status": "fill",
+                "filled_quantity": 100,
+                "symbol": "AAPL",
+                "asset.asset_type": "stock",
+                "asset.right": None,
+                "asset.strike": float("nan"),
+                "asset.expiration": None,
+                "price": 100.0,
+                "type": "exercised",
+                "asset.multiplier": 1,
+                "trade_cost": pd.NA,
+            },
+            {
+                "time": "2025-09-21 00:00:00-04:00",
+                "side": "sell",
+                "status": "exercised",
+                "filled_quantity": 1,
+                "symbol": "AAPL",
+                "asset.asset_type": "option",
+                "asset.right": "CALL",
+                "asset.strike": 90,
+                "asset.expiration": "2025-09-21",
+                "price": 10.0,
+                "type": "exercised",
+                "asset.multiplier": 100,
+                "trade_cost": pd.NA,
+            },
+        ]
+    )
+
+    plot_returns(
+        strategy_df,
+        "Strategy",
+        benchmark_df,
+        "Benchmark",
+        plot_file_html=str(plot_path),
+        trades_df=trades_df,
+        show_plot=True,
+        initial_budget=1,
+    )
+
+    trades_csv = pd.read_csv(plot_path.with_suffix(".csv"))
+    statuses = trades_csv["status"].tolist()
+    assert "assigned" in statuses
+    assert "exercised" in statuses
+
+    trades_parquet = pd.read_parquet(plot_path.with_suffix(".parquet"))
+    parquet_statuses = trades_parquet["status"].tolist()
+    assert "assigned" in parquet_statuses
+    assert "exercised" in parquet_statuses
+
     def test_named_lines(self, pandas_data_fixture):
         """Test the named lines"""
         strategy_name = "TestIndicatorStrategy"
@@ -345,6 +452,7 @@ def _make_strategy_stub():
     strat = Strategy.__new__(Strategy)
     strat._chart_markers_list = []
     strat._chart_lines_list = []
+    strat._chart_ohlc_list = []
     strat.logger = logging.getLogger("indicator_tests")
     strat.portfolio_value = 1_000
     strat.get_datetime = lambda: DateTime(2024, 1, 1)
@@ -385,6 +493,14 @@ class TestAddMarkerAndLineGuards:
         assert result is None
         assert strat._chart_lines_list == []
         assert "Skipping line" in caplog.text
+
+    def test_add_line_returns_dict_on_success(self):
+        strat = _make_strategy_stub()
+        result = strat.add_line("test_line", 10.0, color="blue")
+        assert isinstance(result, dict)
+        assert strat._chart_lines_list[-1] is result
+        assert result["name"] == "test_line"
+        assert result["value"] == 10.0
 
     def test_add_line_defaults_color(self, caplog):
         strat = _make_strategy_stub()
@@ -500,3 +616,194 @@ class TestAddMarkerAndLineGuards:
         assert line["asset_symbol"] is None
         assert line["asset_type"] is None
         assert line["asset_display_name"] is None
+
+
+class TestAddOHLCGuards:
+
+    def test_add_ohlc_basic(self):
+        strat = _make_strategy_stub()
+        result = strat.add_ohlc("Test", open=100, high=105, low=98, close=102)
+        assert isinstance(result, dict)
+        assert len(strat._chart_ohlc_list) == 1
+        row = strat._chart_ohlc_list[0]
+        assert row["name"] == "Test"
+        assert row["open"] == 100.0
+        assert row["high"] == 105.0
+        assert row["low"] == 98.0
+        assert row["close"] == 102.0
+        assert row["color"] == "green"
+
+    def test_add_ohlc_invalid_high_low_skips(self, caplog):
+        strat = _make_strategy_stub()
+        with caplog.at_level(logging.ERROR):
+            result = strat.add_ohlc("Bad", open=100, high=99, low=98, close=102)
+        assert result is None
+        assert strat._chart_ohlc_list == []
+        assert "Skipping OHLC bar because values are invalid" in caplog.text
+
+    def test_add_ohlc_non_finite_skips(self, caplog):
+        strat = _make_strategy_stub()
+        with caplog.at_level(logging.ERROR):
+            result = strat.add_ohlc("NaN", open=100, high=float("nan"), low=98, close=102)
+        assert result is None
+        assert strat._chart_ohlc_list == []
+        assert "not finite" in caplog.text
+
+    def test_add_ohlc_with_asset(self):
+        strat = _make_strategy_stub()
+        asset = Asset(symbol="SPY", asset_type="stock")
+        strat.add_ohlc("SPY", open=400, high=405, low=398, close=403, asset=asset)
+        row = strat._chart_ohlc_list[0]
+        assert row["asset_symbol"] == "SPY"
+        assert row["asset_type"] == "stock"
+        assert row["asset_display_name"] == "SPY"
+
+
+def test_plot_indicators_exports_ohlc_rows(tmp_path, monkeypatch):
+    ohlc_df = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2024-01-01 09:30", "2024-01-01 10:30"]),
+            "plot_name": ["default_plot", "default_plot"],
+            "name": ["SPY", "SPY"],
+            "open": [100, 101],
+            "high": [102, 103],
+            "low": [99, 100],
+            "close": [101, 102],
+            "color": [None, None],
+            "detail_text": [None, None],
+        }
+    )
+
+    line_df = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(["2024-01-01 09:30", "2024-01-01 10:30"]),
+            "plot_name": ["default_plot", "default_plot"],
+            "name": ["SMA_2", "SMA_2"],
+            "value": [100.5, 101.5],
+            "color": ["blue", "blue"],
+            "style": ["solid", "solid"],
+            "width": [None, None],
+            "detail_text": [None, None],
+        }
+    )
+
+    mock_write = MagicMock()
+    monkeypatch.setattr("plotly.graph_objects.Figure.write_html", mock_write)
+
+    plot_path = tmp_path / "plot.html"
+    plot_indicators(
+        plot_file_html=str(plot_path),
+        chart_markers_df=None,
+        chart_lines_df=line_df,
+        chart_ohlc_df=ohlc_df,
+        strategy_name="Test",
+        show_indicators=True,
+    )
+
+    csv_path = plot_path.with_suffix(".csv")
+    assert csv_path.exists()
+
+    exported = pd.read_csv(csv_path)
+    assert set(exported["type"].unique()) == {"line", "ohlc"}
+    ohlc_rows = exported[exported["type"] == "ohlc"]
+    assert len(ohlc_rows) == 2
+    assert {"open", "high", "low", "close"}.issubset(set(ohlc_rows.columns))
+
+
+def test_plot_indicators_scales_vertical_spacing_for_many_rows(tmp_path, monkeypatch):
+    from plotly.subplots import make_subplots as real_make_subplots
+
+    rows = 13
+    chart_lines_df = pd.DataFrame(
+        {
+            "datetime": [pd.Timestamp("2024-01-01 09:30")] * rows,
+            "plot_name": [f"plot_{idx}" for idx in range(rows)],
+            "name": [f"line_{idx}" for idx in range(rows)],
+            "value": [float(idx) for idx in range(rows)],
+            "color": ["blue"] * rows,
+            "detail_text": [None] * rows,
+        }
+    )
+
+    captured = {}
+
+    def _spy_make_subplots(*args, **kwargs):
+        captured["vertical_spacing"] = kwargs.get("vertical_spacing")
+        return real_make_subplots(*args, **kwargs)
+
+    monkeypatch.setattr("lumibot.tools.indicators.make_subplots", _spy_make_subplots)
+    mock_write = MagicMock()
+    monkeypatch.setattr("plotly.graph_objects.Figure.write_html", mock_write)
+
+    plot_path = tmp_path / "plot.html"
+    plot_indicators(
+        plot_file_html=str(plot_path),
+        chart_lines_df=chart_lines_df,
+        strategy_name="ManyRows",
+        show_indicators=True,
+    )
+
+    assert "vertical_spacing" in captured
+    assert captured["vertical_spacing"] <= (1.0 / (rows - 1))
+    assert captured["vertical_spacing"] > 0
+    mock_write.assert_called_once()
+    assert plot_path.with_suffix(".csv").exists()
+    assert plot_path.with_suffix(".parquet").exists()
+
+
+def test_plot_indicators_skips_html_when_env_disabled(tmp_path, monkeypatch):
+    chart_lines_df = pd.DataFrame(
+        {
+            "datetime": [pd.Timestamp("2024-01-01 09:30")],
+            "plot_name": ["default_plot"],
+            "name": ["line"],
+            "value": [1.0],
+            "color": ["blue"],
+            "detail_text": [None],
+        }
+    )
+
+    monkeypatch.setenv("LUMIBOT_WRITE_INDICATORS_HTML", "false")
+    mock_write = MagicMock()
+    monkeypatch.setattr("plotly.graph_objects.Figure.write_html", mock_write)
+
+    plot_path = tmp_path / "plot.html"
+    plot_indicators(
+        plot_file_html=str(plot_path),
+        chart_lines_df=chart_lines_df,
+        strategy_name="NoHtml",
+        show_indicators=True,
+    )
+
+    mock_write.assert_not_called()
+    assert plot_path.with_suffix(".csv").exists()
+    assert plot_path.with_suffix(".parquet").exists()
+
+
+def test_plot_indicators_exports_artifacts_when_html_write_fails(tmp_path, monkeypatch):
+    chart_lines_df = pd.DataFrame(
+        {
+            "datetime": [pd.Timestamp("2024-01-01 09:30")],
+            "plot_name": ["default_plot"],
+            "name": ["line"],
+            "value": [1.0],
+            "color": ["blue"],
+            "detail_text": [None],
+        }
+    )
+
+    def _raise_write_html(*args, **kwargs):
+        raise RuntimeError("simulated html failure")
+
+    monkeypatch.setattr("plotly.graph_objects.Figure.write_html", _raise_write_html)
+
+    plot_path = tmp_path / "plot.html"
+    plot_indicators(
+        plot_file_html=str(plot_path),
+        chart_lines_df=chart_lines_df,
+        strategy_name="HtmlFail",
+        show_indicators=True,
+    )
+
+    assert plot_path.with_suffix(".csv").exists()
+    assert plot_path.with_suffix(".parquet").exists()

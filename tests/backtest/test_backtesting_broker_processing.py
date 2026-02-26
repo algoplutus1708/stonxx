@@ -284,6 +284,78 @@ def test_bracket_order_entry_and_exit_cash_consistency():
     assert broker.get_tracked_position(strategy.name, asset) is None
 
 
+def test_oto_order_entry_and_exit_cash_consistency():
+    asset = Asset("AAPL", asset_type=Asset.AssetType.STOCK)
+    quote = Asset("USD", asset_type=Asset.AssetType.FOREX)
+    fee = TradingFee(percent_fee=Decimal("0.001"), taker=True)
+    strategy, broker, _ = setup_strategy_with_prices(
+        asset,
+        quote,
+        bars=[(100.0, 109.0, 99.0, 105.0), (110.0, 112.0, 109.0, 111.0)],
+        buy_fee=fee,
+        sell_fee=fee,
+    )
+
+    order = strategy.create_order(
+        asset,
+        10,
+        Order.OrderSide.BUY,
+        order_type=Order.OrderType.MARKET,
+        order_class=Order.OrderClass.OTO,
+        secondary_limit_price=110.0,
+    )
+    submit_and_fill(strategy, broker, order)
+
+    # Advance to next bar so the child order can fill (avoid same-bar lookahead).
+    broker._update_datetime(broker.datetime + timedelta(minutes=1))
+    broker.process_pending_orders(strategy)
+    strategy._executor.process_queue()
+
+    expected_cash = 100000.0 - (10 * 100.0) - (10 * 100.0 * 0.001)
+    expected_cash += (10 * 110.0) - (10 * 110.0 * 0.001)
+    assert strategy.cash == pytest.approx(expected_cash, rel=1e-9)
+
+    assert broker.get_tracked_position(strategy.name, asset) is None
+
+    assert order.order_class == Order.OrderClass.OTO
+    assert len(order.child_orders) == 1
+    assert order.child_orders[0].is_filled()
+
+
+def test_oco_order_exit_cancels_other_child():
+    asset = Asset("AAPL", asset_type=Asset.AssetType.STOCK)
+    quote = Asset("USD", asset_type=Asset.AssetType.FOREX)
+    strategy, broker, _ = setup_strategy_with_prices(
+        asset,
+        quote,
+        bars=[(100.0, 109.0, 99.0, 105.0), (110.0, 112.0, 109.0, 111.0)],
+    )
+
+    entry = strategy.create_order(asset, 10, Order.OrderSide.BUY, order_type=Order.OrderType.MARKET)
+    submit_and_fill(strategy, broker, entry)
+
+    broker._update_datetime(broker.datetime + timedelta(minutes=1))
+
+    oco = strategy.create_order(
+        asset,
+        10,
+        Order.OrderSide.SELL,
+        order_class=Order.OrderClass.OCO,
+        limit_price=110.0,
+        stop_price=95.0,
+    )
+    strategy.submit_order(oco)
+    broker.process_pending_orders(strategy)
+    strategy._executor.process_queue()
+
+    assert oco.order_class == Order.OrderClass.OCO
+    assert len(oco.child_orders) == 2
+
+    filled = [child for child in oco.child_orders if child.is_filled()]
+    canceled = [child for child in oco.child_orders if child.is_canceled()]
+    assert len(filled) == 1
+    assert len(canceled) == 1
+
 @pytest.mark.parametrize(
     "order_type, bars, quantity, order_kwargs, expected_price",
     [

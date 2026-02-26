@@ -5,5 +5,5 @@ set -euo pipefail
   tests/test_smart_limit_utils_unit.py \
   tests/test_smart_limit_single_leg_unit.py \
   tests/test_smart_limit_multileg_unit.py \
+  tests/test_smart_limit_resilience_unit.py \
   tests/test_tradier_stream_optional_unit.py
-

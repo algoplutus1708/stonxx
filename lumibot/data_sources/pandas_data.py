@@ -7,6 +7,7 @@ import pandas as pd
 
 from lumibot.data_sources import DataSourceBacktesting
 from lumibot.entities import Asset, Bars, Quote
+from lumibot.tools.helpers import parse_timestep_qty_and_unit
 from lumibot.tools.lumibot_logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,6 +35,9 @@ class PandasData(DataSourceBacktesting):
         self._date_index = None
         self._date_supply = None
         self._timestep = "minute"
+        # PERF: `find_asset_in_data_store()` is called in tight loops (quotes + history). Cache the
+        # resolved key for repeated `(asset, quote, timestep)` lookups within a backtest run.
+        self._find_asset_in_data_store_cache = {}
 
     @staticmethod
     def _set_pandas_data_keys(pandas_data):
@@ -71,6 +75,8 @@ class PandasData(DataSourceBacktesting):
     def load_data(self):
         self._data_store = self.pandas_data
         self._date_index = self.update_date_index()
+        # Invalidate lookup cache whenever we reload/replace the underlying data store.
+        self._find_asset_in_data_store_cache.clear()
 
         if len(self._data_store.values()) > 0:
             self._timestep = list(self._data_store.values())[0].timestep
@@ -349,25 +355,95 @@ class PandasData(DataSourceBacktesting):
         return result
 
     def find_asset_in_data_store(self, asset, quote=None, timestep=None):
+        # PERF: Avoid rebuilding candidate lists and repeatedly probing `_data_store` when the same
+        # `(asset, quote, timestep)` is requested every iteration (common in backtests).
+        #
+        # IMPORTANT: Do not treat a cached `None` as authoritative.
+        #
+        # Some backtesting data sources (notably ThetaDataBacktestingPandas) *mutate* `_data_store`
+        # during the run by fetching/warming new datasets on-demand. If we cache "misses" (None),
+        # a lookup performed *before* the dataset is fetched will poison all future lookups for that
+        # `(asset, quote, timestep)` and make the freshly loaded data unreachable.
+        try:
+            cache_key = (asset, quote, timestep)
+            cached = self._find_asset_in_data_store_cache.get(cache_key)
+            if cached is not None:
+                return cached
+        except Exception:
+            cache_key = None
+
+        requested_unit = None
+        normalized_key = None
+        if timestep is not None:
+            try:
+                qty, requested_unit = parse_timestep_qty_and_unit(str(timestep))
+            except Exception:
+                qty, requested_unit = 1, str(timestep)
+                requested_unit = str(timestep)
+            requested_unit = (requested_unit or "").strip().lower()
+            if requested_unit in {"m", "min", "mins"}:
+                requested_unit = "minute"
+            elif requested_unit in {"minutes"}:
+                requested_unit = "minute"
+            elif requested_unit in {"h", "hr", "hrs", "hour", "hours"}:
+                requested_unit = "hour"
+            elif requested_unit in {"d", "day", "days"}:
+                requested_unit = "day"
+
+            # Normalize timestep key so "15min" can match cached datasets stored as "15minute".
+            try:
+                qty = int(qty)
+            except Exception:
+                qty = 1
+            if requested_unit and requested_unit in {"minute", "hour", "day"}:
+                normalized_key = requested_unit if qty == 1 else f"{qty}{requested_unit}"
+            else:
+                normalized_key = str(timestep)
+
+        def _accepts_timestep(data_obj) -> bool:
+            if requested_unit is None:
+                return True
+            data_ts = str(getattr(data_obj, "timestep", "") or "").strip().lower()
+            if requested_unit == "minute":
+                return data_ts == "minute"
+            if requested_unit == "hour":
+                # Hour requests can be satisfied by either hour data or minute data (resample).
+                return data_ts in {"hour", "minute"}
+            if requested_unit == "day":
+                # Day requests can be satisfied by either day data or minute data (resample).
+                return data_ts in {"day", "minute"}
+            # Fallback: require exact match for other timesteps.
+            return data_ts == requested_unit
+
         candidates = []
 
         if timestep is not None:
             base_quote = quote if quote is not None else Asset("USD", "forex")
             candidates.append((asset, base_quote, timestep))
+            if normalized_key is not None and str(normalized_key) != str(timestep):
+                candidates.append((asset, base_quote, normalized_key))
             if quote is not None:
                 candidates.append((asset, Asset("USD", "forex"), timestep))
+                if normalized_key is not None and str(normalized_key) != str(timestep):
+                    candidates.append((asset, Asset("USD", "forex"), normalized_key))
 
         if quote is not None:
             candidates.append((asset, quote))
 
-        if isinstance(asset, Asset) and asset.asset_type in ["option", "future", "stock", "index"]:
+        if isinstance(asset, Asset) and asset.asset_type in ["option", "future", "cont_future", "stock", "index"]:
             candidates.append((asset, Asset("USD", "forex")))
 
         candidates.append(asset)
 
         for key in candidates:
             if key in self._data_store:
-                return key
+                data_obj = self._data_store.get(key)
+                if data_obj is None:
+                    continue
+                if _accepts_timestep(data_obj):
+                    if cache_key is not None:
+                        self._find_asset_in_data_store_cache[cache_key] = key
+                    return key
         return None
 
     def _pull_source_symbol_bars(

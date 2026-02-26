@@ -37,7 +37,7 @@ def test_build_historical_chain_merges_spx_and_spxw_expirations(monkeypatch):
 
     # build_historical_chain() pipelines strike-list fetches via the queue client to keep
     # multiple requests in flight. Patch the queue client so this test remains hermetic.
-    from lumibot.tools import thetadata_queue_client
+    from lumibot.tools import data_downloader_queue_client
 
     class FakeQueueClient:
         max_concurrent = 8
@@ -62,7 +62,7 @@ def test_build_historical_chain_merges_spx_and_spxw_expirations(monkeypatch):
         def wait_for_result(self, request_id, timeout=None, poll_interval=None):
             return self._results[request_id]
 
-    monkeypatch.setattr(thetadata_queue_client, "get_queue_client", lambda *args, **kwargs: FakeQueueClient())
+    monkeypatch.setattr(data_downloader_queue_client, "get_queue_client", lambda *args, **kwargs: FakeQueueClient())
 
     chain = thetadata_helper.build_historical_chain(
         asset=Asset("SPX", asset_type="index"),

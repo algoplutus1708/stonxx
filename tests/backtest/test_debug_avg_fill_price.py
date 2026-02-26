@@ -18,6 +18,10 @@ from lumibot.credentials import DATABENTO_CONFIG
 
 DATABENTO_API_KEY = DATABENTO_CONFIG.get("API_KEY")
 
+# Live DataBento API debug/integration test. Excluded from the default CI unit run
+# (`-m "not apitest and not downloader"`) unless explicitly enabled.
+pytestmark = [pytest.mark.apitest]
+
 
 class DebugStrategy(Strategy):
     """Debug strategy to trace avg_fill_price"""

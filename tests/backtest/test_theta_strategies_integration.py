@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 from dotenv import load_dotenv
 
-pytestmark = [pytest.mark.acceptance_smoke]
+pytestmark = [pytest.mark.downloader]
 
 
 DEFAULT_ENV_PATH = Path.home() / "Documents/Development/Strategy Library/Demos/.env"

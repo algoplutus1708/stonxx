@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import re
+import weakref
 from decimal import Decimal
 from typing import Union, Set
 import warnings
@@ -16,6 +17,11 @@ from lumibot.tools.lumibot_logger import get_logger
 from .bar import Bar
 
 logger = get_logger(__name__)
+
+# PERF: `Bars.__init__` is a hot path in minute-level backtests. Most calls receive slices that
+# share the same `df.columns` object; cache column presence flags to avoid repeated
+# `Index.__contains__` probes in tight loops.
+_PANDAS_COLUMNS_FLAGS_CACHE: dict[int, tuple[weakref.ReferenceType, tuple[bool, bool, bool, bool]]] = {}
 
 
 class PolarsConversionTracker:
@@ -40,16 +46,12 @@ class PolarsConversionTracker:
         if not self._first_warning_shown:
             logger.warning(
                 "\n" + "="*70 + "\n"
-                "PERFORMANCE TIP: DataFrame Conversion Detected\n" + 
+                "DATAFRAME BACKEND NOTE\n" +
                 "="*70 + "\n"
-                "Polars DataFrames are being converted to Pandas, which adds overhead.\n"
+                "Some data sources use Polars internally and Lumibot converts to pandas for strategy compatibility.\n"
                 "\n"
-                "For ~2-5x faster backtesting, modify your strategy:\n"
-                "\n"
-                "  Change: bars = self.get_historical_prices(asset, length, timestep)\n"
-                "      To: bars = self.get_historical_prices(asset, length, timestep, return_polars=True)\n"
-                "\n"
-                "Note: When using return_polars=True, use Polars DataFrame methods instead of Pandas.\n" +
+                "Strategy code should remain pandas-only: use bars.pandas_df and pandas operations.\n"
+                "Note: `return_polars` is deprecated and will be removed.\n" +
                 "="*70
             )
             self._first_warning_shown = True
@@ -234,14 +236,93 @@ class Bars:
                 self._pandas_cache = None
         else:
             # Already pandas, keep it as is
-            self._df = df
-            # Calculate derived columns if needed
-            if "dividend" in df.columns:
-                self._df["price_change"] = df["close"].pct_change()
-                self._df["dividend_yield"] = df["dividend"] / df["close"]
-                self._df["return"] = self._df["dividend_yield"] + self._df["price_change"]
-            else:
-                self._df["return"] = df["close"].pct_change()
+            columns = df.columns
+            cache_key = id(columns)
+            cached = _PANDAS_COLUMNS_FLAGS_CACHE.get(cache_key)
+            flags = None
+            if cached is not None:
+                ref, cached_flags = cached
+                if ref() is columns:
+                    flags = cached_flags
+                else:
+                    # Stale entry (id reused); overwrite below.
+                    flags = None
+
+            if flags is None:
+                # PERF: most futures/crypto datasets never have dividends. Avoid extra `Index.__contains__`
+                # probes by only checking dividend-derived columns when the dividend column exists.
+                has_dividend = "dividend" in columns
+                has_return = "return" in columns
+                if has_dividend:
+                    has_price_change = "price_change" in columns
+                    has_dividend_yield = "dividend_yield" in columns
+                else:
+                    has_price_change = False
+                    has_dividend_yield = False
+
+                flags = (has_dividend, has_return, has_price_change, has_dividend_yield)
+                _PANDAS_COLUMNS_FLAGS_CACHE[cache_key] = (weakref.ref(columns), flags)
+                # Keep the cache bounded to avoid unbounded growth in long-running processes.
+                if len(_PANDAS_COLUMNS_FLAGS_CACHE) > 2048:
+                    _PANDAS_COLUMNS_FLAGS_CACHE.clear()
+
+            has_dividend, has_return, has_price_change, has_dividend_yield = flags
+            needs_derived = (not has_return) or (has_dividend and ((not has_price_change) or (not has_dividend_yield)))
+
+            # PERF/SAFETY: many backtesting paths slice from a larger DataFrame and pass the slice
+            # through to `Bars`. We only detach from a parent view when we actually need to mutate
+            # the DataFrame (i.e., computing derived columns). If derived columns are already
+            # present, keep the view to avoid extra copies.
+            try:
+                self._df = df.copy(deep=False) if (needs_derived and getattr(df, "_is_copy", None) is not None) else df
+            except Exception:
+                self._df = df
+
+            # Calculate derived columns only when missing.
+            if needs_derived and has_dividend:
+                # PERF: `pct_change()` allocates several intermediate Series/Index objects and is a
+                # dominant cost when strategies call `get_historical_prices()` frequently (minute
+                # backtests). Compute the same semantics with NumPy to reduce overhead.
+                close_series = df["close"]
+                try:
+                    close = close_series.to_numpy(dtype="float64", copy=False)
+                except Exception:
+                    close = pd.to_numeric(close_series, errors="coerce").to_numpy(dtype="float64", copy=False)
+
+                price_change = np.empty(len(close), dtype="float64")
+                price_change[:] = np.nan
+                if len(close) > 1:
+                    prev = close[:-1]
+                    curr = close[1:]
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        price_change[1:] = (curr - prev) / prev
+
+                div_series = df["dividend"]
+                try:
+                    div = div_series.to_numpy(dtype="float64", copy=False)
+                except Exception:
+                    div = pd.to_numeric(div_series, errors="coerce").to_numpy(dtype="float64", copy=False)
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    dividend_yield = div / close
+
+                self._df["price_change"] = price_change
+                self._df["dividend_yield"] = dividend_yield
+                self._df["return"] = dividend_yield + price_change
+            elif needs_derived:
+                close_series = df["close"]
+                try:
+                    close = close_series.to_numpy(dtype="float64", copy=False)
+                except Exception:
+                    close = pd.to_numeric(close_series, errors="coerce").to_numpy(dtype="float64", copy=False)
+
+                returns = np.empty(len(close), dtype="float64")
+                returns[:] = np.nan
+                if len(close) > 1:
+                    prev = close[:-1]
+                    curr = close[1:]
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        returns[1:] = (curr - prev) / prev
+                self._df["return"] = returns
 
             self._apply_timezone()
             if self._return_polars:
@@ -351,10 +432,22 @@ class Bars:
             tz = pytz.timezone(tz)
 
         try:
-            if target_df.index.tz is None:
+            current_tz = target_df.index.tz
+            if current_tz is None:
                 target_df.index = target_df.index.tz_localize(tz)
             else:
-                target_df.index = target_df.index.tz_convert(tz)
+                # PERF: avoid `tz_convert()` when the tz already matches. Prefer cheap attribute checks
+                # over string conversions (this method is called in tight backtest loops).
+                current_zone = getattr(current_tz, "zone", None)
+                target_zone = getattr(tz, "zone", None)
+                current_key = getattr(current_tz, "key", None)
+                target_key = getattr(tz, "key", None)
+                if (current_zone and target_zone and current_zone == target_zone) or (
+                    current_key and target_key and current_key == target_key
+                ):
+                    pass
+                else:
+                    target_df.index = target_df.index.tz_convert(tz)
             self._tzinfo = tz
         except Exception:
             return target_df

@@ -16,6 +16,8 @@ import pytest
 # Load environment variables from .env file
 load_dotenv()
 
+pytestmark = [pytest.mark.downloader]
+
 # Define the keyword globally
 keyword = 'ThetaTerminal.jar'
 

@@ -2,6 +2,56 @@
 
 This document is the **canonical manual acceptance suite** for LumiBot backtesting (ThetaData) and release validation.
 
+## Backtesting Definitions (Accuracy + Speed)
+
+**Accuracy (gold standard):** if we can replay a period that was traded live and reproduce the broker’s realized behavior (fills + PnL) within defined tolerances (tick size, fees model). Acceptance runs are a deterministic regression firewall, not a proof of “real world accuracy” by themselves.
+
+### Accuracy validation ladder (Tier 3 is the real gold standard)
+
+- **Tier 1 (regression):** deterministic acceptance backtests + vendor/artifact parity to detect drift.
+- **Tier 2 (audit):** manual reviews around known hard edges (session gaps, holidays/early closes, rolls, rounding).
+- **Tier 3 (gold):** **live replay baseline** — replay an interval that was traded live and reproduce broker fills + realized PnL within tolerances.
+
+**Speed:** acceptance warm-cache runs complete in bounded wall time and are **queue-free** (no downloader submits), proving the cache and data semantics are stable.
+
+**Resilience:** acceptance runs must also prove the “end of backtest” pipeline is stable:
+- stats summary must not crash (CAGR/datetime edge cases, NaN handling, etc.),
+- tearsheet/plot generation should either succeed or fail in a controlled way (no masking simulation success with a generic “failed” run),
+- and the run must still emit actionable artifacts (`trades.csv`, `stats.csv`, `logs.csv`) even when optional post-processing fails.
+
+## IBKR acceptance backtests (Crypto + Futures)
+
+This repo’s acceptance harness (`tests/backtest/test_acceptance_backtests_ci.py`) includes deterministic, cache-backed:
+- **IBKR crypto acceptance** (minute bars)
+- **IBKR CME equity futures acceptance** (minute/day bars; fixed contract in 2025)
+
+Key invariant (same as ThetaData acceptance):
+- Acceptance runs must be **deterministic** and **queue-free** (warm S3 cache invariant).
+
+Implementation note:
+- `Strategy._dump_settings()` records `thetadata_queue_telemetry`, which is a **global downloader/queue counter**
+  because IBKR REST backtesting also routes through `queue_request()`. IBKR acceptance will therefore assert:
+  - `thetadata_queue_telemetry.submit_requests == 0`
+
+Current IBKR slugs (in `tests/backtest/acceptance_backtests_baselines.json`):
+- `ibkr_crypto_acceptance_btc_usd`
+- `ibkr_mes_futures_acceptance`
+
+Local runbook (requires downloader + S3 env; do not paste secrets into logs):
+- Warm S3 (tripwire OFF): `python3 scripts/warm_acceptance_backtests_cache.py --slug ibkr_crypto_acceptance_btc_usd --slug ibkr_mes_futures_acceptance`
+- Run only IBKR acceptance locally: `python3 -m pytest -q tests/backtest/test_acceptance_backtests_ci.py -k ibkr`
+
+IBKR note: historical series can legitimately omit the final 1–3 bars of a requested window (minute/hour). LumiBot
+treats cache coverage within this tolerance as “good enough” to avoid repeated downloader retries in deterministic runs
+(see `lumibot/tools/ibkr_helper.py`).
+
+Futures-specific note: backtest windows can begin/end inside long `us_futures` closed intervals (weekends/holidays).
+LumiBot treats fully closed boundary gaps as cache-satisfied (no fetch attempts), keeping acceptance deterministic and
+queue-free.
+
+For design details and live-broker alignment notes, see:
+- `docs/IBKR_FUTURES_BACKTESTING.md`
+
 ## Update protocol (read this before editing)
 
 - **Append only**: never overwrite history rows; add a new row per run.
@@ -59,8 +109,8 @@ For full details, see:
 ## Guardrails
 
 - **Do not modify demo strategy files** under `Strategy Library/Demos/`. Fix issues in **LumiBot** (or the data-downloader if proven root cause).
-- Use the shared downloader endpoint (do not hard-code an IP):
-  - `DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080`
+- Use a downloader endpoint appropriate for your environment (do not hard-code private hosts or IPs into the repo):
+  - `DATADOWNLOADER_BASE_URL` must be set (local: `http://localhost:8080`, remote: `https://<your-downloader-host>:8080`)
   - `DATADOWNLOADER_API_KEY` must be set (value lives in env/secrets; do not paste into docs).
 - Wrap long runs with `/Users/robertgrzesik/bin/safe-timeout …`.
 
@@ -85,7 +135,7 @@ cd "/Users/robertgrzesik/Documents/Development/Strategy Library"
 /Users/robertgrzesik/bin/safe-timeout 900s env \
   PYTHONPATH="/Users/robertgrzesik/Documents/Development/lumivest_bot_server/strategies/lumibot" \
   IS_BACKTESTING=True BACKTESTING_DATA_SOURCE=thetadata \
-  DATADOWNLOADER_BASE_URL="http://data-downloader.lumiwealth.com:8080" \
+  DATADOWNLOADER_BASE_URL="http://localhost:8080" \
   SHOW_PLOT=True SHOW_INDICATORS=True SHOW_TEARSHEET=True \
   BACKTESTING_QUIET_LOGS=false BACKTESTING_SHOW_PROGRESS_BAR=true \
   BACKTESTING_START=YYYY-MM-DD BACKTESTING_END=YYYY-MM-DD \

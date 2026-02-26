@@ -472,7 +472,7 @@ class Schwab(Broker):
                 asset = None
                 if asset_type == 'EQUITY':
                     asset = Asset(
-                        symbol=symbol,
+                        symbol=self._normalize_symbol_for_internal(symbol, asset_type=Asset.AssetType.STOCK),
                         asset_type=Asset.AssetType.STOCK,
                     )
                 elif asset_type == 'OPTION':
@@ -485,7 +485,7 @@ class Schwab(Broker):
                         continue
 
                     asset = Asset(
-                        symbol=option_parts['underlying'],
+                        symbol=self._normalize_symbol_for_internal(option_parts['underlying'], asset_type=Asset.AssetType.OPTION),
                         asset_type=Asset.AssetType.OPTION,
                         expiration=option_parts['expiry_date'],
                         strike=option_parts['strike_price'],
@@ -509,13 +509,13 @@ class Schwab(Broker):
                 elif asset_type == 'COLLECTIVE_INVESTMENT':
                     # Handle ETFs like CQQQ, UPRO as stocks
                     asset = Asset(
-                        symbol=symbol,
+                        symbol=self._normalize_symbol_for_internal(symbol, asset_type=Asset.AssetType.STOCK),
                         asset_type=Asset.AssetType.STOCK,
                     )
                 elif asset_type == 'ETF':
                     # Handle ETFs as stocks
                     asset = Asset(
-                        symbol=symbol,
+                        symbol=self._normalize_symbol_for_internal(symbol, asset_type=Asset.AssetType.STOCK),
                         asset_type=Asset.AssetType.STOCK,
                     )
                 elif asset_type in ['CASH_EQUIVALENT', 'MONEY_MARKET_FUND', 'CASH']:
@@ -959,7 +959,7 @@ class Schwab(Broker):
                 asset = None
                 if asset_type == Asset.AssetType.STOCK:
                     asset = Asset(
-                        symbol=symbol,
+                        symbol=self._normalize_symbol_for_internal(symbol, asset_type=Asset.AssetType.STOCK),
                         asset_type=asset_type,
                     )
                 elif asset_type == Asset.AssetType.OPTION:
@@ -971,7 +971,7 @@ class Schwab(Broker):
                         continue
 
                     asset = Asset(
-                        symbol=option_parts["underlying"],
+                        symbol=self._normalize_symbol_for_internal(option_parts["underlying"], asset_type=Asset.AssetType.OPTION),
                         asset_type=asset_type,
                         expiration=option_parts["expiry_date"],
                         strike=option_parts["strike_price"],
@@ -1388,7 +1388,7 @@ class Schwab(Broker):
         """
 
         # Get order parameters
-        symbol = order.asset.symbol
+        symbol = self._normalize_symbol_for_broker(order.asset.symbol, asset_type=order.asset.asset_type)
         quantity = int(order.quantity)
         limit_price = order.limit_price
         if order.order_type == Order.OrderType.STOP_LIMIT:
@@ -1500,7 +1500,7 @@ class Schwab(Broker):
 
             # Construct the option symbol in Schwab format
             # Get option data from the order's asset
-            underlying_symbol = order.asset.symbol
+            underlying_symbol = self._normalize_symbol_for_broker(order.asset.symbol, asset_type=order.asset.asset_type)
             expiration_date = order.asset.expiration
             strike_price = order.asset.strike
             option_type = 'C' if order.asset.right == 'CALL' else 'P'

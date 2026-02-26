@@ -26,6 +26,8 @@ Why is my historical data delayed or not up-to-date?
 
 ``get_historical_prices()`` returns completed bars and may be delayed by up to a minute. For real-time price data, use ``get_last_price()`` or ``get_quote()`` instead.
 
+**Performance note (backtesting):** Backtests are fastest on warm cache. LumiBot caches historical data per asset and timestep so repeated calls to ``get_historical_prices()`` should not re-download data.
+
 .. code-block:: python
 
     # For historical analysis (may be 1 minute delayed)
@@ -124,6 +126,13 @@ Greeks may be unavailable for illiquid options. Always check for None but **don'
         self.log_message("Greeks unavailable - option may be illiquid", color="yellow")
 
     # Strategy continues regardless
+
+Why is my options backtest so slow?
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The most common cause is **brute-force delta/ATM selection**: scanning many strikes and calling ``get_greeks()`` (or fetching quotes) per strike can flood your data source/downloader.
+
+Prefer :doc:`options_helper` methods (especially ``OptionsHelper.find_strike_for_delta(...)``) which use bounded probing + caching instead of scanning large strike lists.
 
 Why do my option calculations seem off by 100x?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -249,9 +258,12 @@ Why should I use self.log_message() instead of print()?
 How should I use markers and lines for debugging?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Use ``add_line()`` for continuous data (indicators), ``add_marker()`` for infrequent events (signals):
+Use ``add_ohlc()`` for price bars, ``add_line()`` for continuous data (indicators), and ``add_marker()`` for infrequent events (signals):
 
 .. code-block:: python
+
+    # add_ohlc - for price bars (OHLC data)
+    self.add_ohlc("SPY", open=o, high=h, low=l, close=c, asset=my_asset)
 
     # add_line - for continuous data like moving averages
     self.add_line("SMA_20", sma_value, color="blue", asset=my_asset)
@@ -263,7 +275,7 @@ Use ``add_line()`` for continuous data (indicators), ``add_marker()`` for infreq
 
 .. warning::
 
-    ``add_line()`` and ``add_marker()`` do NOT have a ``text`` parameter. Use ``detail_text`` for hover text.
+    ``add_ohlc()``, ``add_line()``, and ``add_marker()`` do NOT have a ``text`` parameter. Use ``detail_text`` for hover text.
 
 Backtesting
 -----------

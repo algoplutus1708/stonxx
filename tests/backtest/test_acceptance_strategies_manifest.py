@@ -34,7 +34,12 @@ def test_acceptance_strategies_manifest_matches_repo_files() -> None:
     assert expected, f"{manifest_path} is empty"
 
     actual_py_files = sorted(p.name for p in strategies_dir.glob("*.py"))
-    assert sorted(expected.keys()) == actual_py_files
+    # `acceptance_strategies/` contains:
+    # - verbatim Strategy Library demo copies (covered by this manifest), and
+    # - additional platform-specific acceptance strategies (e.g., IBKR/crypto/futures) that do
+    #   not exist in Strategy Library/Demos.
+    missing = sorted(set(expected.keys()) - set(actual_py_files))
+    assert not missing, f"Missing manifest-tracked acceptance strategies: {missing}"
 
     for filename, sha in expected.items():
         path = strategies_dir / filename

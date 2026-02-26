@@ -11,7 +11,7 @@ This doc records one profiled production run and a comparable profiled local run
 - Window: `2025-01-06 → 2025-12-24`
 - Flags (prod-like + profiling):
   - `BACKTESTING_DATA_SOURCE=thetadata`
-  - `DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080`
+  - `DATADOWNLOADER_BASE_URL=https://<your-downloader-host>:8080`
   - `SHOW_PLOT=True`, `SHOW_INDICATORS=True`, `SHOW_TEARSHEET=True`
   - `BACKTESTING_QUIET_LOGS=false`, `BACKTESTING_SHOW_PROGRESS_BAR=true`
   - `BACKTESTING_PROFILE=yappi`
@@ -29,7 +29,7 @@ From `codexspx3280b3dee4b7410fba_profile_yappi_raw.csv`:
 - `/usr/local/lib/python3.12/threading.py Condition.wait` (`ttot_s ≈ 6003`)
 - `/usr/local/lib/python3.12/threading.py Event.wait` (`ttot_s ≈ 4005`)
 - `/usr/local/lib/python3.12/queue.py Queue.get` (`ttot_s ≈ 1999`)
-- `lumibot.tools.thetadata_queue_client.QueueClient.execute_request / wait_for_result` (`ttot_s ≈ 1048 / 1029`)
+- `lumibot.tools.data_downloader_queue_client.QueueClient.execute_request / wait_for_result` (`ttot_s ≈ 1048 / 1029`)
 - `lumibot.tools.thetadata_helper.get_request / get_historical_data` (`ttot_s ≈ 1050 / 1289`)
 - `lumibot.backtesting.thetadata_backtesting_pandas.ThetaDataBacktestingPandas.get_quote` (`ttot_s ≈ 1289`)
 
@@ -54,10 +54,9 @@ Key difference observed in logs:
 1. **Deploy v4.4.22** (includes the index fast-path perf fix) to production.
 2. Re-run the same profiled production backtest and compare:
    - wall time
-   - `ncall` for `thetadata_queue_client.queue_request`, `thetadata_backtesting_pandas.get_quote`
+   - `ncall` for `data_downloader_queue_client.queue_request`, `thetadata_backtesting_pandas.get_quote`
    - share of time in `threading/queue` waits vs non-waiting work
 3. If production is still materially slower after request-count reduction:
    - investigate downloader throughput / queue contention
    - investigate ECS CPU/memory sizing
    - consider additional caching/negative-caching tweaks (only with accuracy preserved)
-

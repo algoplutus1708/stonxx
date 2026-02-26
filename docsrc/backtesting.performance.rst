@@ -88,4 +88,6 @@ The fastest options backtests are those that:
 - avoid probing hundreds/thousands of strikes when searching for a delta/ATM contract
 - reuse cached quote history instead of requesting tiny windows repeatedly
 
+In practice, the easiest way to get this right is to use :doc:`options_helper` for strike/expiry selection (for example ``OptionsHelper.find_strike_for_delta(...)``) instead of manually scanning chains and calling ``get_greeks()`` per strike.
+
 For ThetaData details, see :doc:`backtesting.thetadata`.

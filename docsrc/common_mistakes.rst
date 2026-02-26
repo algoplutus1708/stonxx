@@ -152,6 +152,29 @@ Manually Selecting Option Expirations
         target_expiry, chains, "call"
     )
 
+Brute-Forcing Deltas by Scanning Strikes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+**Impact:** Backtests become very slow because calling ``get_greeks()`` repeatedly can trigger many option quote-history downloads.
+
+.. code-block:: python
+
+    # WRONG - brute-force scan (slow)
+    strikes = chains.strikes(expiry, "PUT")
+    for strike in strikes:
+        option = Asset("SPY", asset_type=Asset.AssetType.OPTION, expiration=expiry, strike=strike, right="put")
+        greeks = self.get_greeks(option, underlying_price=underlying_price)
+        ...
+
+    # CORRECT - use OptionsHelper (bounded probing + caching)
+    strike = self.options_helper.find_strike_for_delta(
+        underlying_asset=underlying_asset,
+        underlying_price=float(underlying_price),
+        target_delta=-0.20,
+        expiry=expiry,
+        right="put",
+    )
+
 Forgetting Options are 100x Multiplied
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -258,8 +281,8 @@ Adding Markers Every Iteration
         # Use add_line for continuous data
         self.add_line("SMA_20", sma_value, color="blue", asset=my_asset)
 
-Using 'text' Parameter in add_marker/add_line
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Using 'text' Parameter in add_marker/add_line/add_ohlc
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 **Impact:** TypeError crash - there is no 'text' parameter.
 

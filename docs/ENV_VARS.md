@@ -30,10 +30,25 @@ This page documents environment variables used by LumiBot, with an emphasis on *
 - Purpose: Default date range used by `Strategy.run_backtest()` / `Strategy.backtest()` when dates are not passed in code.
 - Format: `YYYY-MM-DD`
 
+### `BACKTESTING_BUDGET`
+- Purpose: Override the starting cash used for backtests (initial portfolio cash).
+- Format: Positive number. Accepted examples: `500`, `5000`, `5k`, `1_000_000`, `$10,000`.
+- Notes:
+  - When set, this value is preferred over any `budget=` passed in strategy code, so it can be controlled per-run via injected environment variables.
+  - Default (when unset and no code budget is provided): `100000`.
+
 ### `BACKTESTING_DATA_SOURCE`
 - Purpose: Selects the backtesting datasource **even if code passes an explicit `datasource_class`**.
 - Values (case-insensitive):
   - `thetadata`, `yahoo`, `polygon`, `alpaca`, `ccxt`, `databento`
+  - `ibkr` / `interactivebrokersrest` / `interactive_brokers_rest` (IBKR Client Portal REST via Data Downloader)
+  - `router` (multi-provider routing; defaults to Theta for stock/option/index and IBKR for futures/crypto)
+  - JSON mapping (multi-provider routing by asset type), e.g.:
+    - `{"default":"thetadata","stock":"thetadata","option":"thetadata","index":"thetadata","future":"ibkr","crypto":"ibkr"}`
+    - Provider values are case/whitespace/_/- insensitive. Supported values include:
+      - `thetadata`, `ibkr`, `polygon`, `alpaca`
+      - `ccxt` (auto-select exchange from existing env/credentials)
+      - any CCXT exchange id (e.g., `coinbase`, `kraken`, `binance`, `kucoin`) to route crypto to that exchange
   - `none` to disable env override and rely on code.
 - Where: `lumibot/strategies/_strategy.py` datasource selection logic.
 
@@ -54,6 +69,20 @@ This page documents environment variables used by LumiBot, with an emphasis on *
 ### `SHOW_PLOT`, `SHOW_INDICATORS`, `SHOW_TEARSHEET`
 - Purpose: Enables/disables artifact generation.
 - Values: `True` / `False` (string).
+
+### `LUMIBOT_BACKTEST_PARQUET_MODE`
+- Purpose: Controls parquet export semantics for backtest artifacts (indicators/trades/stats/trade events).
+- Values:
+  - `best_effort` (default): parquet failures log warnings; CSV remains the compatibility layer.
+  - `required`: parquet export failures raise and should fail the backtest (artifact contract mode).
+- Notes:
+  - This is intended for BotManager/BotSpot backtests where downstream tooling depends on Parquet for performance.
+  - BotManager should set `LUMIBOT_BACKTEST_PARQUET_MODE=required` for production backtests.
+- Where:
+  - Mode parsing + sanitizers: `lumibot/tools/parquet_utils.py`
+  - Stats parquet: `lumibot/strategies/_strategy.py`
+  - Indicators/trades parquet: `lumibot/tools/indicators.py`
+  - Trade events parquet: `lumibot/brokers/broker.py`
 
 ### `BACKTESTING_QUIET_LOGS`
 - Purpose: Reduce log noise during backtests.
@@ -107,11 +136,20 @@ This page documents environment variables used by LumiBot, with an emphasis on *
 - Output: produces a `*_profile_yappi.csv` artifact alongside other backtest artifacts.
 - Related tooling: `scripts/analyze_yappi_csv.py`
 
-## Remote downloader (ThetaData via shared service)
+## Remote downloader (ThetaData via shared service) — internal/proprietary
+
+This section describes the internal **Data Downloader** service used by LumiWealth/BotSpot deployments.
+Open-source users typically should not set these variables.
+
+Selection rule (ThetaData):
+- If `DATADOWNLOADER_BASE_URL` is set, LumiBot routes ThetaData through the downloader queue and **must not** manage any
+  local ThetaTerminal process (single-session constraint).
+- Otherwise, LumiBot auto-manages a local ThetaTerminal and talks to it directly on `THETADATA_BASE_URL` / `127.0.0.1:25503`.
 
 ### `DATADOWNLOADER_BASE_URL`
 - Purpose: Points LumiBot at the remote downloader service.
-- Example: `http://data-downloader.lumiwealth.com:8080`
+- Example (local): `http://localhost:8080`
+- Example (remote): `https://<your-downloader-host>:8080`
 
 ### `DATADOWNLOADER_API_KEY` / `DATADOWNLOADER_API_KEY_HEADER`
 - Purpose: Authentication for the downloader service.

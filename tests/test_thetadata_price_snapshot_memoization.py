@@ -10,7 +10,7 @@ def test_thetadata_price_snapshot_memoized_within_dt(monkeypatch):
 
     # Avoid side effects (process kills / queue ids) in unit tests.
     monkeypatch.setattr(ThetaDataBacktestingPandas, "kill_processes_by_name", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("lumibot.tools.thetadata_queue_client.set_queue_client_id", lambda *_a, **_k: None)
+    monkeypatch.setattr("lumibot.tools.data_downloader_queue_client.set_queue_client_id", lambda *_a, **_k: None)
     monkeypatch.setattr("lumibot.tools.thetadata_helper.reset_theta_terminal_tracking", lambda *_a, **_k: None)
 
     start = datetime(2024, 1, 1, tzinfo=pytz.UTC)

@@ -116,3 +116,65 @@ def test_get_missing_dates_suppresses_tail_placeholders_after_last_real_date_for
     )
 
     assert missing == []
+
+
+def test_get_missing_dates_suppresses_placeholder_trading_days_for_stock_index_in_backtesting(monkeypatch) -> None:
+    """
+    Regression test: in backtests, treat placeholder trading days for stocks/indices as stable
+    negative cache markers (do not refetch automatically).
+
+    Why this matters:
+    - Acceptance backtests require a strict warm-cache invariant (no downloader queue submissions).
+    - Some historical windows legitimately contain placeholder days (vendor returned no data).
+    - Re-fetching those same placeholder days on every warm run breaks determinism and can cause
+      CI acceptance failures even when S3 caches are warm.
+    """
+    monkeypatch.setenv("IS_BACKTESTING", "True")
+
+    trading_dates = [date(2025, 1, 2), date(2025, 1, 3)]
+    monkeypatch.setattr(thetadata_helper, "get_trading_dates", lambda asset, start, end: trading_dates)
+
+    asset = SimpleNamespace(symbol="SPX", asset_type="index")
+    idx = pd.to_datetime(
+        [
+            "2025-01-02 21:00:00+00:00",  # real (covered)
+            "2025-01-03 21:00:00+00:00",  # placeholder (known unavailable)
+        ],
+        utc=True,
+    )
+    df_all = pd.DataFrame({"missing": [0, 1]}, index=idx)
+
+    missing = thetadata_helper.get_missing_dates(
+        df_all,
+        asset,
+        start=datetime(2025, 1, 2, tzinfo=pytz.UTC),
+        end=datetime(2025, 1, 4, tzinfo=pytz.UTC),
+    )
+
+    assert missing == []
+
+
+def test_get_missing_dates_treats_midnight_end_as_exclusive(monkeypatch) -> None:
+    """
+    Regression test: midnight end bounds represent end-exclusive windows in backtests.
+
+    Acceptance backtests pass BACKTESTING_END as an exclusive date (YYYY-MM-DD). Many internal
+    paths represent that as a midnight datetime on the following day. If we treat that midnight
+    as end-inclusive for trading-day coverage, we can incorrectly require the next trading day
+    and enqueue a downloader request even with warm S3 caches.
+    """
+    asset = SimpleNamespace(symbol="SPX", asset_type="index")
+
+    # Minimal cache coverage: one real row on 2025-12-24 (a trading day).
+    idx = pd.to_datetime(["2025-12-24 21:00:00+00:00"], utc=True)
+    df_all = pd.DataFrame({"missing": [0]}, index=idx)
+
+    missing = thetadata_helper.get_missing_dates(
+        df_all,
+        asset,
+        start=datetime(2025, 12, 24, tzinfo=pytz.UTC),
+        # End-exclusive: this should NOT require 2025-12-26 coverage.
+        end=datetime(2025, 12, 26, tzinfo=pytz.UTC),
+    )
+
+    assert missing == []

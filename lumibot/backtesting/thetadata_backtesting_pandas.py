@@ -43,6 +43,69 @@ class ThetaDataBacktestingPandas(PandasData):
     # Backtests should not trigger expensive option OHLC downloads as an implicit quote fallback.
     option_quote_fallback_allowed = False
 
+    @staticmethod
+    def _compute_prefetch_complete(
+        meta: Dict[str, object],
+        *,
+        requested_start: Optional[datetime],
+        effective_start_buffer: timedelta,
+        end_requirement: Optional[datetime],
+        ts_unit: str,
+        requested_length: int,
+    ) -> bool:
+        """Return True when a cached dataset satisfies the requested coverage window.
+
+        IMPORTANT: `prefetch_complete` is a performance optimization flag used to skip redundant
+        downloader work in hot loops. It must never be set True when coverage is insufficient,
+        otherwise backtests can thrash (STALE → REFRESH → STALE ...) on every bar.
+        """
+        try:
+            if bool(meta.get("negative_cache")):
+                return True
+            if bool(meta.get("tail_missing_permanent")):
+                return True
+        except Exception:
+            pass
+
+        coverage_start = meta.get("data_start") or meta.get("start")
+        coverage_end = meta.get("data_end") or meta.get("end")
+        rows_have = meta.get("data_rows") or meta.get("rows") or 0
+
+        try:
+            rows_have_int = int(rows_have)  # type: ignore[arg-type]
+        except Exception:
+            rows_have_int = 0
+
+        start_ok = True
+        if requested_start is not None:
+            if coverage_start is None:
+                start_ok = False
+            else:
+                try:
+                    if isinstance(coverage_start, pd.Timestamp):
+                        coverage_start = coverage_start.to_pydatetime()
+                    start_ok = coverage_start <= requested_start + effective_start_buffer
+                except Exception:
+                    start_ok = False
+
+        end_ok = True
+        if end_requirement is not None:
+            if coverage_end is None:
+                end_ok = False
+            else:
+                try:
+                    if isinstance(coverage_end, pd.Timestamp):
+                        coverage_end = coverage_end.to_pydatetime()
+                    if ts_unit == "day":
+                        end_ok = coverage_end.date() >= end_requirement.date()  # type: ignore[union-attr]
+                    else:
+                        end_ok = coverage_end >= end_requirement  # type: ignore[operator]
+                except Exception:
+                    end_ok = False
+
+        length_ok = rows_have_int >= int(requested_length)
+        return bool(start_ok and end_ok and length_ok)
+
     def __init__(
         self,
         datetime_start,
@@ -92,15 +155,19 @@ class ThetaDataBacktestingPandas(PandasData):
         # even when multiple backtests are running concurrently.
         import uuid
 
-        from lumibot.tools.thetadata_queue_client import set_queue_client_id
+        from lumibot.tools.data_downloader_queue_client import set_queue_client_id
 
         unique_id = uuid.uuid4().hex[:8]
         strategy_name = kwargs.get('name', 'Backtest')
         client_id = f"{strategy_name}_{unique_id}"
         set_queue_client_id(client_id)
-        logger.info(f"[THETA][QUEUE] Set unique client_id for queue fairness: {client_id}")
+        logger.info(f"[DOWNLOADER][QUEUE] Set unique client_id for queue fairness: {client_id}")
 
-        self.kill_processes_by_name("ThetaTerminal.jar")
+        # When a Data Downloader is configured, LumiBot must never touch local ThetaTerminal
+        # processes. Starting/killing a local ThetaTerminal can steal the single licensed Theta
+        # session and take down the downloader.
+        if not (os.environ.get("DATADOWNLOADER_BASE_URL") or "").strip():
+            self.kill_processes_by_name("ThetaTerminal.jar")
         thetadata_helper.reset_theta_terminal_tracking()
 
     def is_weekend(self, date):
@@ -765,6 +832,7 @@ class ThetaDataBacktestingPandas(PandasData):
             and require_ohlc_data
             and asset_type_value == "index"
             and asset_separated.asset_type != "option"
+            and ts_unit == "day"
             and self.datetime_end is not None
         ):
             try:
@@ -826,10 +894,16 @@ class ThetaDataBacktestingPandas(PandasData):
                         from lumibot.tools.helpers import get_trading_days
 
                         market = os.environ.get("BACKTESTING_MARKET", "NYSE")
-                        close_cache = getattr(self, "_session_close_cache", None)
+                        # NOTE: Do not reuse `_session_close_cache` here.
+                        # The small-window "align to session close" logic above intentionally caches
+                        # the *forward* session close for a given date (which may be AFTER the current
+                        # `end_requirement` timestamp). For the end-coverage clamp we need the *last*
+                        # session close at or before the end timestamp, so cache it separately to
+                        # avoid collisions that prevent clamping on weekends/holidays.
+                        close_cache = getattr(self, "_session_close_cache_last", None)
                         if close_cache is None:
                             close_cache = {}
-                            self._session_close_cache = close_cache
+                            self._session_close_cache_last = close_cache
 
                         cache_date = end_requirement.date() if hasattr(end_requirement, "date") else end_requirement
                         cache_key = (market, cache_date)
@@ -858,6 +932,75 @@ class ThetaDataBacktestingPandas(PandasData):
                     except Exception:
                         logger.debug(
                             "[THETA][DEBUG][END_REQUIREMENT] failed to align intraday option end_requirement",
+                            exc_info=True,
+                        )
+                # CORRECTNESS + PERFORMANCE: For index intraday data in Theta backtests, the provider is
+                # regular-session (RTH) bounded (e.g. ~09:30–16:00 ET for SPX, with early closes on
+                # holidays) and does not provide bars through 23:59/UTC-midnight.
+                #
+                # If we require coverage through the backtest end bound (often 23:59 or 18:59 ET
+                # depending on how end dates are serialized), the cache can become impossible to satisfy
+                # and we can enter a perpetual STALE→REFRESH loop (observed in:
+                # - SPX0DTEHybridStrangle prod runs dominated by v3/index/history/ohlc
+                # - acceptance SPX short straddle runs stuck on SPXW minute prefetch).
+                #
+                # Clamp the intraday end requirement down to the *last trading session close* at or
+                # before the end requirement datetime so "covered through close" is considered complete
+                # even when the backtest end falls on a weekend/holiday.
+                if (
+                    is_index_asset
+                    and not snapshot_only
+                    and ts_unit in {"minute", "hour"}
+                    and end_requirement is not None
+                ):
+                    try:
+                        from lumibot.tools.helpers import get_trading_days
+
+                        market = os.environ.get("BACKTESTING_MARKET", "NYSE")
+                        close_cache = getattr(self, "_session_close_cache", None)
+                        if close_cache is None:
+                            close_cache = {}
+                            self._session_close_cache = close_cache
+
+                        cache_date = end_requirement.date()
+                        cache_key = (market, cache_date)
+                        if cache_key in close_cache:
+                            cached_close = close_cache.get(cache_key)
+                        else:
+                            # Include a small lookback window so holidays/weekends resolve to the prior
+                            # session close (e.g., 2025-12-25 holiday should clamp to 2025-12-24 early close).
+                            schedule = get_trading_days(
+                                market=market,
+                                start_date=end_requirement - timedelta(days=7),
+                                end_date=end_requirement + timedelta(days=2),
+                                tzinfo=self.tzinfo,
+                            )
+                            cached_close = None
+                            if not schedule.empty:
+                                # We want the session close for the *last trading day* at or before
+                                # end_requirement's date. Do not clamp intraday requests (e.g. 10:15)
+                                # down to a prior-day close: only clamp when the end bound is after
+                                # the session close (e.g. 23:59, weekend/holiday end dates).
+                                end_date = end_requirement.date()
+                                try:
+                                    mask = schedule.index.date <= end_date
+                                    eligible = schedule.loc[mask]
+                                except Exception:
+                                    eligible = schedule
+                                if not eligible.empty:
+                                    cached_close = eligible.iloc[-1]["market_close"]
+                            close_cache[cache_key] = cached_close
+
+                        if cached_close is not None and end_requirement > cached_close:
+                            logger.debug(
+                                "[THETA][DEBUG][END_REQUIREMENT] clamping index intraday end_requirement to session close: %s -> %s",
+                                end_requirement,
+                                cached_close,
+                            )
+                            end_requirement = cached_close
+                    except Exception:
+                        logger.debug(
+                            "[THETA][DEBUG][END_REQUIREMENT] failed to clamp index end_requirement to session close",
                             exc_info=True,
                         )
         else:
@@ -951,6 +1094,21 @@ class ThetaDataBacktestingPandas(PandasData):
             has_quotes = self._frame_has_quote_columns(existing_data.df)
             self._record_metadata(canonical_key, existing_data.df, existing_data.timestep, asset_separated, has_quotes=has_quotes)
             existing_meta = self._dataset_metadata.get(canonical_key)
+            # PERF + CORRECTNESS: Normalize `prefetch_complete` after rebuilding metadata so stale
+            # sidecars can't cause per-bar STALE/REFRESH loops.
+            try:
+                if existing_meta is not None:
+                    existing_meta["prefetch_complete"] = self._compute_prefetch_complete(
+                        existing_meta,
+                        requested_start=requested_start,
+                        effective_start_buffer=effective_start_buffer,
+                        end_requirement=end_requirement,
+                        ts_unit=ts_unit,
+                        requested_length=requested_length,
+                    )
+                    self._dataset_metadata[canonical_key] = existing_meta
+            except Exception:
+                logger.debug("[THETA][DEBUG][PREFETCH_COMPLETE] failed to recompute after day metadata rebuild", exc_info=True)
             if logger.isEnabledFor(logging.DEBUG):
                 try:
                     df_idx = pd.to_datetime(existing_data.df.index)
@@ -1146,6 +1304,27 @@ class ThetaDataBacktestingPandas(PandasData):
                 if existing_end is None:
                     existing_end = self._normalize_default_timezone(existing_data.df.index[-1])
 
+            # CORRECTNESS: Some older sidecar metadata (or externally-warmed caches) can carry an
+            # incorrect `prefetch_complete=True` even when `existing_end` no longer meets the
+            # current `end_requirement` (e.g., cache is slightly behind the requested backtest end).
+            # Normalize it here so we don't emit thousands of per-bar STALE logs.
+            try:
+                existing_meta["prefetch_complete"] = self._compute_prefetch_complete(
+                    existing_meta,
+                    requested_start=requested_start,
+                    effective_start_buffer=effective_start_buffer,
+                    end_requirement=end_requirement,
+                    ts_unit=ts_unit,
+                    requested_length=requested_length,
+                )
+                self._dataset_metadata[canonical_key] = existing_meta
+                legacy_meta = self._dataset_metadata.get(legacy_key)
+                if legacy_meta is not None:
+                    legacy_meta.update(existing_meta)
+                    self._dataset_metadata[legacy_key] = legacy_meta
+            except Exception:
+                logger.debug("[THETA][DEBUG][PREFETCH_COMPLETE] failed to normalize before validation", exc_info=True)
+
             # DEBUG-LOG: Cache validation entry
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
@@ -1188,6 +1367,7 @@ class ThetaDataBacktestingPandas(PandasData):
                 )
 
             tail_placeholder = existing_meta.get("tail_placeholder", False)
+            tail_missing_permanent = bool(existing_meta.get("tail_missing_permanent")) if existing_meta else False
             end_ok = True
 
             # DEBUG-LOG: End validation entry
@@ -1268,6 +1448,18 @@ class ThetaDataBacktestingPandas(PandasData):
                                 end_requirement,
                                 ts_unit,
                             )
+
+            # PERF: If the cache metadata says the tail is permanently missing (placeholder coverage through
+            # the requested end), treat the end check as satisfied. Without this, backtests can thrash on
+            # every bar (STALE → REFRESH loops) trying to heal placeholder trading days that are expected
+            # to remain unavailable for this run.
+            if not end_ok and tail_missing_permanent:
+                end_ok = True
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "[THETA][DEBUG][END_VALIDATION] asset=%s | end_ok forced TRUE due to tail_missing_permanent",
+                        asset_separated.symbol if hasattr(asset_separated, "symbol") else str(asset_separated),
+                    )
 
             if (
                 require_quote_data
@@ -1403,6 +1595,18 @@ class ThetaDataBacktestingPandas(PandasData):
                         end_requirement,
                     )
                     return None
+                # If the cached dataset already covers the requirement, treat it as reusable and
+                # avoid thrashing (STALE → REFRESH loops). This is especially important for
+                # option quote datasets in cold-local/warm-S3 production runs.
+                quotes_ok = (not require_quote_data) or existing_has_quotes or existing_quotes_missing
+                if (
+                    start_ok
+                    and end_ok
+                    and existing_rows >= requested_length
+                    and quotes_ok
+                    and (not require_ohlc_data or existing_has_ohlc)
+                ):
+                    return None
                 if is_index_asset and end_ok and existing_rows >= requested_length:
                     logger.info(
                         "[THETA][CACHE][REUSE] asset=%s/%s (%s) coverage meets requirement; skipping refetch. existing_end=%s target_end=%s",
@@ -1535,9 +1739,79 @@ class ThetaDataBacktestingPandas(PandasData):
         # refreshing cached daily data).
         preserve_full_history = bool(is_option_asset or ts_unit == "day")
 
+        # -------------------------------------------------------------------------------------
+        # NDX UNDERLYING PROXY (ThetaData coverage gap)
+        # -------------------------------------------------------------------------------------
+        # ThetaData support confirmed they do not provide NDX index/underlying history (only NDX options).
+        # In practice, /v3/index/history/* for NDX can return placeholder all-zero OHLC or NO_DATA, which
+        # makes backtests thrash (empty dataset → repeated refetch attempts).
+        #
+        # Strategy code must continue to trade NDX options, but the platform needs a usable underlying
+        # price series for `Asset("NDX", asset_type=INDEX)` (signals, moneyness, valuation, etc).
+        #
+        # Solution: proxy NDX underlying bars/quotes via a liquid Theta-covered instrument (QQQ),
+        # scaled into NDX "points" units. This is explicit (logged once per run) and scoped to the
+        # ThetaData backtesting path so other providers remain unaffected.
+        ndx_proxy_symbol: Optional[str] = None
+        ndx_proxy_factor: Optional[float] = None
+        # IMPORTANT: Do not infer "index-ness" from the symbol alone.
+        # `Asset("NDX")` defaults to a stock by design; only explicit `asset_type=INDEX` should be proxied.
+        if (
+            not is_option_asset
+            and getattr(asset_separated, "asset_type", None) == Asset.AssetType.INDEX
+        ):
+            symbol_upper = str(getattr(asset_separated, "symbol", "") or "").upper()
+            if symbol_upper in {"NDX", "NDXP"}:
+                ndx_proxy_symbol = "QQQ"
+                # Heuristic: NDX is an index level while QQQ is an ETF price. The ratio moves slowly
+                # over time (fees/dividend timing), but is stable enough to serve as a fast proxy.
+                # If we later add a low-cost daily calibration path from NDX options EOD, it can
+                # override this constant factor without changing call sites.
+                ndx_proxy_factor = 41.0
+
+        def _log_ndx_proxy_once() -> None:
+            if not ndx_proxy_symbol:
+                return
+            notices = getattr(self, "_thetadata_index_proxy_notices", None)
+            if notices is None:
+                notices = set()
+                setattr(self, "_thetadata_index_proxy_notices", notices)
+            key = f"{getattr(asset_separated, 'symbol', asset_separated)}->{ndx_proxy_symbol}"
+            if key in notices:
+                return
+            notices.add(key)
+            logger.warning(
+                "[THETA][INDEX_PROXY] %s underlying is not available from ThetaData; proxying via %s (factor=%s).",
+                getattr(asset_separated, "symbol", asset_separated),
+                ndx_proxy_symbol,
+                ndx_proxy_factor,
+            )
+
+        def _apply_ndx_proxy_scaling(frame: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+            if frame is None or getattr(frame, "empty", True) or not ndx_proxy_symbol or not ndx_proxy_factor:
+                return frame
+            # Shallow copy: keep memory stable for multi-year cached frames.
+            frame = frame.copy(deep=False)
+            price_columns = ("open", "high", "low", "close", "bid", "ask", "mid_price", "price")
+            for col in price_columns:
+                if col in frame.columns:
+                    frame[col] = pd.to_numeric(frame[col], errors="coerce") * float(ndx_proxy_factor)
+            # Index underlyings do not have meaningful share volume/splits/dividends in our backtests.
+            if "volume" in frame.columns:
+                frame["volume"] = 0.0
+            if "dividend" in frame.columns:
+                frame["dividend"] = 0.0
+            if "stock_splits" in frame.columns:
+                frame["stock_splits"] = 0.0
+            return frame
+
         def _fetch_ohlc():
-            return thetadata_helper.get_price_data(
-                asset_separated,
+            fetch_asset = asset_separated
+            if ndx_proxy_symbol:
+                _log_ndx_proxy_once()
+                fetch_asset = Asset(symbol=ndx_proxy_symbol, asset_type="stock")
+            frame = thetadata_helper.get_price_data(
+                fetch_asset,
                 start_for_fetch,
                 end_requirement,
                 timespan=ts_unit,
@@ -1555,10 +1829,15 @@ class ThetaDataBacktestingPandas(PandasData):
                     and getattr(asset_separated, "asset_type", None) == "option"
                 ),
             )
+            return _apply_ndx_proxy_scaling(frame)
 
         def _fetch_quote():
-            return thetadata_helper.get_price_data(
-                asset_separated,
+            fetch_asset = asset_separated
+            if ndx_proxy_symbol:
+                _log_ndx_proxy_once()
+                fetch_asset = Asset(symbol=ndx_proxy_symbol, asset_type="stock")
+            frame = thetadata_helper.get_price_data(
+                fetch_asset,
                 start_for_fetch,
                 end_requirement,
                 timespan=ts_unit,
@@ -1568,6 +1847,7 @@ class ThetaDataBacktestingPandas(PandasData):
                 include_after_hours=True,  # Default to True for extended hours data
                 preserve_full_history=preserve_full_history,
             )
+            return _apply_ndx_proxy_scaling(frame)
 
         df_ohlc = None
         if wants_ohlc:
@@ -2032,7 +2312,14 @@ class ThetaDataBacktestingPandas(PandasData):
         )
         meta = self._dataset_metadata.get(canonical_key, {}) or {}
         legacy_meta = self._dataset_metadata.get(legacy_key)
-        meta["prefetch_complete"] = True
+        meta["prefetch_complete"] = self._compute_prefetch_complete(
+            meta,
+            requested_start=requested_start,
+            effective_start_buffer=effective_start_buffer,
+            end_requirement=end_requirement,
+            ts_unit=ts_unit,
+            requested_length=requested_length,
+        )
         meta["target_start"] = requested_start
         meta["target_end"] = end_requirement
         meta["ffilled"] = True
@@ -2714,7 +3001,9 @@ class ThetaDataBacktestingPandas(PandasData):
                             data_end = getattr(candidate_data, "datetime_end", None)
                             if data_end is None:
                                 data_end = self._normalize_default_timezone(candidate_df.index.max())
-                            if data_end is not None and dt <= data_end:
+                            normalized_dt = self._normalize_default_timezone(dt) if dt is not None else None
+                            normalized_end = self._normalize_default_timezone(data_end) if data_end is not None else None
+                            if normalized_dt is not None and normalized_end is not None and normalized_dt <= normalized_end:
                                 should_refresh = False
             except Exception:
                 should_refresh = True
@@ -3030,9 +3319,12 @@ class ThetaDataBacktestingPandas(PandasData):
         dt = self.get_datetime()
         self._update_cadence_from_dt(dt)
 
-        # FIX (2025-12-12): In day mode, use day data for quote lookups instead of minute.
-        # This prevents 472 (no data) errors when ThetaData doesn't have minute quote data
-        # for historical options, but does have EOD data.
+        # Day-cadence alignment: in day mode, prefer day data for quote lookups to avoid downloading
+        # full intraday quote history for long backtests.
+        #
+        # NOTE: Order-fill logic can still request intraday "snapshot_only" quotes when needed
+        # (see `BacktestingBroker._try_fill_with_quote`) without forcing all quote consumers onto
+        # minute-level data.
         current_mode = getattr(self, "_timestep", None)
         self._effective_day_mode = current_mode == "day"
 
@@ -3143,6 +3435,18 @@ class ThetaDataBacktestingPandas(PandasData):
                     start_dt = dt - delta_td
                     end_dt = dt + window_td
 
+                    # PERF: Keep snapshot-only quote payloads small but stable. Bucket to a fixed
+                    # intraday window so delta probes don't download full-session quote history and
+                    # don't create one cache file per bar.
+                    try:
+                        bucket_td = timedelta(minutes=15)
+                        bucket_minute = (dt.minute // 15) * 15
+                        bucket_start = dt.replace(minute=bucket_minute, second=0, microsecond=0)
+                        start_dt = bucket_start
+                        end_dt = bucket_start + bucket_td
+                    except Exception:
+                        pass
+
                 df_snapshot = thetadata_helper.get_historical_data_snapshot_cached(
                     asset,
                     start_dt,
@@ -3150,9 +3454,8 @@ class ThetaDataBacktestingPandas(PandasData):
                     ivl_ms,
                     datastyle="quote",
                     include_after_hours=True,
-                    # PERF: Cache a stable full-session file per (asset, trading_day) instead of a
-                    # unique file per dt-window. Long-window backtests (NVDA/SPX) otherwise generate
-                    # thousands of tiny snapshot files and spend most of their time in downloader IO.
+                    # Cache the full regular session for stability and to maximize reuse of warmed
+                    # S3 objects (acceptance backtests require the warm-cache invariant).
                     prefer_full_session=True,
                 )
 
@@ -3195,8 +3498,32 @@ class ThetaDataBacktestingPandas(PandasData):
                     )
 
                 if current_mode == "day":
+                    # Daily-cadence backtests use a small forward-looking snapshot window to
+                    # account for end-of-minute timestamping (the first "09:30" quote bar can
+                    # appear at ~09:31). Prefer the first two-sided NBBO row within that forward
+                    # window to avoid one-sided quotes at the open causing strategies to skip
+                    # otherwise tradeable contracts (acceptance runs rely on this behavior).
                     row = df_snapshot.iloc[0]
                     row_ts = df_snapshot.index[0]
+                    try:
+                        df_window = df_snapshot
+                        try:
+                            df_window = df_snapshot.loc[start_dt:end_dt]
+                        except Exception:
+                            df_window = df_snapshot
+
+                        if isinstance(df_window, pd.DataFrame) and not df_window.empty:
+                            col_map = {str(c).lower(): c for c in df_window.columns}
+                            bid_col = col_map.get("bid")
+                            ask_col = col_map.get("ask")
+                            if bid_col is not None and ask_col is not None:
+                                mask = df_window[bid_col].notna() & df_window[ask_col].notna()
+                                if bool(mask.any()):
+                                    first_idx = df_window.index[mask.argmax()]  # type: ignore[arg-type]
+                                    row = df_window.loc[first_idx]
+                                    row_ts = first_idx
+                    except Exception:
+                        pass
                 else:
                     # Prefer the last bar at/before dt. If none exist (common at the open due to
                     # end-of-minute timestamping), fall forward to the first bar after dt.
@@ -3324,7 +3651,9 @@ class ThetaDataBacktestingPandas(PandasData):
                     candidate_df = getattr(candidate_data, "df", None)
                     if candidate_df is not None and not candidate_df.empty and self._frame_has_quote_columns(candidate_df):
                         data_end = getattr(candidate_data, "datetime_end", None)
-                        if data_end is not None and dt <= data_end:
+                        normalized_dt = self._normalize_default_timezone(dt) if dt is not None else None
+                        normalized_end = self._normalize_default_timezone(data_end) if data_end is not None else None
+                        if normalized_dt is not None and normalized_end is not None and normalized_dt <= normalized_end:
                             should_refresh = False
                             fast_data = candidate_data
         except Exception:

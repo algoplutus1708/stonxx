@@ -9,7 +9,7 @@ from lumibot.example_strategies.stock_buy_and_hold import BuyAndHold
 from lumibot.entities import Asset, Order, Position
 from lumibot.strategies.strategy import Strategy
 from apscheduler.triggers.cron import CronTrigger
-from lumibot.constants import LUMIBOT_DEFAULT_PYTZ
+from lumibot.constants import LUMIBOT_DEFAULT_PYTZ, LUMIBOT_DEFAULT_TIMEZONE
 
 
 class FakeSnapshotSource:
@@ -493,3 +493,28 @@ class TestStrategyMethods:
         strategy.log_message.assert_called_once_with(
             f"Skipping registration of cron callback test_callback in backtesting mode"
         )
+
+
+def test_timezone_defaults_when_tzinfo_missing():
+    """Ensure Strategy.timezone and Strategy.pytz default when data source tzinfo is missing."""
+    date_start = datetime(2021, 7, 10)
+    date_end = datetime(2021, 7, 13)
+
+    # Create a data source and explicitly remove tzinfo
+    data_source = YahooDataBacktesting(date_start, date_end)
+    # Simulate a broker/data source that does not provide tzinfo
+    data_source.tzinfo = None
+
+    backtesting_broker = BacktestingBroker(data_source)
+    strategy = BuyAndHold(
+        backtesting_broker,
+        backtesting_start=date_start,
+        backtesting_end=date_end,
+    )
+
+    # timezone should fall back to the documented default string
+    assert strategy.timezone == LUMIBOT_DEFAULT_TIMEZONE
+
+    # pytz should fall back to the default tzinfo (pytz timezone)
+    # Compare by canonical name to avoid object identity assumptions
+    assert getattr(strategy.pytz, "zone", None) == LUMIBOT_DEFAULT_TIMEZONE

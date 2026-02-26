@@ -6,6 +6,10 @@
 1. `docs/BACKTESTING_ARCHITECTURE.md` - Understand the backtesting data flow
 2. `AGENTS.md` - Critical rules for ThetaData (DO NOT SKIP)
 
+## Backtesting Accuracy (Definition)
+
+Backtesting “accuracy” is measured against live broker behavior when possible (replay a live-traded interval and reproduce fills + PnL within tolerances). Vendor parity (e.g., stored DataBento artifacts) is a regression signal, not absolute truth.
+
 ## Multi-Agent Collaboration (CRITICAL)
 This repo is often worked on by **multiple AI sessions** at the same time.
 
@@ -255,7 +259,7 @@ LumiBot is a trading and backtesting framework supporting multiple data sources 
 ### ThetaData Rules (MUST FOLLOW)
 
 1. **NEVER run ThetaTerminal locally WITH PRODUCTION CREDENTIALS** - It will kill production connections
-2. **Only use Data Downloader** at `http://data-downloader.lumiwealth.com:8080` for backtests (avoid hard-coded IPs—they can change on redeploy)
+2. **Only use the Data Downloader** configured via `DATADOWNLOADER_BASE_URL` for backtests (avoid hard-coded IPs/hostnames—they can change on redeploy)
 3. **Always compare ThetaData vs Yahoo** - Yahoo is the gold standard for split-adjusted prices
 4. **Dev credentials available for local testing** - See `AGENTS.md` for details:
    - Username: `rob-dev@lumiwealth.com` / Password: `TestTestTest`
@@ -263,6 +267,11 @@ LumiBot is a trading and backtesting framework supporting multiple data sources 
    - Verified working Dec 7, 2025 with STOCK.PRO, OPTION.PRO, INDEX.PRO bundle
 5. **Wrap long commands with safe-timeout (20m default max).** Use `/Users/robertgrzesik/bin/safe-timeout 1200s …` and split work into smaller chunks if it would run longer.
 6. See `AGENTS.md` for complete rules
+
+### Private endpoint hygiene (MUST FOLLOW)
+
+- Never hardcode or paste private downloader URLs/hostnames into code, docs, tests, logs, `AGENTS.md`, or `CLAUDE.md`.
+- Use placeholders like `http://localhost:8080` or `https://<your-downloader-host>:8080`, and refer readers to `DATADOWNLOADER_BASE_URL`.
 
 ### Data Source Selection
 

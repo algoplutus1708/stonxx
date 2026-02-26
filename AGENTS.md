@@ -2,8 +2,19 @@
 
 These rules are mandatory whenever you work on ThetaData integrations.
 
+## Backtesting Accuracy (Definition)
+
+Backtesting “accuracy” is measured against live broker behavior when possible (replay a live-traded interval and reproduce fills + PnL within tolerances). Vendor parity (e.g., stored DataBento artifacts) is a regression signal, not absolute truth.
+
 ## Multi-Agent Collaboration (CRITICAL)
 This repo is frequently edited by **multiple AI sessions**. To avoid lost work:
+
+- **Release workflow (STRICT):**
+  - **Never push directly to `dev`.** All work must land via a PR (usually from `version/X.Y.Z` → `dev`).
+  - **Stay on the current branch.** If you start on a `version/*` branch, keep all commits on that branch and push that branch.
+  - **Never switch branches without explicit user instruction.** If you suspect you are on the wrong branch, stop and ask.
+  - **PRs must be version-scoped.** If a PR is needed for review/release, the PR head must be the existing `version/X.Y.Z` branch.
+  - **PR title must be release-scoped.** Use `vX.Y.Z - <summary>` and include all notable changes shipped in that version (not just one feature).
 
 - **Branch etiquette (STRICT):** if you are on a version branch (e.g., `version/4.4.31`), treat it as the shared collaboration branch.
   - **Do not create additional branches** (no `git switch -c`, no `git branch`, no `version/4.4.31-foo`, no `version/4.4.31/<topic>`), unless the user explicitly asks.
@@ -23,9 +34,11 @@ This repo is frequently edited by **multiple AI sessions**. To avoid lost work:
 - **Test gating (STRICT):** do not introduce new environment variables just to skip/disable tests or to paper over CI failures.
   - Prefer existing pytest markers (`apitest`, `acceptance_backtest`, etc.) and normal test skips with clear reasons.
   - If a new env var is truly required for a user-facing feature, document it in `docsrc/environment_variables.rst` in the same PR.
+- **Full suite verification:** prefer pushing commits to GitHub on the shared `version/X.Y.Z` branch so sharded CI validates the full suite. Local runs should focus on targeted tests or marker-filtered subsets.
 
 1. **Never launch ThetaTerminal locally WITH PRODUCTION CREDENTIALS.** Production has the only licensed session for that account. Starting the jar with prod credentials (even briefly or via Docker) instantly terminates the prod connection and halts all customers.
-2. **Use the shared downloader endpoint for backtests.** All tests/backtests must set `DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080` and `DATADOWNLOADER_API_KEY=<secret>`. Do not short-cut by hitting Theta directly (and avoid hard-coded IPs—they can change on redeploy).
+2. **Use the downloader for backtests.** All tests/backtests must set `DATADOWNLOADER_BASE_URL` and `DATADOWNLOADER_API_KEY` via the runtime environment. Do not short-cut by hitting Theta directly.
+3. **Never hardcode or share private downloader URLs.** Do not paste real downloader hostnames/URLs into code, docs, tests, logs, AGENTS, or CLAUDE; use placeholders (e.g., `http://localhost:8080` or `https://<your-downloader-host>:8080`) and refer to `DATADOWNLOADER_BASE_URL`.
 
 ### Dev Credentials for Local ThetaTerminal Testing (SAFE)
 

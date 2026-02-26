@@ -1,10 +1,12 @@
 import datetime
+import inspect
 import logging
 import math
 import os
 import re
 import time
 import uuid
+import warnings
 from decimal import Decimal
 from typing import Callable, List, Type, Union, Optional
 
@@ -32,6 +34,7 @@ from ..tools.polars_utils import PolarsResampleError, resample_polars_ohlc
 from ..traders import Trader
 from ..credentials import IS_BACKTESTING
 from ._strategy import _Strategy
+from ..constants import LUMIBOT_DEFAULT_TIMEZONE, LUMIBOT_DEFAULT_PYTZ
 
 matplotlib.use("Agg")
 
@@ -742,6 +745,14 @@ class Strategy(_Strategy):
         if smart_limit is not None and order_type is None and type is None:
             order_type = Order.OrderType.SMART_LIMIT
 
+        # PERF: uuid4() generation is a measurable hot path in high-churn backtests (1 order per bar per asset).
+        # Backtests only need identifiers to be unique within the run, so use a cheap monotonic counter.
+        identifier = None
+        if getattr(self.broker, "IS_BACKTESTING_BROKER", False):
+            seq = getattr(self.broker, "_backtest_order_seq", 0) + 1
+            setattr(self.broker, "_backtest_order_seq", seq)
+            identifier = f"bt_{seq}"
+
         order = Order(
             self.name,
             asset,
@@ -772,6 +783,7 @@ class Strategy(_Strategy):
             order_class=order_class,
             smart_limit=smart_limit,
             custom_params=custom_params,
+            identifier=identifier,
         )
 
         # Add debug logging for custom_params
@@ -3023,7 +3035,30 @@ class Strategy(_Strategy):
         >>> timezone = self.timezone
         >>> self.log_message(f"Timezone: {timezone}")
         """
-        return self.broker.data_source.DEFAULT_TIMEZONE
+        # Be defensive: pytz timezones have `.zone`, zoneinfo has `.key`, and
+        # datetime.timezone may only provide `tzname(None)`
+        tz = getattr(self.broker.data_source, "tzinfo", None)
+
+        # Hard default when tzinfo is missing
+        if tz is None:
+            return LUMIBOT_DEFAULT_TIMEZONE
+
+        # Prefer canonical zone identifiers when available
+        if hasattr(tz, "zone") and getattr(tz, "zone", None):
+            return tz.zone
+        if hasattr(tz, "key") and getattr(tz, "key", None):
+            return tz.key
+
+        # Fallbacks: tzname or default
+        try:
+            name = tz.tzname(None)
+            if name:
+                return name
+        except Exception:
+            pass
+
+        # Final fallback to configured default to ensure a str is returned
+        return LUMIBOT_DEFAULT_TIMEZONE
 
     @property
     def pytz(self):
@@ -3040,7 +3075,8 @@ class Strategy(_Strategy):
         >>> pytz = self.pytz
         >>> self.log_message(f"pytz: {pytz}")
         """
-        return self.broker.data_source.tzinfo
+        tz = getattr(self.broker.data_source, "tzinfo", None)
+        return tz or LUMIBOT_DEFAULT_PYTZ
 
     def get_datetime(self, adjust_for_delay: bool = False):
         """Returns the current datetime according to the data source. In a backtest this will be the current bar's datetime. In live trading this will be the current datetime on the exchange.
@@ -3661,27 +3697,156 @@ class Strategy(_Strategy):
             dt = self.get_datetime()
 
         # Whenever you want to add a new line, use the following code
-        self._chart_lines_list.append(
-            {
-                "datetime": dt,
-                "name": name,
-                "value": value,
-                "color": color,
-                "style": style,
-                "width": width,
-                "detail_text": detail_text,
-                "plot_name": plot_name,
-                # Asset fields for multi-symbol charting support
-                "asset_symbol": asset.symbol if asset else None,
-                "asset_type": asset.asset_type if asset else None,
-                "asset_expiration": str(asset.expiration) if asset and asset.expiration else None,
-                "asset_strike": asset.strike if asset else None,
-                "asset_right": asset.right if asset else None,
-                "asset_multiplier": asset.multiplier if asset else None,
-                "quote_symbol": asset._quote_asset.symbol if asset and hasattr(asset, '_quote_asset') and asset._quote_asset else None,
-                "asset_display_name": str(asset) if asset else None,
-            }
-        )
+        new_line = {
+            "datetime": dt,
+            "name": name,
+            "value": value,
+            "color": color,
+            "style": style,
+            "width": width,
+            "detail_text": detail_text,
+            "plot_name": plot_name,
+            # Asset fields for multi-symbol charting support
+            "asset_symbol": asset.symbol if asset else None,
+            "asset_type": asset.asset_type if asset else None,
+            "asset_expiration": str(asset.expiration) if asset and asset.expiration else None,
+            "asset_strike": asset.strike if asset else None,
+            "asset_right": asset.right if asset else None,
+            "asset_multiplier": asset.multiplier if asset else None,
+            "quote_symbol": asset._quote_asset.symbol if asset and hasattr(asset, '_quote_asset') and asset._quote_asset else None,
+            "asset_display_name": str(asset) if asset else None,
+        }
+
+        self._chart_lines_list.append(new_line)
+        return new_line
+
+    def add_ohlc(
+            self,
+            name: str,
+            open: float,
+            high: float,
+            low: float,
+            close: float,
+            color: str = None,
+            detail_text: str = None,
+            dt: Union[datetime.datetime, pd.Timestamp] = None,
+            plot_name: str = "default_plot",
+            asset: Asset = None
+    ):
+        """Adds an OHLC (candlestick) data point to the indicator chart.
+
+        This can be used to plot price bars, Heikin Ashi candles, or any other
+        OHLC series on the indicator chart. OHLC data is exported to indicators.csv
+        with type="ohlc" and (when supported by the viewer) can be rendered as
+        candlesticks.
+
+        Parameters
+        ----------
+        name : str
+            The name of the OHLC series.
+        open : float
+            The opening value for the bar.
+        high : float
+            The high value for the bar.
+        low : float
+            The low value for the bar.
+        close : float
+            The closing value for the bar.
+        color : str, optional
+            The color for this bar. If omitted, defaults to "green" for bullish
+            (close >= open) and "red" for bearish (close < open).
+        detail_text : str, optional
+            Additional hover text.
+        dt : datetime.datetime or pandas.Timestamp, optional
+            The datetime for this bar. Defaults to current strategy datetime.
+        plot_name : str, optional
+            Subplot name. Default "default_plot".
+        asset : Asset, optional
+            Asset metadata for multi-symbol charting.
+        """
+
+        if not isinstance(name, str):
+            raise ValueError(
+                f"Invalid name parameter in add_ohlc() method. Name must be a string but instead got {name}, "
+                f"which is a type {type(name)}."
+            )
+
+        for label, number in (("open", open), ("high", high), ("low", low), ("close", close)):
+            if not isinstance(number, (float, int, np.float64)):
+                raise ValueError(
+                    f"Invalid {label} parameter in add_ohlc() method. {label} must be a float or int but instead got {number}, "
+                    f"which is a type {type(number)}."
+                )
+
+        if color is not None and not isinstance(color, str):
+            raise ValueError(
+                f"Invalid color parameter in add_ohlc() method. Color must be a string but instead got {color}, "
+                f"which is a type {type(color)}."
+            )
+
+        if detail_text is not None and not isinstance(detail_text, str):
+            raise ValueError(
+                f"Invalid detail_text parameter in add_ohlc() method. Detail_text must be a string but instead got "
+                f"{detail_text}, which is a type {type(detail_text)}."
+            )
+
+        if dt is not None and not isinstance(dt, (datetime.datetime, pd.Timestamp)):
+            raise ValueError(
+                f"Invalid dt parameter in add_ohlc() method. Dt must be a datetime.datetime but instead got {dt}, "
+                f"which is a type {type(dt)}."
+            )
+
+        if asset is not None and not isinstance(asset, Asset):
+            raise TypeError(
+                f"Invalid asset parameter in add_ohlc() method. Asset must be an Asset object, not a string or other type. "
+                f"Got {asset}, which is a type {type(asset)}. Use Asset(symbol='SPY', asset_type='stock') to create an Asset."
+            )
+
+        open = float(open)
+        high = float(high)
+        low = float(low)
+        close = float(close)
+
+        if any(math.isnan(x) or math.isinf(x) for x in (open, high, low, close)):
+            self.logger.error("Skipping OHLC bar because one or more values are not finite.")
+            return None
+
+        if high < low or high < max(open, close) or low > min(open, close):
+            self.logger.error(
+                "Skipping OHLC bar because values are invalid: "
+                f"open={open}, high={high}, low={low}, close={close}."
+            )
+            return None
+
+        if dt is None:
+            dt = self.get_datetime()
+
+        default_color = "green" if close >= open else "red"
+        color = self._normalize_plot_color(color, default=default_color, context="ohlc")
+
+        new_ohlc = {
+            "datetime": dt,
+            "name": name,
+            "open": open,
+            "high": high,
+            "low": low,
+            "close": close,
+            "color": color,
+            "detail_text": detail_text,
+            "plot_name": plot_name,
+            # Asset fields for multi-symbol charting support
+            "asset_symbol": asset.symbol if asset else None,
+            "asset_type": asset.asset_type if asset else None,
+            "asset_expiration": str(asset.expiration) if asset and asset.expiration else None,
+            "asset_strike": asset.strike if asset else None,
+            "asset_right": asset.right if asset else None,
+            "asset_multiplier": asset.multiplier if asset else None,
+            "quote_symbol": asset._quote_asset.symbol if asset and hasattr(asset, '_quote_asset') and asset._quote_asset else None,
+            "asset_display_name": str(asset) if asset else None,
+        }
+
+        self._chart_ohlc_list.append(new_ohlc)
+        return new_ohlc
 
     def get_lines_df(self):
         """Returns a dataframe of the lines on the indicator chart.
@@ -3694,6 +3859,11 @@ class Strategy(_Strategy):
 
         df = pd.DataFrame(self._chart_lines_list)
 
+        return df
+
+    def get_ohlc_df(self):
+        """Returns the OHLC data on the indicator chart as a pandas DataFrame."""
+        df = pd.DataFrame(self._chart_ohlc_list)
         return df
 
     def write_backtest_settings(self, settings_file: str):
@@ -3796,7 +3966,7 @@ class Strategy(_Strategy):
             pass
 
         try:
-            from lumibot.tools.thetadata_queue_client import queue_telemetry_snapshot
+            from lumibot.tools.data_downloader_queue_client import queue_telemetry_snapshot
 
             settings["thetadata_queue_telemetry"] = queue_telemetry_snapshot()
         except Exception:
@@ -3883,7 +4053,8 @@ class Strategy(_Strategy):
         quote: Asset = None,
         exchange: str = None,
         include_after_hours: bool = True,
-        return_polars: bool = False,
+        *args,
+        **kwargs
     ):
         """Get historical pricing data for a given symbol or asset.
 
@@ -3927,16 +4098,17 @@ class Strategy(_Strategy):
             The exchange to pull the historical data from. Default is None (decided based on the broker)
         include_after_hours : bool
             Whether to include after hours data. Default is True. Currently only works with Interactive Brokers.
-        return_polars : bool
-            If True, return Bars with Polars DataFrame for better performance. Default is False (returns pandas).
-            When False and data is in Polars format, a warning will be issued about the conversion.
+        return_polars : bool (deprecated)
+            Deprecated. Do not use in strategy code. This keyword will be removed in a future release.
+            Strategy logic should use pandas operations on ``bars.pandas_df`` and should not depend on
+            the underlying DataFrame backend.
 
         Returns
         -------
         Bars
             The bars object with all the historical pricing data. Please check the ``Entities.Bars``
             object documentation for more details on how to use Bars objects. To get a ``DataFrame``
-            from the Bars object, use ``bars.df``.
+            from the Bars object, use ``bars.pandas_df``.
 
         Example
         -------
@@ -3946,10 +4118,10 @@ class Strategy(_Strategy):
         >>> # Get the data for SPY for the last 2 days
         >>> bars =  self.get_historical_prices("SPY", 2, "day")
         >>> # To get the DataFrame of SPY data
-        >>> df = bars.df
+        >>> df = bars.pandas_df
         >>>
         >>> # Then, to get the DataFrame of SPY data
-        >>> df = bars.df
+        >>> df = bars.pandas_df
         >>> last_ohlc = df.iloc[-1] # Get the last row of the DataFrame (the most recent pricing data we have)
         >>> self.log_message(f"Last price of BTC in USD: {last_ohlc['close']}, and the open price was {last_ohlc['open']}")
 
@@ -3957,13 +4129,13 @@ class Strategy(_Strategy):
         >>> bars =  self.get_historical_prices("AAPL", 30, "minute")
         >>>
         >>> # Then, to get the DataFrame of SPY data
-        >>> df = bars.df
+        >>> df = bars.pandas_df
         >>> last_ohlc = df.iloc[-1] # Get the last row of the DataFrame (the most recent pricing data we have)
         >>> self.log_message(f"Last price of AAPL: {last_ohlc['close']}, and the open price was {last_ohlc['open']}")
 
         >>> # Get 5-minute bars for the last 10 5-minute periods (using new multi-timeframe support)
         >>> bars = self.get_historical_prices("SPY", 10, "5min")
-        >>> df = bars.df  # DataFrame with 10 rows of 5-minute OHLCV data
+        >>> df = bars.pandas_df  # DataFrame with 10 rows of 5-minute OHLCV data
         >>>
         >>> # Get hourly bars for the last 24 hours
         >>> bars = self.get_historical_prices("AAPL", 24, "1h")
@@ -3978,7 +4150,7 @@ class Strategy(_Strategy):
         >>> bars =  self.get_historical_prices(asset, 30, "minute")
         >>>
         >>> # Then, to get the DataFrame of SPY data
-        >>> df = bars.df
+        >>> df = bars.pandas_df
         >>> last_ohlc = df.iloc[-1] # Get the last row of the DataFrame (the most recent pricing data we have)
         >>> self.log_message(f"Last price of BTC in USD: {last_ohlc['close']}, and the open price was {last_ohlc['open']}")
 
@@ -3990,10 +4162,29 @@ class Strategy(_Strategy):
         >>> bars =  self.get_historical_prices(asset_base, 2, "day", quote=asset_quote)
         >>>
         >>> # Then, to get the DataFrame of SPY data
-        >>> df = bars.df
+        >>> df = bars.pandas_df
         >>> last_ohlc = df.iloc[-1] # Get the last row of the DataFrame (the most recent pricing data we have)
         >>> self.log_message(f"Last price of BTC in USD: {last_ohlc['close']}, and the open price was {last_ohlc['open']}")
         """
+        if args:
+            if len(args) != 1:
+                raise TypeError("get_historical_prices() accepts at most 1 extra positional argument (deprecated `return_polars`)")
+            if "return_polars" in kwargs:
+                raise TypeError("get_historical_prices() got multiple values for keyword argument 'return_polars'")
+            kwargs["return_polars"] = args[0]
+
+        return_polars_provided = "return_polars" in kwargs
+        return_polars = kwargs.pop("return_polars", False)
+        if return_polars_provided:
+            warnings.warn(
+                "`return_polars` is deprecated and will be removed. "
+                "Do not depend on the DataFrame backend; use `bars.pandas_df` for pandas.",
+                category=DeprecationWarning,
+                stacklevel=2,
+            )
+        if kwargs:
+            unexpected = ", ".join(sorted(kwargs))
+            raise TypeError(f"get_historical_prices() got unexpected keyword argument(s): {unexpected}")
 
         # Get that length is type int and if not try to cast it
         if not isinstance(length, int):
@@ -4014,11 +4205,22 @@ class Strategy(_Strategy):
 
         # Determine the actual timestep to use for data fetching
         if parsed and parsed[0] > 1:
-            # Multi-timeframe request detected
+            # Multi-timeframe request detected.
+            #
+            # Backtesting data sources already implement aggregation via Data.get_bars()
+            # (see `lumibot/entities/data.py`). In backtests, avoid doing an extra layer of
+            # resampling here; instead pass the original timestep (e.g., "15min") through to
+            # the backtesting data source so it can slice/aggregate efficiently and cache
+            # results internally.
             multiplier, base_unit = parsed
-            actual_timestep = base_unit
-            actual_length = length * multiplier
-            needs_resampling = True
+            if getattr(self, "is_backtesting", False) or getattr(getattr(self, "broker", None), "IS_BACKTESTING_BROKER", False):
+                actual_timestep = original_timestep
+                actual_length = length
+                needs_resampling = False
+            else:
+                actual_timestep = base_unit
+                actual_length = length * multiplier
+                needs_resampling = True
         elif parsed:
             # Standard format (1 minute or 1 day)
             multiplier, base_unit = parsed
@@ -4031,59 +4233,78 @@ class Strategy(_Strategy):
             actual_length = length
             needs_resampling = False
 
-        # Only log once per asset to reduce noise
-        asset_key = f"{asset}_{length}_{original_timestep}"
-        if asset_key not in self._logged_get_historical_prices_assets:
-            if needs_resampling:
-                self.logger.info(f"Getting historical prices for {asset}, {length} bars of {original_timestep} (fetching {actual_length} {actual_timestep} bars)")
-            else:
-                self.logger.info(f"Getting historical prices for {asset}, {length} bars, {original_timestep}")
-            self._logged_get_historical_prices_assets.add(asset_key)
-
         asset = self._sanitize_user_asset(asset)
 
         asset = self.crypto_assets_to_tuple(asset, quote)
         if not actual_timestep:
             actual_timestep = self.broker.data_source.get_timestep()
+
+        # Only log once per asset to reduce noise.
+        # PERF: avoid per-call f-string construction in hot loops; use a tuple key.
+        asset_key = (asset, int(length), original_timestep)
+        if asset_key not in self._logged_get_historical_prices_assets:
+            if needs_resampling:
+                self.logger.info(
+                    f"Getting historical prices for {asset}, {length} bars of {original_timestep} "
+                    f"(fetching {actual_length} {actual_timestep} bars)"
+                )
+            else:
+                self.logger.info(f"Getting historical prices for {asset}, {length} bars, {original_timestep}")
+            self._logged_get_historical_prices_assets.add(asset_key)
+
         effective_return_polars = return_polars
+
         # Call through to the appropriate data source. Only pass `return_polars` if supported
         # to maintain compatibility with live data sources that don't yet accept it.
-        import inspect
+        #
+        # PERF: avoid per-call nested function creation/dict allocations; keep this inline and cache
+        # `return_polars` support per data source type.
+        supports_cache = getattr(self, "_get_hist_supports_return_polars_by_ds_type", None)
+        if supports_cache is None:
+            supports_cache = {}
+            setattr(self, "_get_hist_supports_return_polars_by_ds_type", supports_cache)
 
-        def _call_get_hist(ds):
-            fn = ds.get_historical_prices
-            params = inspect.signature(fn).parameters
-            supports_return_polars = (
-                "return_polars" in params
-                or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        ds = self.broker.data_source
+        if self.broker.option_source and getattr(asset, "asset_type", None) == "option":
+            ds = self.broker.option_source
+
+        ds_type = type(ds)
+        supports_return_polars = supports_cache.get(ds_type)
+        if supports_return_polars is None:
+            try:
+                params = inspect.signature(ds_type.get_historical_prices).parameters
+                supports_return_polars = (
+                    "return_polars" in params
+                    or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+                )
+            except Exception:
+                # Conservative default: if we can't inspect, assume it does NOT support return_polars
+                # so we don't raise TypeError by passing an unknown kwarg.
+                supports_return_polars = False
+            supports_cache[ds_type] = bool(supports_return_polars)
+
+        fn = ds.get_historical_prices
+        if supports_return_polars:
+            bars = fn(
+                asset,
+                actual_length,  # Use the actual length for fetching
+                timestep=actual_timestep,
+                timeshift=timeshift,
+                exchange=exchange,
+                include_after_hours=include_after_hours,
+                quote=quote,
+                return_polars=effective_return_polars,
             )
-
-            common_kwargs = dict(
-                timestep=actual_timestep,  # Use the actual timestep for fetching
+        else:
+            bars = fn(
+                asset,
+                actual_length,  # Use the actual length for fetching
+                timestep=actual_timestep,
                 timeshift=timeshift,
                 exchange=exchange,
                 include_after_hours=include_after_hours,
                 quote=quote,
             )
-            if supports_return_polars:
-                return fn(
-                    asset,
-                    actual_length,  # Use the actual length for fetching
-                    return_polars=effective_return_polars,
-                    **common_kwargs,
-                )
-            else:
-                return fn(
-                    asset,
-                    actual_length,  # Use the actual length for fetching
-                    **common_kwargs,
-                )
-
-        # Get the raw data
-        if self.broker.option_source and asset.asset_type == "option":
-            bars = _call_get_hist(self.broker.option_source)
-        else:
-            bars = _call_get_hist(self.broker.data_source)
 
         # If we need to resample the data
         if needs_resampling and bars and len(bars) > 0:
@@ -4177,7 +4398,7 @@ class Strategy(_Strategy):
         max_workers: int = 200,
         exchange: str = None,
         include_after_hours: bool = True,
-        sleep_time: float = 0.1
+        sleep_time: float | None = None,
     ):
         """Get historical pricing data for the list of assets.
 
@@ -4209,6 +4430,11 @@ class Strategy(_Strategy):
         include_after_hours : bool
             ``True`` by default. If ``False``, only return bars that are during
             regular trading hours. If ``True``, return all bars. Currently only works for Interactive Brokers.
+        sleep_time : float, optional
+            Sleep between per-asset fetches to reduce the likelihood of upstream rate limiting.
+            When omitted (``None``), LumiBot defaults to:
+            - ``0`` for backtesting data sources
+            - ``0.1`` seconds for live data sources
 
         Returns
         -------
@@ -4244,6 +4470,11 @@ class Strategy(_Strategy):
             self._logged_get_historical_prices_assets.add(assets_key)
 
         assets = [self._sanitize_user_asset(asset) for asset in assets]
+
+        effective_sleep_time = sleep_time
+        if effective_sleep_time is None:
+            data_source = getattr(getattr(self, "broker", None), "data_source", None)
+            effective_sleep_time = 0.0 if getattr(data_source, "IS_BACKTESTING_DATA_SOURCE", False) else 0.1
         return self.broker.data_source.get_bars(
             assets,
             length,
@@ -4252,7 +4483,7 @@ class Strategy(_Strategy):
             chunk_size=chunk_size,
             max_workers=max_workers,
             exchange=exchange,
-            sleep_time=sleep_time
+            sleep_time=effective_sleep_time
         )
 
     def get_bars(
@@ -4264,7 +4495,7 @@ class Strategy(_Strategy):
         chunk_size: int = 100,
         max_workers: int = 200,
         exchange: str = None,
-        sleep_time: float = 0.1
+        sleep_time: float | None = None,
     ):
         """
         This method is deprecated and will be removed in a future version.

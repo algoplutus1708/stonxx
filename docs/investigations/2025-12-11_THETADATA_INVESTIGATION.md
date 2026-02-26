@@ -82,7 +82,7 @@ This is NOT a data availability issue from ThetaData. The option contract `GOOG 
 ## Working Components
 
 ### DNS and Elastic IP - VERIFIED WORKING
-- DNS: `data-downloader.lumiwealth.com` resolves to `34.232.207.152`
+- DNS: (redacted) resolves to (redacted)
 - Elastic IP is properly associated with the data downloader instance
 
 ### S3 Caching - VERIFIED WORKING
@@ -173,7 +173,7 @@ This is NOT a data availability issue from ThetaData. The option contract `GOOG 
 
 ## Current Status (as of 20:21 UTC)
 
-**API Server:** Working - Uvicorn running at http://data-downloader.lumiwealth.com:8080
+**API Server:** Working - Uvicorn running at the configured downloader base URL
 **Queue System:** Working - `/queue/stats` endpoint responding
 **ThetaTerminal:** NOT WORKING - Process keeps dying immediately after launch
 **Active Workers:** 0 (no workers available to process queue requests)
@@ -231,7 +231,7 @@ The supervisor tried twice then gave up. The `exit_code=None` is suspicious - it
 ## Environment
 
 ```
-DATADOWNLOADER_BASE_URL=http://data-downloader.lumiwealth.com:8080
+DATADOWNLOADER_BASE_URL=https://<your-downloader-host>:8080
 LUMIBOT_CACHE_BACKEND=s3
 LUMIBOT_CACHE_MODE=readwrite
 LUMIBOT_CACHE_S3_VERSION=v28

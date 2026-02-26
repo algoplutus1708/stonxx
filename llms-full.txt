@@ -8447,7 +8447,7 @@ DATADOWNLOADER_BASE_URL
 * Purpose: Points LumiBot at a remote downloader service that can
   fetch ThetaData on demand.
 
-* Example: "http://data-downloader.lumiwealth.com:8080"
+* Example: "http://localhost:8080" (local) or "https://<your-downloader-host>:8080" (remote)
 
 
 DATADOWNLOADER_API_KEY / DATADOWNLOADER_API_KEY_HEADER
@@ -12691,7 +12691,7 @@ class lumibot.data_sources.data_source.DataSource(api_key: str | None = None, de
 
    get_datetime_range(length, timestep='minute', timeshift=None)
 
-   abstractmethod get_historical_prices(asset, length, timestep='', timeshift=None, quote=None, exchange=None, include_after_hours=True, return_polars=False) -> Bars
+   abstractmethod get_historical_prices(asset, length, timestep='', timeshift=None, quote=None, exchange=None, include_after_hours=True, **kwargs) -> Bars
 
       Get bars for a given asset, going back in time from now, getting
       length number of bars by timestep. For example, with a length of
@@ -12728,18 +12728,11 @@ class lumibot.data_sources.data_source.DataSource(api_key: str | None = None, de
          * **include_after_hours** (*bool*) -- Whether to include
            after hours data.
 
-         * **return_polars** (*bool*) -- If True, returns Polars
-           DataFrame via bars.df (2-3x faster for indicator
-           calculations). All data sources support this parameter. The
-           Bars class automatically converts pandas→polars when
-           needed. Default is False for backward compatibility
-           (returns pandas).
+         * **return_polars** (*bool*, deprecated) -- Deprecated and will be removed. Do not use in strategy code.
+           Use bars.pandas_df and pandas operations; do not depend on the DataFrame backend.
 
       Returns:
-         The bars for the asset. Access via bars.df which returns: -
-         Polars DataFrame if return_polars=True (recommended for
-         performance) - Pandas DataFrame if return_polars=False
-         (default, backward compatible)
+         The bars for the asset. For strategy code, prefer bars.pandas_df for a pandas DataFrame.
 
       Return type:
          Bars
@@ -12939,7 +12932,7 @@ class lumibot.data_sources.pandas_data.PandasData(*args, pandas_data=None, auto_
       Return type:
          dict
 
-   get_historical_prices(asset: Asset, length: int, timestep: str = None, timeshift: int = None, quote: Asset = None, exchange: str = None, include_after_hours: bool = True, return_polars: bool = False)
+   get_historical_prices(asset: Asset, length: int, timestep: str = None, timeshift: int = None, quote: Asset = None, exchange: str = None, include_after_hours: bool = True, **kwargs)
 
       Get bars for a given asset
 
@@ -13897,7 +13890,7 @@ lumibot.strategies.strategy.Strategy.get_historical_prices_for_assets(self, asse
 self.get_historical_prices
 **************************
 
-lumibot.strategies.strategy.Strategy.get_historical_prices(self, asset: Asset | str, length: int, timestep: str = '', timeshift: int | timedelta | None = None, quote: Asset = None, exchange: str = None, include_after_hours: bool = True, return_polars: bool = False)
+lumibot.strategies.strategy.Strategy.get_historical_prices(self, asset: Asset | str, length: int, timestep: str = '', timeshift: int | timedelta | None = None, quote: Asset = None, exchange: str = None, include_after_hours: bool = True, **kwargs)
 
    Get historical pricing data for a given symbol or asset.
 
@@ -13960,16 +13953,14 @@ lumibot.strategies.strategy.Strategy.get_historical_prices(self, asset: Asset | 
         hours data. Default is True. Currently only works with
         Interactive Brokers.
 
-      * **return_polars** (*bool*) -- If True, return Bars with Polars
-        DataFrame for better performance. Default is False (returns
-        pandas). When False and data is in Polars format, a warning
-        will be issued about the conversion.
+      * **return_polars** (*bool*, deprecated) -- Deprecated and will be removed. Do not use in strategy code.
+        Use bars.pandas_df and pandas operations; do not depend on the DataFrame backend.
 
    Returns:
       The bars object with all the historical pricing data. Please
       check the "Entities.Bars" object documentation for more details
-      on how to use Bars objects. To get a "DataFrame" from the Bars
-      object, use "bars.df".
+      on how to use Bars objects. To get a pandas "DataFrame" from the Bars
+      object, use "bars.pandas_df".
 
    Return type:
       Bars
@@ -13983,10 +13974,10 @@ lumibot.strategies.strategy.Strategy.get_historical_prices(self, asset: Asset | 
    >>> # Get the data for SPY for the last 2 days
    >>> bars =  self.get_historical_prices("SPY", 2, "day")
    >>> # To get the DataFrame of SPY data
-   >>> df = bars.df
+   >>> df = bars.pandas_df
    >>>
    >>> # Then, to get the DataFrame of SPY data
-   >>> df = bars.df
+   >>> df = bars.pandas_df
    >>> last_ohlc = df.iloc[-1] # Get the last row of the DataFrame (the most recent pricing data we have)
    >>> self.log_message(f"Last price of BTC in USD: {last_ohlc['close']}, and the open price was {last_ohlc['open']}")
 

@@ -116,8 +116,11 @@ class TestContinuousFuturesResolution(unittest.TestCase):
         contract = asset.resolve_continuous_futures_contract(reference_date=datetime(2026, 1, 1))
         self.assertEqual(contract, 'ESH26')
 
-        pre_trigger = datetime(2025, 12, 8)
-        post_trigger = datetime(2025, 12, 9)
+        # Roll triggers are shifted slightly away from midnight (see futures_roll._calculate_roll_trigger)
+        # to avoid edge-case gaps/overwrites at exact session boundaries for certain data sources.
+        # Use times that straddle the trigger minute.
+        pre_trigger = datetime(2025, 12, 9, 0, 4)
+        post_trigger = datetime(2025, 12, 9, 0, 6)
 
         year_pre, month_pre = futures_roll.determine_contract_year_month("ES", pre_trigger)
         expected_pre = asset._build_contract_variants(f"ES{FUTURES_MONTH_CODES[month_pre]}", year_pre)[2]

@@ -34,7 +34,7 @@ jobs:
           pip install -r requirements_dev.txt
           pip install build
 
-      - name: Validate tag version matches setup.py + CHANGELOG.md
+      - name: Validate tag version matches setup.py
         run: |
           set -euo pipefail
           python - <<'PY'
@@ -50,16 +50,12 @@ jobs:
           version = tag.removeprefix("v")
 
           setup_text = Path("setup.py").read_text(encoding="utf-8")
-          m = re.search(r"version\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]", setup_text)
+          m = re.search(r"version\s*=\s*['\"]([^'\"]+)['\"]", setup_text)
           setup_version = m.group(1) if m else None
           if setup_version != version:
             raise SystemExit(f"Tag version {version} != setup.py version {setup_version}")
 
-          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-          if not re.search(rf"^##\\s+{re.escape(version)}\\b", changelog, flags=re.MULTILINE):
-            raise SystemExit(f"CHANGELOG.md missing header for version {version}")
-
-          print(f"OK: tag={tag} setup.py={setup_version} changelog_header=present")
+          print(f"OK: tag={tag} setup.py={setup_version}")
           PY
 
       - name: Run tests
@@ -87,37 +83,12 @@ jobs:
           set -euo pipefail
           python -m build
 
-      - name: Extract release notes from CHANGELOG.md
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          from __future__ import annotations
-
-          import os
-          import re
-          from pathlib import Path
-
-          version = os.environ["GITHUB_REF_NAME"].removeprefix("v")
-          text = Path("CHANGELOG.md").read_text(encoding="utf-8")
-
-          # Capture from "## X.Y.Z" until the next "## " header.
-          m = re.search(rf"^##\\s+{re.escape(version)}\\b.*?$\\n(.*?)(?=^##\\s+\\S|\\Z)", text, flags=re.MULTILINE | re.DOTALL)
-          if not m:
-            raise SystemExit(f"Could not extract CHANGELOG.md section for {version}")
-          notes = m.group(0).strip()
-
-          out = Path("release_notes.md")
-          out.write_text(notes + \"\\n\", encoding="utf-8")
-          print(f\"Wrote {out}\")
-          PY
-
-      - name: Upload dist + notes
+      - name: Upload dist
         uses: actions/upload-artifact@v4
         with:
-          name: dist-and-notes
+          name: dist
           path: |
             dist/*
-            release_notes.md
 
   publish:
     name: Publish to PyPI + Create GitHub Release
@@ -127,18 +98,20 @@ jobs:
     # Optional: configure this environment in GitHub settings to require approvals.
     environment: pypi
     steps:
-      - name: Download dist + notes
+      - name: Download dist
         uses: actions/download-artifact@v4
         with:
-          name: dist-and-notes
+          name: dist
+          path: dist
 
-      - name: Publish to PyPI (Trusted Publisher)
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          # Prefer API token publish. This avoids Trusted Publisher config drift.
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          body_path: release_notes.md
-          generate_release_notes: false
+          generate_release_notes: true

@@ -19,6 +19,7 @@ from termcolor import colored
 
 from lumibot.data_sources import InteractiveBrokersData
 from lumibot.tools.lumibot_logger import get_logger
+from lumibot.tools.symbol_normalization import normalize_symbol_for_broker
 
 logger = get_logger(__name__)
 
@@ -132,7 +133,9 @@ class InteractiveBrokers(Broker):
         into a position object"""
         if broker_position["asset_type"] == "stock":
             asset = Asset(
-                symbol=broker_position["symbol"],
+                symbol=self._normalize_symbol_for_internal(
+                    broker_position["symbol"], asset_type=Asset.AssetType.STOCK
+                ),
             )
         elif broker_position["asset_type"] == "future":
             asset = Asset(
@@ -143,7 +146,9 @@ class InteractiveBrokers(Broker):
             )
         elif broker_position["asset_type"] == "option":
             asset = Asset(
-                symbol=broker_position["symbol"],
+                symbol=self._normalize_symbol_for_internal(
+                    broker_position["symbol"], asset_type=Asset.AssetType.OPTION
+                ),
                 asset_type="option",
                 expiration=broker_position["expiration"],
                 strike=broker_position["strike"],
@@ -270,6 +275,9 @@ class InteractiveBrokers(Broker):
         return order
 
     def _parse_order_object(self, strategy_name, contract, quantity, action, limit_price = None, stop_price = None, time_in_force = None, good_till_date = None):
+        asset_type = [k for k, v in TYPE_MAP.items() if v == contract.secType][0]
+        symbol = self._normalize_symbol_for_internal(contract.localSymbol, asset_type=asset_type)
+
         expiration = None
         multiplier = 1
         if contract.secType in ["OPT", "FUT"]:
@@ -288,8 +296,8 @@ class InteractiveBrokers(Broker):
         order = OrderLum(
             strategy_name,
             Asset(
-                symbol=contract.localSymbol,
-                asset_type=[k for k, v in TYPE_MAP.items() if v == contract.secType][0],
+                symbol=symbol,
+                asset_type=asset_type,
                 expiration=expiration,
                 strike=strike,
                 right=right,
@@ -1462,7 +1470,15 @@ class IBApp(IBWrapper, IBClient):
         """Creates new contract objects."""
         contract = Contract()
 
-        contract.symbol = str(asset.symbol).upper()
+        broker_symbol = asset.symbol
+        if asset.asset_type in {Asset.AssetType.STOCK, Asset.AssetType.OPTION, Asset.AssetType.INDEX}:
+            broker_symbol = normalize_symbol_for_broker(
+                asset.symbol,
+                broker_name="interactive_brokers",
+                asset_type=asset.asset_type,
+            )
+
+        contract.symbol = str(broker_symbol).upper()
         contract.secType = TYPE_MAP[asset.asset_type]
         if exchange is None:
             contract.exchange = "SMART"
@@ -1616,10 +1632,18 @@ class IBApp(IBWrapper, IBClient):
         # Initialize the combo contract
         combo_contract = Contract()
         # Construct the symbol with commas if the symbols are different
-        if len(set([child_order.asset.symbol for child_order in order.child_orders])) > 1:
-            combo_contract.symbol = ",".join([child_order.asset.symbol for child_order in order.child_orders])
+        child_symbols = [
+            normalize_symbol_for_broker(
+                child_order.asset.symbol,
+                broker_name="interactive_brokers",
+                asset_type=child_order.asset.asset_type,
+            )
+            for child_order in order.child_orders
+        ]
+        if len(set(child_symbols)) > 1:
+            combo_contract.symbol = ",".join(child_symbols)
         else:
-            combo_contract.symbol = order.child_orders[0].asset.symbol
+            combo_contract.symbol = child_symbols[0]
         combo_contract.secType = "BAG"
         combo_contract.exchange = exchange if exchange else "SMART"
         combo_contract.currency = order.child_orders[0].quote.symbol  # Assuming all child orders have the same currency

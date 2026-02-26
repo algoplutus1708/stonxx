@@ -123,7 +123,7 @@ class DataSource(ABC):
 
     @abstractmethod
     def get_historical_prices(
-        self, asset, length, timestep="", timeshift=None, quote=None, exchange=None, include_after_hours=True, return_polars=False
+        self, asset, length, timestep="", timeshift=None, quote=None, exchange=None, include_after_hours=True, **kwargs
     ) -> Bars:
         """
         Get bars for a given asset, going back in time from now, getting length number of bars by timestep.
@@ -153,17 +153,15 @@ class DataSource(ABC):
             The exchange to get the bars for.
         include_after_hours : bool
             Whether to include after hours data.
-        return_polars : bool
-            If True, returns Polars DataFrame via bars.df (2-3x faster for indicator calculations).
-            All data sources support this parameter. The Bars class automatically converts
-            pandas→polars when needed. Default is False for backward compatibility (returns pandas).
+        return_polars : bool (deprecated)
+            Deprecated. Do not use in strategy code. This keyword will be removed in a future release.
+            Strategy logic should use pandas operations on ``bars.pandas_df`` and should not depend on
+            the underlying DataFrame backend.
 
         Returns
         -------
         Bars
-            The bars for the asset. Access via bars.df which returns:
-            - Polars DataFrame if return_polars=True (recommended for performance)
-            - Pandas DataFrame if return_polars=False (default, backward compatible)
+            The bars for the asset. For strategy code, prefer ``bars.pandas_df`` for a pandas DataFrame.
         """
         pass
 
@@ -305,6 +303,7 @@ class DataSource(ABC):
         # Define mapping from timestep units to equivalent minutes
         time_unit_map = {
             "minute": 1,
+            "min": 1,  # Common shorthand (e.g., "15min")
             "hour": 60,
             "day": 24 * 60,
             "m": 1,  # "M" is for minutes
@@ -336,7 +335,16 @@ class DataSource(ABC):
             quantity_in_minutes = quantity * time_unit_map[unit]
             # Convert minutes to timedelta
             delta = timedelta(minutes=quantity_in_minutes)
-            return delta, unit
+            canonical_unit = {
+                "m": "minute",
+                "min": "minute",
+                "minute": "minute",
+                "h": "hour",
+                "hour": "hour",
+                "d": "day",
+                "day": "day",
+            }.get(unit, unit)
+            return delta, canonical_unit
         else:
             raise ValueError(f"Unknown unit: {unit}. Valid units are minute, hour, day, M, H, D")
 
@@ -378,11 +386,15 @@ class DataSource(ABC):
         quote=None,
         exchange=None,
         include_after_hours=True,
-        sleep_time=0.1,
+        sleep_time: float | None = None,
     ):
         """Get bars for the list of assets"""
         if not isinstance(assets, list):
             assets = [assets]
+
+        effective_sleep_time = sleep_time
+        if effective_sleep_time is None:
+            effective_sleep_time = 0.0 if getattr(self, "IS_BACKTESTING_DATA_SOURCE", False) else 0.1
 
         def process_chunk(chunk):
             chunk_result = {}
@@ -405,7 +417,8 @@ class DataSource(ABC):
                     )
 
                     # Sleep to prevent rate limiting
-                    time.sleep(sleep_time)
+                    if effective_sleep_time:
+                        time.sleep(effective_sleep_time)
                 except Exception as e:
                     # Log once per asset to avoid spamming with a huge traceback
                     logger.warning(f"Error retrieving data for {base_asset.symbol}: {e}")

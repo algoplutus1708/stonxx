@@ -134,7 +134,7 @@ class MESMomentumSMA9PolarsNative(Strategy):
         if bars is None or bars.df is None:
             return
 
-        # Use polars DataFrame directly (no pandas conversion!)
+        # Operate on the polars DataFrame directly (no pandas conversion!)
         df = bars.df
         if df is None or df.height == 0:
             return

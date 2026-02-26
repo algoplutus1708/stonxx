@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, Optional, Union
 
+import numpy as np
 import pandas as pd
 import polars as pl
 import pytz
@@ -74,6 +75,21 @@ TYPICAL_FUTURES_MARGINS = {
     "DEFAULT": 5000,  # Conservative default
 }
 
+INDEX_ROOT_ALIASES = {
+    "SPXW": "SPX",
+    "RUTW": "RUT",
+    "VIXW": "VIX",
+    "NDXP": "NDX",
+}
+
+INDEX_LIKE_SYMBOLS = {
+    "SPX", "SPXW",
+    "NDX", "NDXP",
+    "VIX", "VIXW",
+    "RUT", "RUTW",
+    "XSP", "DJX", "OEX", "XEO",
+}
+
 
 def get_futures_margin_requirement(asset: Asset) -> float:
     """
@@ -117,7 +133,18 @@ class BacktestingBroker(Broker):
     # Metainfo
     IS_BACKTESTING_BROKER = True
 
-    def __init__(self, data_source, option_source=None, connect_stream=True, max_workers=20, config=None, **kwargs):
+    def __init__(
+        self,
+        data_source,
+        option_source=None,
+        connect_stream=True,
+        max_workers=20,
+        config=None,
+        option_early_assignment_enabled=False,
+        option_early_assignment_max_dte_days=1,
+        option_early_assignment_max_extrinsic=0.05,
+        **kwargs,
+    ):
         super().__init__(name="backtesting", data_source=data_source,
                          option_source=option_source, connect_stream=connect_stream, **kwargs)
         # Calling init methods
@@ -159,6 +186,24 @@ class BacktestingBroker(Broker):
         # This can add overhead and widen CSV outputs, so keep it disabled by default and gate behind
         # `LUMIBOT_BACKTEST_AUDIT=1`.
         self._backtest_audit_enabled = self._truthy_env(os.environ.get("LUMIBOT_BACKTEST_AUDIT"))
+
+        # Early-assignment model (short physical-settled options only).
+        # Opt-in by default; can be enabled per strategy via parameters.
+        self._option_early_assignment_default_enabled = self._coerce_to_bool(
+            option_early_assignment_enabled,
+            False,
+        )
+        self._option_early_assignment_default_max_dte_days = self._coerce_to_int(
+            option_early_assignment_max_dte_days,
+            1,
+            minimum=1,
+        )
+        self._option_early_assignment_default_max_extrinsic = self._coerce_to_float(
+            option_early_assignment_max_extrinsic,
+            0.05,
+            minimum=0.0,
+        )
+        self._option_early_assignment_last_eval = {}
         # Track end-of-data to prevent infinite loops when end date is in the future
         self._end_of_trading_days_reached = False
 
@@ -556,12 +601,10 @@ class BacktestingBroker(Broker):
         # Only advance time if there is positive time remaining.
         if time_to_close > 0:
             self._update_datetime(time_to_close)
-        # If the calculated time is non-positive, but the market was initially open (result > 0),
-        # advance by a minimal amount to prevent potential infinite loops if called repeatedly near close.
-        elif result > 0:  # Only if original result was strictly positive
-            logger.debug("Calculated time to close is non-positive. Advancing time by 1 second.")
-            self._update_datetime(1)
-        # Otherwise (result <= 0 initially), do nothing, market is already closed.
+        # If the calculated time is non-positive (e.g., exactly `minutes_before_closing` before
+        # the close), do nothing. Nudging by 1 second can shift the simulated timestamp off
+        # bar boundaries (e.g., 17:59:01), which breaks parity and can cause subtle lookups.
+        # Otherwise (result <= 0 initially), the market is already closed.
 
     # =========Positions functions==================
     def _pull_broker_position(self, asset):
@@ -614,7 +657,7 @@ class BacktestingBroker(Broker):
         # OCO order does not include the main parent (entry) order becuase that has been placed earlier. Only the
         # child (exit) orders are included in the list
         orders = []
-        if order.order_class != Order.OrderClass.OCO:
+        if order.order_class is not Order.OrderClass.OCO:
             orders.append(order)
 
         if order.is_parent():
@@ -655,7 +698,7 @@ class BacktestingBroker(Broker):
                     stop_loss_order = self._parse_broker_order(stop_loss_order, order.strategy)
                     orders.append(stop_loss_order)
 
-            elif order.order_class == Order.OrderClass.OCO:
+            elif order.order_class is Order.OrderClass.OCO:
                 stop_limit_price = getattr(order, "stop_limit_price", None)
                 stop_child_type = Order.OrderType.STOP_LIMIT if stop_limit_price else Order.OrderType.STOP
                 stop_loss_order = Order(
@@ -686,8 +729,8 @@ class BacktestingBroker(Broker):
 
             elif order.order_class in [Order.OrderClass.BRACKET, Order.OrderClass.OTO]:
                 side = Order.OrderSide.SELL if order.is_buy_order() else Order.OrderSide.BUY
-                if (order.order_class == Order.OrderClass.BRACKET or
-                        (order.order_class == Order.OrderClass.OTO and order.secondary_stop_price)):
+                if (order.order_class is Order.OrderClass.BRACKET or
+                        (order.order_class is Order.OrderClass.OTO and order.secondary_stop_price)):
                     secondary_stop_limit_price = getattr(order, "secondary_stop_limit_price", None)
                     secondary_trail_price = getattr(order, "secondary_trail_price", None)
                     secondary_trail_percent = getattr(order, "secondary_trail_percent", None)
@@ -713,8 +756,8 @@ class BacktestingBroker(Broker):
                     )
                     orders.append(stop_loss_order)
 
-                if (order.order_class == Order.OrderClass.BRACKET or
-                        (order.order_class == Order.OrderClass.OTO and order.secondary_limit_price)):
+                if (order.order_class is Order.OrderClass.BRACKET or
+                        (order.order_class is Order.OrderClass.OTO and order.secondary_limit_price)):
                     limit_order = Order(
                         order.strategy,
                         order.asset,
@@ -726,13 +769,20 @@ class BacktestingBroker(Broker):
                     )
                     orders.append(limit_order)
 
-                if order.order_class == Order.OrderClass.BRACKET:
+                if order.order_class is Order.OrderClass.BRACKET:
                     stop_loss_order.dependent_order = limit_order
                     limit_order.dependent_order = stop_loss_order
 
         return orders
 
-    def _cancel_open_orders_for_asset(self, strategy_name: str, asset: Asset, exclude_identifiers: set | None = None):
+    def _cancel_open_orders_for_asset(
+        self,
+        strategy_name: str,
+        asset: Asset,
+        exclude_identifiers: set | None = None,
+        *,
+        cancel_sides: set | None = None,
+    ):
         """Cancel any still-active orders for the given asset in backtesting.
 
         When a position is force-closed (manual exit or cash settlement) we need to ensure any
@@ -777,6 +827,16 @@ class BacktestingBroker(Broker):
             for child in getattr(tracked_order, "child_orders", []) or []:
                 child_order_identifiers.add(child.identifier)
 
+        def _matches_cancel_sides(order: Order) -> bool:
+            if cancel_sides is None:
+                return True
+            if getattr(order, "side", None) in cancel_sides:
+                return True
+            for child in getattr(order, "child_orders", []) or []:
+                if _matches_cancel_sides(child):
+                    return True
+            return False
+
         for tracked_order in open_orders:
             if tracked_order.identifier in exclude_identifiers:
                 continue
@@ -786,6 +846,8 @@ class BacktestingBroker(Broker):
             if tracked_order.identifier in child_order_identifiers:
                 continue
             if tracked_order.asset != asset:
+                continue
+            if not _matches_cancel_sides(tracked_order):
                 continue
             if in_stream_thread:
                 _cancel_inline(tracked_order)
@@ -824,7 +886,27 @@ class BacktestingBroker(Broker):
             if position.quantity == 0:
                 logger.info(f"Position {position} liquidated")
                 self._filled_positions.remove(position)
-                self._cancel_open_orders_for_asset(order.strategy, order.asset, {order.identifier})
+                # If the position is flat after this fill, ensure any remaining close-only orders
+                # (stops/trailing stops/limits) do not continue to trade against a zero position.
+                #
+                # WHY: Some strategies (including example strategies) submit multiple exit orders
+                # without explicitly wrapping them in a BRACKET/OCO. In broker reality, "SELL"
+                # is treated as closing a long position unless the user explicitly requests a short
+                # side (SELL_SHORT / SELL_TO_OPEN). When a long position is liquidated, remaining
+                # close-only SELL orders should be canceled rather than opening an unintended short.
+                cancel_sides = None
+                if getattr(order, "side", None) in {Order.OrderSide.SELL, Order.OrderSide.SELL_TO_CLOSE}:
+                    cancel_sides = {Order.OrderSide.SELL, Order.OrderSide.SELL_TO_CLOSE}
+                elif getattr(order, "side", None) in {Order.OrderSide.BUY_TO_COVER, Order.OrderSide.BUY_TO_CLOSE}:
+                    cancel_sides = {Order.OrderSide.BUY_TO_COVER, Order.OrderSide.BUY_TO_CLOSE}
+
+                if cancel_sides is not None:
+                    self._cancel_open_orders_for_asset(
+                        order.strategy,
+                        order.asset,
+                        {order.identifier},
+                        cancel_sides=cancel_sides,
+                    )
         else:
             self._filled_positions.append(position)  # New position, add it to the tracker
 
@@ -866,16 +948,9 @@ class BacktestingBroker(Broker):
 
     def _process_cash_settlement(self, order, price, quantity):
         """
-        BackTesting needs to create/update positions when orders are filled becuase there is no broker to do it
+        Delegate to Broker-level lifecycle handling.
         """
-        existing_position = self.get_tracked_position(order.strategy, order.asset)
         super()._process_cash_settlement(order, price, quantity)
-        if existing_position:
-            existing_position.add_order(order, quantity)  # Add will update quantity, but not double count the order
-            if existing_position.quantity == 0:
-                logger.info("Position %r liquidated" % existing_position)
-                self._filled_positions.remove(existing_position)
-                self._cancel_open_orders_for_asset(order.strategy, order.asset, {order.identifier})
 
     def _update_parent_order_status(self, order: Order):
         """Update the status of a parent order based on the status of its child orders."""
@@ -933,24 +1008,18 @@ class BacktestingBroker(Broker):
         # Optional audit trail (submission-time context).
         #
         # Invariant: audit collection must never break backtests; any errors must be swallowed.
-        try:
-            self._audit_merge(order, self._audit_submit_fields(order), overwrite=False)
-        except Exception:
-            pass
-
-        # NOTE: This code is to address Tradier API requirements, they want is as "to_open" or "to_close" instead of just "buy" or "sell"
-        # If the order has a "buy_to_open" or "buy_to_close" side, then we should change it to "buy"
-        if order.is_buy_order():
-            order.side = Order.OrderSide.BUY
-        # If the order has a "sell_to_open" or "sell_to_close" side, then we should change it to "sell"
-        if order.is_sell_order():
-            order.side = Order.OrderSide.SELL
+        audit_enabled = self._audit_enabled()
+        if audit_enabled:
+            try:
+                self._audit_merge(order, self._audit_submit_fields(order), overwrite=False)
+            except Exception:
+                pass
 
         # Submit regular and Bracket/OTO orders now.
         # OCO orders have no parent orders, so do not submit this "main" order. The children of an OCO will be
         # submitted below. Bracket/OTO orders will be submitted here, but their child orders will not be submitted
         # until the parent order is filled
-        if order.order_class != Order.OrderClass.OCO:
+        if order.order_class is not Order.OrderClass.OCO:
             order.update_raw(order)
             self.stream.dispatch(
                 self.NEW_ORDER,
@@ -970,15 +1039,11 @@ class BacktestingBroker(Broker):
             for child in order.child_orders:
                 # Ensure OCO child orders get the same submission-time audit context (and do not
                 # rely solely on the parent placeholder).
-                try:
-                    self._audit_merge(child, self._audit_submit_fields(child), overwrite=False)
-                except Exception:
-                    pass
-
-                if child.is_buy_order():
-                    child.side = Order.OrderSide.BUY
-                elif child.is_sell_order():
-                    child.side = Order.OrderSide.SELL
+                if audit_enabled:
+                    try:
+                        self._audit_merge(child, self._audit_submit_fields(child), overwrite=False)
+                    except Exception:
+                        pass
 
                 child.parent_identifier = order.identifier
                 child.update_raw(child)
@@ -1100,90 +1165,70 @@ class BacktestingBroker(Broker):
             wait_until_complete=True,
         )
 
-    def cash_settle_options_contract(self, position, strategy):
-        """Cash settle an options contract position. This method will calculate the
-        profit/loss of the position and add it to the cash position of the strategy. This
-        method will not actually sell the contract, it will just add the profit/loss to the
-        cash position and set the position to 0. Note: only for backtesting"""
+    def _infer_underlying_asset_from_strategy(self, strategy, symbol: str) -> Asset | None:
+        """Best-effort: reuse the strategy's explicit non-option underlying asset when available."""
+        try:
+            symbol_norm = (symbol or "").upper()
+        except Exception:
+            symbol_norm = symbol
 
-        # Check to make sure we are in backtesting mode
-        if not self.IS_BACKTESTING_BROKER:
-            logger.error("Cannot cash settle options contract in live trading")
-            return
+        vars_obj = getattr(strategy, "vars", None)
+        if vars_obj is None:
+            return None
 
-        # Check that the position is an options contract
-        if position.asset.asset_type != "option":
-            logger.error(f"Cannot cash settle non-option contract {position.asset}")
-            return
+        candidates: list[Asset] = []
+        try:
+            if hasattr(vars_obj, "all"):
+                values = list(vars_obj.all().values())
+            else:
+                values = list(getattr(vars_obj, "_vars_dict", {}).values())
+        except Exception:
+            values = []
 
-        def _infer_underlying_asset_from_strategy(symbol: str) -> Asset | None:
-            """Best-effort: reuse the strategy's own underlying Asset object when available.
+        def _maybe_add(value: object) -> None:
+            if not isinstance(value, Asset):
+                return
+            if getattr(value, "symbol", None) != symbol_norm:
+                return
+            if getattr(value, "asset_type", None) == Asset.AssetType.OPTION:
+                return
+            candidates.append(value)
 
-            Some Strategy Library demos construct option Assets without `underlying_asset=...`.
-            In that case we should NOT guess based on symbol strings; instead, look for an
-            explicit non-option Asset already attached to the strategy (e.g. `self.vars.underlying_asset`).
-            """
-            try:
-                symbol_norm = (symbol or "").upper()
-            except Exception:
-                symbol_norm = symbol
+        for value in values:
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    _maybe_add(item)
+            else:
+                _maybe_add(value)
 
-            vars_obj = getattr(strategy, "vars", None)
-            if vars_obj is None:
-                return None
-
-            candidates: list[Asset] = []
-            try:
-                if hasattr(vars_obj, "all"):
-                    values = list(vars_obj.all().values())
-                else:
-                    values = list(getattr(vars_obj, "_vars_dict", {}).values())
-            except Exception:
-                values = []
-
-            def _maybe_add(value: object) -> None:
-                if not isinstance(value, Asset):
-                    return
-                if getattr(value, "symbol", None) != symbol_norm:
-                    return
-                if getattr(value, "asset_type", None) == Asset.AssetType.OPTION:
-                    return
-                candidates.append(value)
-
-            for value in values:
-                if isinstance(value, (list, tuple, set)):
-                    for item in value:
-                        _maybe_add(item)
-                else:
-                    _maybe_add(value)
-
-            if not candidates:
-                return None
-            if len(candidates) == 1:
-                return candidates[0]
-
-            for candidate in candidates:
-                if getattr(candidate, "asset_type", None) == Asset.AssetType.INDEX:
-                    return candidate
+        if not candidates:
+            return None
+        if len(candidates) == 1:
             return candidates[0]
 
-        # First check if the option asset has an underlying asset, otherwise try to reuse the
-        # strategy's explicit underlying Asset (keeps asset_type deterministic for indices).
-        underlying_asset = position.asset.underlying_asset
-        if underlying_asset is None:
-            underlying_asset = _infer_underlying_asset_from_strategy(getattr(position.asset, "symbol", None))
-        if underlying_asset is None:
-            underlying_asset = Asset(symbol=position.asset.symbol, asset_type="stock")
+        for candidate in candidates:
+            if getattr(candidate, "asset_type", None) == Asset.AssetType.INDEX:
+                return candidate
+        return candidates[0]
 
-        # Get the price of the underlying asset.
+    def _resolve_underlying_asset_for_option(self, option_asset: Asset, strategy) -> Asset:
+        underlying_asset = option_asset.underlying_asset
+        if underlying_asset is None:
+            underlying_asset = self._infer_underlying_asset_from_strategy(strategy, getattr(option_asset, "symbol", None))
+        if underlying_asset is None:
+            underlying_asset = Asset(symbol=option_asset.symbol, asset_type="stock")
+        return underlying_asset
+
+    def _get_underlying_price_for_settlement(self, underlying_asset: Asset, strategy) -> tuple[float, Asset]:
         underlying_price = None
         last_price_error = None
+        resolved_asset = underlying_asset
 
         def _try_last_price(asset: Asset) -> None:
-            nonlocal underlying_price, last_price_error, underlying_asset
+            nonlocal underlying_price, last_price_error, resolved_asset
             try:
                 underlying_price = self.get_last_price(asset)
-                underlying_asset = asset
+                resolved_asset = asset
                 last_price_error = None
             except Exception as exc:
                 underlying_price = None
@@ -1191,42 +1236,23 @@ class BacktestingBroker(Broker):
 
         _try_last_price(underlying_asset)
 
-        # Index options can arrive without an explicit underlying_asset. In that case we initially
-        # try the underlying as a stock (historical behavior), but SPX/NDX/VIX-style index symbols
-        # are not valid stocks in ThetaData and can produce placeholder-only minute series. When that
-        # happens (or when the price is None), retry as an index before failing.
-        if underlying_price is None and getattr(underlying_asset, "asset_type", None) == Asset.AssetType.STOCK:
-            symbol_upper = str(getattr(underlying_asset, "symbol", "") or "").upper()
-            index_root_aliases = {
-                "SPXW": "SPX",
-                "RUTW": "RUT",
-                "VIXW": "VIX",
-                "NDXP": "NDX",
-            }
-            index_root = index_root_aliases.get(symbol_upper, symbol_upper)
-            index_like_symbols = {
-                "SPX", "SPXW",
-                "NDX", "NDXP",
-                "VIX", "VIXW",
-                "RUT", "RUTW",
-                "XSP", "DJX", "OEX", "XEO",
-            }
-            if symbol_upper in index_like_symbols:
+        if underlying_price is None and getattr(resolved_asset, "asset_type", None) == Asset.AssetType.STOCK:
+            symbol_upper = str(getattr(resolved_asset, "symbol", "") or "").upper()
+            index_root = INDEX_ROOT_ALIASES.get(symbol_upper, symbol_upper)
+            if symbol_upper in INDEX_LIKE_SYMBOLS:
                 _try_last_price(Asset(symbol=index_root, asset_type="index"))
 
         if underlying_price is None and last_price_error is not None:
-            # Common production failure mode: ThetaData returns placeholder-only minute bars for an
-            # index while daily close remains available. Use day-close as the settlement proxy.
             message = str(last_price_error)
             if "[THETA][COVERAGE]" in message:
                 try:
-                    bars = strategy.get_historical_prices(underlying_asset, length=1, timestep="day")
+                    bars = strategy.get_historical_prices(resolved_asset, length=1, timestep="day")
                     df = getattr(bars, "df", None)
                     if df is not None and not df.empty and "close" in df.columns:
                         underlying_price = float(df["close"].iloc[-1])
                         logger.warning(
-                            "[CASH_SETTLE][FALLBACK] get_last_price(%s) failed (%s); settling using daily close=%s",
-                            underlying_asset,
+                            "[OPTION_SETTLEMENT][FALLBACK] get_last_price(%s) failed (%s); settling using daily close=%s",
+                            resolved_asset,
                             message.splitlines()[0],
                             underlying_price,
                         )
@@ -1236,57 +1262,338 @@ class BacktestingBroker(Broker):
         if underlying_price is None:
             if last_price_error is not None:
                 raise last_price_error
-            raise ValueError(f"Unable to price underlying {underlying_asset} for cash settlement of {position.asset}")
+            raise ValueError(f"Unable to price underlying {resolved_asset} for settlement")
 
-        # Calculate profit/loss per contract
-        if position.asset.right == "CALL":
-            profit_loss_per_contract = underlying_price - position.asset.strike
+        return float(underlying_price), resolved_asset
+
+    def _intrinsic_value_per_contract(self, option_asset: Asset, underlying_price: float) -> float:
+        if option_asset.right == Asset.OptionRight.CALL:
+            return max(0.0, float(underlying_price) - float(option_asset.strike))
+        return max(0.0, float(option_asset.strike) - float(underlying_price))
+
+    @staticmethod
+    def _coerce_to_bool(value, default: bool) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            value_norm = value.strip().lower()
+            if value_norm in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+            if value_norm in {"0", "false", "f", "no", "n", "off"}:
+                return False
+        return bool(value)
+
+    @staticmethod
+    def _coerce_to_int(value, default: int, minimum: int | None = None) -> int:
+        try:
+            result = int(value)
+        except Exception:
+            result = int(default)
+        if minimum is not None:
+            result = max(minimum, result)
+        return result
+
+    @staticmethod
+    def _coerce_to_float(value, default: float, minimum: float | None = None) -> float:
+        try:
+            result = float(value)
+        except Exception:
+            result = float(default)
+        if minimum is not None:
+            result = max(minimum, result)
+        return result
+
+    def _resolve_early_assignment_config(self, strategy) -> tuple[bool, int, float]:
+        parameters = getattr(strategy, "parameters", None)
+        if not isinstance(parameters, dict):
+            parameters = {}
+
+        default_enabled = getattr(self, "_option_early_assignment_default_enabled", False)
+        default_max_dte_days = getattr(self, "_option_early_assignment_default_max_dte_days", 1)
+        default_max_extrinsic = getattr(self, "_option_early_assignment_default_max_extrinsic", 0.05)
+
+        enabled = self._coerce_to_bool(
+            parameters.get("option_early_assignment_enabled"),
+            default_enabled,
+        )
+        max_dte_days = self._coerce_to_int(
+            parameters.get("option_early_assignment_max_dte_days"),
+            default_max_dte_days,
+            minimum=1,
+        )
+        max_extrinsic = self._coerce_to_float(
+            parameters.get("option_early_assignment_max_extrinsic"),
+            default_max_extrinsic,
+            minimum=0.0,
+        )
+        return enabled, max_dte_days, max_extrinsic
+
+    def _is_cash_settled_index_option(self, option_asset: Asset, underlying_asset: Asset) -> bool:
+        if getattr(underlying_asset, "asset_type", None) == Asset.AssetType.INDEX:
+            return True
+        symbol_upper = str(getattr(option_asset, "symbol", "") or "").upper()
+        return symbol_upper in INDEX_LIKE_SYMBOLS
+
+    def _dispatch_option_expiration_event(self, position, strategy, event_type: str, price: float) -> None:
+        side = Order.OrderSide.SELL if position.quantity > 0 else Order.OrderSide.BUY
+        order = strategy.create_order(position.asset, abs(position.quantity), side)
+        self.stream.dispatch(
+            event_type,
+            wait_until_complete=True,
+            order=order,
+            price=float(price),
+            filled_quantity=abs(float(position.quantity)),
+        )
+
+    def _dispatch_underlying_delivery_fill(
+        self,
+        strategy,
+        underlying_asset: Asset,
+        side: str,
+        quantity: float,
+        strike_price: float,
+        settlement_kind: str,
+    ) -> None:
+        if quantity <= 0:
+            return
+
+        order = strategy.create_order(underlying_asset, quantity, side)
+        # Tag delivery rows so downstream tooling can distinguish assignment/exercise fills.
+        order.order_type = settlement_kind
+        self._execute_filled_order(
+            order=order,
+            price=float(strike_price),
+            filled_quantity=Decimal(str(quantity)),
+            strategy=strategy,
+        )
+
+    def _get_underlying_delivery_side(self, option_asset: Asset, option_quantity: float) -> str:
+        if option_asset.right == Asset.OptionRight.CALL:
+            return Order.OrderSide.BUY if option_quantity > 0 else Order.OrderSide.SELL
+        return Order.OrderSide.SELL if option_quantity > 0 else Order.OrderSide.BUY
+
+    def _get_option_market_price_for_assignment(self, option_asset: Asset) -> float | None:
+        try:
+            option_price = self.get_last_price(option_asset)
+        except Exception:
+            return None
+        if option_price is None:
+            return None
+        try:
+            option_price = float(option_price)
+        except Exception:
+            return None
+        if math.isnan(option_price) or option_price <= 0:
+            return None
+        return option_price
+
+    def _run_backtest_option_lifecycle_tasks(self, strategy) -> None:
+        # Run conservative early-assignment checks near close.
+        self.process_early_assignment_contracts(strategy)
+
+        # Daily-cadence backtests rely on this path for expiration settlement.
+        timestep = getattr(getattr(self, "data_source", None), "_timestep", None)
+        if timestep == "day":
+            self.process_expired_option_contracts(strategy)
+
+    def process_early_assignment_contracts(self, strategy, force: bool = False) -> None:
+        enabled, max_dte_days, max_extrinsic = self._resolve_early_assignment_config(strategy)
+        if not enabled:
+            return
+
+        if not hasattr(self, "_option_early_assignment_last_eval"):
+            self._option_early_assignment_last_eval = {}
+
+        now = getattr(self, "datetime", None)
+        if now is None:
+            source = getattr(self, "data_source", None)
+            get_datetime = getattr(source, "get_datetime", None)
+            if callable(get_datetime):
+                now = get_datetime()
+        if now is None:
+            return
+
+        current_date = now.date()
+        strategy_name = getattr(strategy, "name", None)
+
+        if not force:
+            time_to_close = self.get_time_to_close()
+            if time_to_close is None:
+                return
+
+            seconds_before_closing = int(max(0, getattr(strategy, "minutes_before_closing", 0)) * 60)
+            if time_to_close > seconds_before_closing:
+                return
+
+            if self._option_early_assignment_last_eval.get(strategy_name) == current_date:
+                return
+
+        self._option_early_assignment_last_eval[strategy_name] = current_date
+
+        positions = list(self.get_tracked_positions(strategy_name))
+        for position in positions:
+            asset = getattr(position, "asset", None)
+            if asset is None or getattr(asset, "asset_type", None) != Asset.AssetType.OPTION:
+                continue
+            if float(position.quantity) >= 0:
+                continue
+            if asset.expiration is None:
+                continue
+
+            days_to_expiry = (asset.expiration - current_date).days
+            if days_to_expiry <= 0 or days_to_expiry > max_dte_days:
+                continue
+
+            contracts = abs(float(position.quantity))
+            if contracts <= 0:
+                continue
+
+            underlying_asset = self._resolve_underlying_asset_for_option(asset, strategy)
+            underlying_price, underlying_asset = self._get_underlying_price_for_settlement(underlying_asset, strategy)
+
+            if self._is_cash_settled_index_option(asset, underlying_asset):
+                continue
+
+            intrinsic_per_contract = self._intrinsic_value_per_contract(asset, underlying_price)
+            if intrinsic_per_contract <= 0:
+                continue
+
+            option_price = self._get_option_market_price_for_assignment(asset)
+            if option_price is None:
+                continue
+
+            extrinsic_per_contract = max(0.0, option_price - intrinsic_per_contract)
+            if extrinsic_per_contract > max_extrinsic:
+                continue
+
+            logger.info(
+                "[OPTION_EARLY_ASSIGNMENT] Assigning short %s dte=%s intrinsic=%.4f extrinsic=%.4f",
+                asset,
+                days_to_expiry,
+                intrinsic_per_contract,
+                extrinsic_per_contract,
+            )
+
+            option_quantity = float(position.quantity)
+            self._cancel_open_orders_for_asset(strategy_name, asset, set())
+            self._dispatch_option_expiration_event(
+                position,
+                strategy,
+                self.ASSIGNED,
+                price=intrinsic_per_contract,
+            )
+            self._dispatch_underlying_delivery_fill(
+                strategy=strategy,
+                underlying_asset=underlying_asset,
+                side=self._get_underlying_delivery_side(asset, option_quantity),
+                quantity=contracts * float(asset.multiplier),
+                strike_price=float(asset.strike),
+                settlement_kind=self.ASSIGNED,
+            )
+
+    def _can_support_long_exercise(self, strategy, underlying_asset: Asset, option_asset: Asset, contracts: float) -> bool:
+        shares = float(contracts) * float(option_asset.multiplier)
+        if option_asset.right == Asset.OptionRight.CALL:
+            required_cash = Decimal(str(option_asset.strike)) * Decimal(str(shares))
+            current_cash = strategy.get_cash()
+            if current_cash is None:
+                return False
+            return Decimal(str(current_cash)) >= required_cash
+
+        if option_asset.right == Asset.OptionRight.PUT:
+            underlying_position = self.get_tracked_position(strategy.name, underlying_asset)
+            if underlying_position is None:
+                return False
+            return float(underlying_position.quantity) >= shares
+
+        return False
+
+    def settle_expired_option_contract(self, position, strategy):
+        if position.asset.asset_type != Asset.AssetType.OPTION:
+            logger.error(f"Cannot settle non-option contract {position.asset}")
+            return
+
+        contracts = abs(float(position.quantity))
+        if contracts <= 0:
+            return
+
+        underlying_asset = self._resolve_underlying_asset_for_option(position.asset, strategy)
+        underlying_price, underlying_asset = self._get_underlying_price_for_settlement(underlying_asset, strategy)
+        intrinsic_per_contract = self._intrinsic_value_per_contract(position.asset, underlying_price)
+
+        if intrinsic_per_contract <= 0:
+            self._dispatch_option_expiration_event(position, strategy, self.EXPIRED_OPTION, price=0.0)
+            return
+
+        if self._is_cash_settled_index_option(position.asset, underlying_asset):
+            self.cash_settle_options_contract(position, strategy)
+            return
+
+        if position.quantity > 0:
+            if not self._can_support_long_exercise(strategy, underlying_asset, position.asset, contracts):
+                logger.warning(
+                    "[OPTION_EXPIRY][AUTO_LIQUIDATE] Long ITM option %s could not be exercised due to account constraints; cash-settling intrinsic value instead of expiring worthless.",
+                    position.asset,
+                )
+                self.cash_settle_options_contract(position, strategy)
+                return
+            option_event_type = self.EXERCISED
         else:
-            profit_loss_per_contract = position.asset.strike - underlying_price
+            option_event_type = self.ASSIGNED
 
-        # Calculate profit/loss for the position
-        profit_loss = profit_loss_per_contract * position.quantity * position.asset.multiplier
+        option_quantity = float(position.quantity)
+        self._dispatch_option_expiration_event(
+            position,
+            strategy,
+            option_event_type,
+            price=intrinsic_per_contract,
+        )
 
-        # Adjust profit/loss based on the option type and position
-        if position.quantity > 0 and profit_loss < 0:
-            profit_loss = 0  # Long position can't lose more than the premium paid
-        elif position.quantity < 0 and profit_loss > 0:
-            profit_loss = 0  # Short position can't gain more than the cash collected
+        self._dispatch_underlying_delivery_fill(
+            strategy=strategy,
+            underlying_asset=underlying_asset,
+            side=self._get_underlying_delivery_side(position.asset, option_quantity),
+            quantity=contracts * float(position.asset.multiplier),
+            strike_price=float(position.asset.strike),
+            settlement_kind=option_event_type,
+        )
 
-        # Add the profit/loss to the cash position
+    def cash_settle_options_contract(self, position, strategy):
+        """Cash settle an options contract (used by cash-settled index options)."""
+        if not self.IS_BACKTESTING_BROKER:
+            logger.error("Cannot cash settle options contract in live trading")
+            return
+        if position.asset.asset_type != Asset.AssetType.OPTION:
+            logger.error(f"Cannot cash settle non-option contract {position.asset}")
+            return
+
+        underlying_asset = self._resolve_underlying_asset_for_option(position.asset, strategy)
+        underlying_price, _ = self._get_underlying_price_for_settlement(underlying_asset, strategy)
+        intrinsic_per_contract = self._intrinsic_value_per_contract(position.asset, underlying_price)
+        profit_loss = intrinsic_per_contract * float(position.quantity) * float(position.asset.multiplier)
+
         current_cash = strategy.get_cash()
         if current_cash is None:
-            # self.strategy.logger.warning("strategy.get_cash() returned None during cash_settle_options_contract. Defaulting to 0.")
             current_cash = Decimal(0)
         else:
-            current_cash = Decimal(str(current_cash)) # Ensure it's Decimal
+            current_cash = Decimal(str(current_cash))
 
-        new_cash = current_cash + Decimal(str(profit_loss))
+        strategy._set_cash_position(float(current_cash + Decimal(str(profit_loss))))
 
-        # Update the cash position
-        strategy._set_cash_position(float(new_cash)) # _set_cash_position expects float
-
-        # Set the side
-        if position.quantity > 0:
-            side = "sell"
-        else:
-            side = "buy"
-
-        # Create offsetting order
+        side = Order.OrderSide.SELL if position.quantity > 0 else Order.OrderSide.BUY
         order = strategy.create_order(position.asset, abs(position.quantity), side)
-
-        # Send filled order event
         self.stream.dispatch(
             self.CASH_SETTLED,
             wait_until_complete=True,
             order=order,
-            price=abs(profit_loss / position.quantity / position.asset.multiplier),
-            filled_quantity=abs(position.quantity),
+            price=float(intrinsic_per_contract),
+            filled_quantity=abs(float(position.quantity)),
         )
 
     def process_expired_option_contracts(self, strategy):
-        """Checks if options or futures contracts have expried and converts
-        to cash.
+        """Process expiration lifecycle events for options contracts.
 
         Parameters
         ----------
@@ -1317,21 +1624,16 @@ class BacktestingBroker(Broker):
                 if position.asset.expiration == self.datetime.date() and time_to_close > seconds_before_closing:
                     continue
 
-                # Skip if there are still active orders working this asset.
-                active_orders = [
-                    o for o in self.get_tracked_orders(strategy=strategy.name)
-                    if o.asset == position.asset and o.is_active()
-                ]
-                if active_orders:
-                    continue
-
                 logger.info(f"Automatically selling expired contract for asset {position.asset}")
 
-                # Cancel any outstanding orders tied to this asset before forcing settlement.
+                # If there are still active orders working this asset (e.g., a market order that never
+                # filled due to missing bid/ask/trades data), a live broker would not leave them
+                # active after expiration. Cancel them and proceed to settlement so positions cannot
+                # get "stuck" indefinitely in long daily-cadence backtests.
                 self._cancel_open_orders_for_asset(strategy.name, position.asset, set())
 
-                # Cash settle the options contract
-                self.cash_settle_options_contract(position, strategy)
+                if position.asset.asset_type == Asset.AssetType.OPTION:
+                    self.settle_expired_option_contract(position, strategy)
 
     def _apply_trade_cost(self, strategy, trade_cost: Decimal) -> None:
         if not trade_cost:
@@ -1360,7 +1662,7 @@ class BacktestingBroker(Broker):
                 )
                 self._new_orders.append(child_order)
 
-        is_multileg_parent = order.is_parent() and order.order_class == Order.OrderClass.MULTILEG
+        is_multileg_parent = order.is_parent() and order.order_class is Order.OrderClass.MULTILEG
 
         trade_cost = Decimal("0") if is_multileg_parent else self.calculate_trade_cost(order, strategy, price)
         order.trade_cost = float(trade_cost)
@@ -1403,13 +1705,19 @@ class BacktestingBroker(Broker):
         if hasattr(order, "asset") and getattr(order.asset, "multiplier", None):
             multiplier = order.asset.multiplier
 
+        # PERF: BacktestingBroker commonly uses `Decimal` quantities. Convert once at the dispatch
+        # boundary so the trade-event hot path doesn't re-cast on every fill event.
+        filled_quantity_f = filled_quantity
+        if filled_quantity_f is not None and not isinstance(filled_quantity_f, float):
+            filled_quantity_f = float(filled_quantity_f)
+
         self.stream.dispatch(
             self.FILLED_ORDER,
             wait_until_complete=True,
             order=order,
             price=price,
-            filled_quantity=filled_quantity,
-            quantity=filled_quantity,
+            filled_quantity=filled_quantity_f,
+            quantity=filled_quantity_f,
             multiplier=multiplier,
         )
 
@@ -1424,7 +1732,7 @@ class BacktestingBroker(Broker):
         # fill is recorded so legacy ordering expectations remain stable.
         if parent_identifier:
             parent_order = self.get_tracked_order(parent_identifier, use_placeholders=True)
-            if parent_order is not None and parent_order.order_class == Order.OrderClass.OCO and not parent_order.is_filled():
+            if parent_order is not None and parent_order.order_class is Order.OrderClass.OCO and not parent_order.is_filled():
                 try:
                     self._placeholder_orders.remove(parent_order.identifier, key="identifier")
                 except Exception:
@@ -1456,7 +1764,13 @@ class BacktestingBroker(Broker):
         strategy_name = getattr(strategy, "_name", None) or getattr(strategy, "name", "unknown_strategy")
         asset_symbol = getattr(asset, "symbol", "unknown_asset")
         asset_type = getattr(asset, "asset_type", "unknown_type")
-        return (strategy_name, asset_symbol, asset_type)
+        # Futures contract identity must include expiration.
+        #
+        # Strategies commonly construct futures as Asset(symbol="CL", expiration=YYYYMM or date),
+        # which means the root symbol alone is not unique. Calendar spreads (front/next month)
+        # would otherwise collide in the ledger and incorrectly net margin + realized PnL.
+        asset_expiration = getattr(asset, "expiration", None)
+        return (strategy_name, asset_symbol, asset_type, asset_expiration)
 
     def _realize_futures_pnl(self, ledger, closing_qty, exit_price, multiplier):
         remaining = closing_qty
@@ -1524,7 +1838,14 @@ class BacktestingBroker(Broker):
 
     def calculate_trade_cost(self, order: Order, strategy, price: float):
         """Calculate the trade cost of an order for a given strategy"""
-        trade_cost = 0
+        # PERF: Trade fees are frequently empty in backtests/benchmarks. Avoid per-fill string
+        # normalization and Decimal math when there are no configured fees.
+        buy_fees = getattr(strategy, "buy_trading_fees", None) or []
+        sell_fees = getattr(strategy, "sell_trading_fees", None) or []
+        if not buy_fees and not sell_fees:
+            return Decimal("0")
+
+        trade_cost = Decimal("0")
         trading_fees = []
         side_value = str(order.side).lower() if order.side is not None else ""
         order_type_attr = getattr(order, "order_type", None)
@@ -1533,9 +1854,9 @@ class BacktestingBroker(Broker):
         else:
             order_type_value = str(order_type_attr).lower() if order_type_attr is not None else ""
         if side_value in ("buy", "buy_to_open", "buy_to_cover"):
-            trading_fees = strategy.buy_trading_fees
+            trading_fees = buy_fees
         elif side_value in ("sell", "sell_to_close", "sell_short", "sell_to_open"):
-            trading_fees = strategy.sell_trading_fees
+            trading_fees = sell_fees
 
         for trading_fee in trading_fees:
             if trading_fee.taker is True and order_type_value in {"market", "stop"}:
@@ -1561,28 +1882,41 @@ class BacktestingBroker(Broker):
 
         """
 
-        # OPTIMIZATION: Get orders only once per list to minimize lock acquisitions
-        # This function is called 179k times
+        # This function is called once per bar (minute-level: ~100k/year). Avoid allocating lists
+        # or copying buckets when there are no pending orders.
         strategy_name = strategy.name
-        pending_orders = []
 
-        # Get unprocessed orders once with single lock acquisition
-        if hasattr(self, '_unprocessed_orders'):
-            unprocessed = self._unprocessed_orders.get_list()  # One lock acquisition
-            # Use list comprehension which is faster than extend with filter
-            pending_orders.extend([o for o in unprocessed if o.strategy == strategy_name])
+        unprocessed_bucket = getattr(self, "_unprocessed_orders", None)
+        new_bucket = getattr(self, "_new_orders", None)
+        if not unprocessed_bucket and not new_bucket:
+            self._run_backtest_option_lifecycle_tasks(strategy)
+            return
 
-        # Get new orders once with single lock acquisition
-        if hasattr(self, '_new_orders'):
-            new_orders = self._new_orders.get_list()  # One lock acquisition
-            pending_orders.extend([o for o in new_orders if o.strategy == strategy_name])
+        def _iter_bucket(bucket):
+            if not bucket:
+                return ()
+            get_list = getattr(bucket, "get_list", None)
+            if callable(get_list):
+                return get_list()
+            return bucket
 
-        if len(pending_orders) == 0:
+        pending_orders: list[Order] = []
+        for order in _iter_bucket(unprocessed_bucket):
+            if getattr(order, "strategy", None) == strategy_name:
+                pending_orders.append(order)
+        for order in _iter_bucket(new_bucket):
+            if getattr(order, "strategy", None) == strategy_name:
+                pending_orders.append(order)
+
+        if not pending_orders:
+            self._run_backtest_option_lifecycle_tasks(strategy)
             return
 
         # Prefetching: Track assets and schedule prefetch
         current_dt = self.datetime
         audit_enabled = self._audit_enabled()
+        # PERF: Used in multiple branches below; avoid recomputing per order.
+        data_source_name = str(getattr(self.data_source, "SOURCE", "") or "").upper()
 
         if self.hybrid_prefetcher:
             # Use advanced hybrid prefetcher
@@ -1657,8 +1991,9 @@ class BacktestingBroker(Broker):
                 continue
             # No need to check status since we already filtered for pending orders only
 
-            # OCO parent orders do not get filled
-            if order.order_class == Order.OrderClass.OCO:
+            # OCO parent orders do not get filled.
+            # PERF: `OrderClass` is a StrEnum; use identity comparisons in backtesting hot loops.
+            if order.order_class is Order.OrderClass.OCO:
                 continue
 
             # SMART_LIMIT multileg children should be filled atomically by their parent order.
@@ -1667,7 +2002,7 @@ class BacktestingBroker(Broker):
 
             # Multileg parent orders are placeholders unless they are explicitly
             # configured as a package SMART_LIMIT (i.e. have a SmartLimitConfig).
-            if order.order_class == Order.OrderClass.MULTILEG and getattr(order, "smart_limit", None) is None:
+            if order.order_class is Order.OrderClass.MULTILEG and getattr(order, "smart_limit", None) is None:
                 # If this is the final fill for a multileg order, mark the parent order as filled
                 if all([o.is_filled() for o in order.child_orders]):
                     parent_qty = sum([abs(o.quantity) for o in order.child_orders])
@@ -1724,15 +2059,67 @@ class BacktestingBroker(Broker):
             timeshift = None
             dt = None
             open = high = low = close = volume = None
+            fast_bid = None
+            fast_ask = None
+
+            # PERF: MARKET orders dominate many warm-cache backtests (minute strategies, speed-burner).
+            # When bid/ask are already present in the cached Data series, we can fill immediately
+            # without constructing a `Quote` object or running the full quote normalization stack.
+            if (
+                not audit_enabled
+                and order.order_type == Order.OrderType.MARKET
+                and (order.is_buy_order() or order.is_sell_order())
+                and not self._is_option_asset(getattr(order, "asset", None))
+            ):
+                fast_bid, fast_ask = self._fast_get_bid_ask_for_fill(
+                    order.asset,
+                    order.quote,
+                    getattr(order, "exchange", None),
+                )
+                fast_bid = self._coerce_price(fast_bid)
+                fast_ask = self._coerce_price(fast_ask)
+                if fast_bid is not None and self._is_invalid_price(fast_bid):
+                    fast_bid = None
+                if fast_ask is not None and self._is_invalid_price(fast_ask):
+                    fast_ask = None
+
+                required_price = fast_ask if order.is_buy_order() else fast_bid
+                if required_price is not None and not self._is_invalid_price(required_price):
+                    setattr(order, "_price_source", "quote")
+                    self._execute_filled_order(
+                        order=order,
+                        price=required_price,
+                        filled_quantity=filled_quantity,
+                        strategy=strategy,
+                    )
+                    continue
+
+            # PERF (IBKR futures/crypto, Trades history): When bid/ask are not available, calling
+            # `get_quote()` is pure overhead and eventually falls back to the OHLC model anyway.
+            # Detect that scenario and skip the quote path entirely.
+            skip_quote_fills = (
+                (not audit_enabled)
+                and data_source_name in {"INTERACTIVEBROKERSREST"}
+                and order.order_type == Order.OrderType.MARKET
+                and (order.is_buy_order() or order.is_sell_order())
+                and not self._is_option_asset(getattr(order, "asset", None))
+                and fast_bid is None
+                and fast_ask is None
+            )
 
             # PERFORMANCE: Prefer quote-based fills when bid/ask are present so we avoid
             # fetching trade-only OHLC bars (which can be sparse/missing, especially for
             # options). When bid/ask are unavailable we fall back to the OHLC-based model.
-            if order.order_type in (Order.OrderType.MARKET, Order.OrderType.LIMIT) and (order.is_buy_order() or order.is_sell_order()):
-                try:
-                    quote = self.get_quote(order.asset, quote=order.quote)
-                except Exception:
-                    quote = None
+            if (
+                order.order_type in (Order.OrderType.MARKET, Order.OrderType.LIMIT)
+                and (order.is_buy_order() or order.is_sell_order())
+            ):
+                quote = None
+                if not skip_quote_fills:
+                    try:
+                        quote = self.get_quote(order.asset, quote=order.quote)
+                    except Exception:
+                        quote = None
 
                 bid = self._coerce_price(getattr(quote, "bid", None)) if quote is not None else None
                 ask = self._coerce_price(getattr(quote, "ask", None)) if quote is not None else None
@@ -1864,7 +2251,6 @@ class BacktestingBroker(Broker):
             #############################
 
             # Get the OHLCV data for the asset if we're using the YAHOO, CCXT data source
-            data_source_name = self.data_source.SOURCE.upper()
             if data_source_name in ["CCXT", "YAHOO", "ALPACA", "DATABENTO", "DATABENTO_POLARS"]:
                 # Negative deltas here are intentional: _pull_source_symbol_bars subtracts the offset, so
                 # passing -1 minute yields an effective +1 minute guard that keeps us on the previously
@@ -1927,11 +2313,15 @@ class BacktestingBroker(Broker):
                     close = ohlc.df['close'][-1]
                     volume = ohlc.df['volume'][-1]
 
-            # Get the OHLCV data for the asset if we're using the PANDAS data source
-            elif self.data_source.SOURCE == "PANDAS":
+            # Get the OHLCV data for the asset if we're using a Pandas-backed data source.
+            #
+            # IMPORTANT: IBKR REST backtesting is implemented as a PandasData subclass but its
+            # `SOURCE` is not literally "PANDAS". It must still use the Pandas order-fill path,
+            # otherwise `open/high/low/close` remain unset and orders never fill.
+            elif self.data_source.SOURCE == "PANDAS" or data_source_name in {"INTERACTIVEBROKERSREST"}:
                 # Market orders: prefer quote-based fills when bid/ask are available to avoid
                 # expensive OHLC downloads and reflect real-world execution more closely.
-                if order.order_type == Order.OrderType.MARKET:
+                if order.order_type == Order.OrderType.MARKET and not skip_quote_fills:
                     quote_fill_price = self._try_fill_with_quote(order, strategy, None, None, None)
                     if quote_fill_price is not None:
                         self._execute_filled_order(
@@ -2011,7 +2401,7 @@ class BacktestingBroker(Broker):
                 # SMART_LIMIT orders, we fill from the child legs' quotes instead of attempting
                 # to fetch OHLC for the parent.
                 if (
-                    order.order_class == Order.OrderClass.MULTILEG
+                    order.order_class is Order.OrderClass.MULTILEG
                     and order.child_orders
                     and getattr(order, "smart_limit", None) is not None
                 ):
@@ -2022,9 +2412,13 @@ class BacktestingBroker(Broker):
                     # (see Data._get_bars_dict). For daily bars, a negative `timeshift` can
                     # accidentally *advance* the slice into future sessions.
                     #
-                    # For intraday bars, we still need the current bar available for order fills
-                    # at `self.datetime` (e.g., crypto backtests on the first bar). Use `-1` to
-                    # include the current bar without pulling future bars.
+                    # For intraday bars, we still need a deterministic bar available for order fills.
+                    #
+                    # Default (`-1`) includes the current bar while avoiding pulling far-future bars.
+                    #
+                    # NOTE (IBKR futures): we intentionally avoid the older "force next bar" behavior
+                    # here. Correctness is driven by data availability (no synthetic bars) and by
+                    # ensuring orders do not fill during gaps (handled below).
                     timeshift = 0 if str(timestep) == "day" else -1
                     ohlc = self.data_source.get_historical_prices(
                         asset=asset,
@@ -2099,7 +2493,7 @@ class BacktestingBroker(Broker):
                         # When OHLC is missing (common for placeholder multileg assets), use quotes to
                         # fill the child legs atomically and then mark the parent filled for logging.
                         if (
-                            order.order_class == Order.OrderClass.MULTILEG
+                            order.order_class is Order.OrderClass.MULTILEG
                             and order.child_orders
                             and getattr(order, "smart_limit", None) is not None
                         ):
@@ -2265,7 +2659,43 @@ class BacktestingBroker(Broker):
                     close = df["close"][0]
                     volume = df["volume"][0]
                 else:  # Pandas DataFrame
-                    df = df_original[df_original.index >= self.datetime]
+                    # Avoid same-bar lookahead for IBKR futures: bars are commonly timestamped at
+                    # the bar start. When an order is submitted at `self.datetime` (end of bar),
+                    # it should execute no earlier than the *next* bar. However, orders that were
+                    # already working before `self.datetime` must still be evaluated on the
+                    # current bar, even when the next bar is a large session gap (daily
+                    # maintenance break / weekend reopen).
+                    should_use_next_bar = (
+                        data_source_name in {"INTERACTIVEBROKERSREST"}
+                        and str(getattr(order.asset, "asset_type", "") or "").lower() in {"future", "cont_future"}
+                        and str(getattr(self.data_source, "_timestep", "minute")) != "day"
+                    )
+                    if should_use_next_bar:
+                        # IMPORTANT (no synthetic bars / no fills in gaps):
+                        # IBKR historical bars can include real gaps (maintenance windows,
+                        # holiday early closes, weekend). If the backtest clock lands on a
+                        # timestamp with no bar, no fill is possible.
+                        #
+                        # We intentionally avoid the legacy "jump to next bar while keeping the
+                        # older timestamp" behavior. Orders remain working and become eligible to
+                        # fill once the clock reaches a bar timestamp.
+                        #
+                        # See: docs/BACKTESTING_SESSION_GAPS_AND_DATA_GAPS.md
+                        now_ts = pd.Timestamp(self.datetime)
+                        try:
+                            if getattr(df_original.index, "tz", None) is not None:
+                                if now_ts.tz is None:
+                                    now_ts = now_ts.tz_localize(df_original.index.tz)
+                                else:
+                                    now_ts = now_ts.tz_convert(df_original.index.tz)
+                        except Exception:
+                            pass
+
+                        if now_ts not in df_original.index:
+                            continue
+                        df = df_original[df_original.index >= now_ts]
+                    else:
+                        df = df_original[df_original.index >= self.datetime]
 
                     # If the dataframe is empty, then we should get the last row of the original dataframe
                     # because it is the best data we have
@@ -2313,7 +2743,7 @@ class BacktestingBroker(Broker):
                 # (parent filled, legs not filled) and prevents the strategy from seeing the
                 # actual leg fills in `on_filled_order()`.
                 if (
-                    order.order_class == Order.OrderClass.MULTILEG
+                    order.order_class is Order.OrderClass.MULTILEG
                     and order.child_orders
                     and getattr(order, "smart_limit", None) is not None
                 ):
@@ -2386,9 +2816,11 @@ class BacktestingBroker(Broker):
 
                 # Update the stop price if the price has moved
                 if order.is_sell_order():
-                    order.update_trail_stop_price(high)
+                    if high is not None and not self._is_invalid_price(high):
+                        order.update_trail_stop_price(high)
                 elif order.is_buy_order():
-                    order.update_trail_stop_price(low)
+                    if low is not None and not self._is_invalid_price(low):
+                        order.update_trail_stop_price(low)
 
             else:
                 raise ValueError(f"Order type {order.order_type} is not implemented for backtesting.")
@@ -2453,18 +2885,7 @@ class BacktestingBroker(Broker):
                     )
                 continue
 
-        # Expired contracts settlement is only meaningful at (or after) the end of a session.
-        #
-        # Calling `process_expired_option_contracts()` on every bar is extremely expensive in long
-        # intraday backtests (it scans positions + active orders) and does not change behavior
-        # because the function intentionally skips settlement until after the close.
-        #
-        # - Intraday backtests: settlement is handled once per day by `StrategyExecutor._strategy_sleep()`
-        #   when it advances the clock to the close.
-        # - Daily backtests: `process_pending_orders()` runs once per day, so it is safe to settle here.
-        timestep = getattr(getattr(self, "data_source", None), "_timestep", None)
-        if timestep == "day":
-            self.process_expired_option_contracts(strategy)
+        self._run_backtest_option_lifecycle_tasks(strategy)
 
     def _coerce_price(self, value):
         """Convert numeric inputs to float when possible for safe comparisons."""
@@ -2479,27 +2900,151 @@ class BacktestingBroker(Broker):
         """Determine whether a price is unusable (None, NaN, or non-positive)."""
         if value is None:
             return True
+
+        # PERF: Fast paths for common numeric primitives. This function is called extremely
+        # frequently during order fill evaluation; avoid `pd.isna()` and `float()` conversions
+        # in the hot path.
+        if isinstance(value, float):
+            return math.isnan(value) or value <= 0
+        if isinstance(value, int):
+            return value <= 0
+        if isinstance(value, np.floating):
+            return bool(np.isnan(value)) or value <= 0
+        if isinstance(value, np.integer):
+            return int(value) <= 0
+
         if isinstance(value, Decimal):
             try:
-                value = float(value)
+                numeric_value = float(value)
             except (ValueError, TypeError):
                 return True
-        if isinstance(value, float) and math.isnan(value):
-            return True
+            return math.isnan(numeric_value) or numeric_value <= 0
+
         try:
             if pd.isna(value):
                 return True
         except Exception:
             pass
+
         try:
             numeric_value = float(value)
         except (TypeError, ValueError):
             return False
         return numeric_value <= 0
-        return False
 
     def _bar_has_missing_prices(self, *values) -> bool:
         return any(self._is_invalid_price(val) for val in values)
+
+    def _fast_get_bid_ask_for_fill(
+        self,
+        asset: Asset,
+        quote: Optional[Asset],
+        exchange: Optional[str] = None,
+    ) -> tuple[Optional[float], Optional[float]]:
+        """Fast-path for bid/ask retrieval in backtesting order fills.
+
+        Why this exists:
+        - `process_pending_orders()` can execute tens/hundreds of thousands of MARKET orders in a
+          minute-cadence backtest.
+        - The default `Broker.get_quote()` path constructs a `Quote` object and performs several
+          layers of validation/normalization. That is correct, but expensive.
+        - For warm-cache speed, order fills should be able to read bid/ask directly from the
+          already-loaded `Data` object when available.
+
+        Safety:
+        - This is best-effort. On any failure, it returns (None, None) and callers must fall back
+          to the canonical `get_quote()` path to preserve broker-specific semantics.
+        - Currently scoped to IBKR REST backtesting only (explicit perf target).
+        """
+        data_source = getattr(self, "data_source", None)
+        if data_source is None or data_source.__class__.__name__ != "InteractiveBrokersRESTBacktesting":
+            return None, None
+
+        now = getattr(self, "datetime", None)
+        if now is None:
+            return None, None
+
+        # Match IBKR's `get_quote()` special-case for crypto at midnight: use the daily series.
+        timestep = getattr(data_source, "_timestep", None) or "minute"
+        if (
+            str(getattr(asset, "asset_type", "") or "").lower() == "crypto"
+            and now.hour == 0
+            and now.minute == 0
+            and now.second == 0
+            and now.microsecond == 0
+        ):
+            timestep = "day"
+
+        cache = getattr(self, "_fast_quote_data_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_fast_quote_data_cache", cache)
+
+        # PERF: `Asset.__hash__`/`Asset.__eq__` are hot in high-churn backtests. Use `id()`-based
+        # keys for this internal cache to avoid repeated rich-comparison and hashing work.
+        effective_exchange = exchange if exchange is not None else getattr(data_source, "exchange", None)
+        try:
+            exchange_key = data_source._normalize_exchange_key(effective_exchange)  # type: ignore[attr-defined]
+        except Exception:
+            exchange_key = (str(effective_exchange or "").strip().upper() or "AUTO")
+
+        cache_key = (id(asset), id(quote), str(timestep), exchange_key)
+        if cache_key in cache:
+            data_obj, bid_line, ask_line = cache[cache_key]
+        else:
+            data_obj = None
+            bid_line = None
+            ask_line = None
+
+            quote_asset = quote if quote is not None else Asset("USD", asset_type=Asset.AssetType.FOREX)
+            store = getattr(data_source, "_data_store", None)
+            if isinstance(store, dict):
+                try:
+                    canonical_key, legacy_key = data_source._build_dataset_keys(  # type: ignore[attr-defined]
+                        asset,
+                        quote_asset,
+                        str(timestep),
+                        effective_exchange,
+                    )
+                except Exception:
+                    canonical_key = (asset, quote_asset, str(timestep), exchange_key)
+                    legacy_key = (asset, quote_asset, exchange_key)
+
+                data_obj = store.get(canonical_key)
+                if data_obj is None and str(timestep) == "minute":
+                    data_obj = store.get(legacy_key)
+
+            if data_obj is not None:
+                try:
+                    bid_line = getattr(data_obj, "datalines", {}).get("bid")
+                    ask_line = getattr(data_obj, "datalines", {}).get("ask")
+                except Exception:
+                    bid_line = None
+                    ask_line = None
+
+            cache[cache_key] = (data_obj, bid_line, ask_line)
+
+        if data_obj is None or bid_line is None or ask_line is None:
+            return None, None
+
+        try:
+            i = data_obj.get_iter_count(now)
+            bid = bid_line.dataline[i]
+            ask = ask_line.dataline[i]
+        except Exception:
+            return None, None
+
+        # Mirror `Data.get_quote()` rounding (bid/ask are rounded to 2 decimals).
+        try:
+            bid = round(bid, 2) if bid is not None else None
+        except TypeError:
+            pass
+        try:
+            ask = round(ask, 2) if ask is not None else None
+        except TypeError:
+            pass
+
+        return bid, ask
 
     def _is_option_asset(self, asset) -> bool:
         if asset is None:
@@ -2756,13 +3301,32 @@ class BacktestingBroker(Broker):
         timestep = getattr(self.data_source, "_timestep", None)
         if not (self._bar_has_missing_prices(open_, high_, low_) or timestep == "day"):
             return None
-        if order.order_type not in (Order.OrderType.LIMIT, Order.OrderType.STOP_LIMIT, Order.OrderType.MARKET):
+        if order.order_type not in (
+            Order.OrderType.LIMIT,
+            Order.OrderType.STOP,
+            Order.OrderType.STOP_LIMIT,
+            Order.OrderType.TRAIL,
+            Order.OrderType.MARKET,
+        ):
             return None
         if not (order.is_buy_order() or order.is_sell_order()):
             return None
 
         try:
-            quote = self.get_quote(order.asset, quote=order.quote)
+            quote_kwargs = {}
+            # ThetaData option NBBO is stored as intraday snapshot data. In daily-cadence backtests,
+            # requesting full-day minute quotes per option can explode runtime. Use snapshot mode
+            # (minimal window around `self.datetime`) so market/limit orders can still fill on
+            # actionable quotes without downloading an entire session.
+            if self._is_thetadata_source() and self._is_option_asset(order.asset) and getattr(self.data_source, "_timestep", None) == "day":
+                # NOTE: `Broker.get_quote()` does not accept extra kwargs; call the data source
+                # directly so we can pass `snapshot_only` and other backtesting-specific controls.
+                quote_kwargs["snapshot_only"] = True
+                quote = self.data_source.get_quote(order.asset, quote=order.quote, exchange=None, **quote_kwargs)
+            else:
+                # Default: preserve legacy broker behavior (and acceptance baselines) by using the
+                # broker-level `get_quote()` path without backtesting-only kwargs.
+                quote = self.get_quote(order.asset, quote=order.quote)
         except Exception as exc:  # pragma: no cover - defensive log for unexpected broker states
             self.logger.debug("Quote lookup failed for %s: %s", getattr(order.asset, "symbol", order.asset), exc)
             return None
@@ -2776,11 +3340,14 @@ class BacktestingBroker(Broker):
         is_buy = order.is_buy_order()
 
         fill_price: Optional[float] = None
+        crossed = False
+
         if order.order_type == Order.OrderType.MARKET:
             fill_price = ask if is_buy else bid
-        else:
+            crossed = True
+
+        elif order.order_type == Order.OrderType.LIMIT:
             limit_price = self._coerce_price(order.limit_price)
-            crossed = False
             if is_buy:
                 if ask is not None and limit_price is not None and limit_price >= ask:
                     fill_price = ask
@@ -2793,6 +3360,103 @@ class BacktestingBroker(Broker):
                     crossed = True
                 elif ask is not None and limit_price is not None and limit_price <= ask:
                     fill_price = limit_price
+
+        elif order.order_type == Order.OrderType.STOP:
+            stop_price = self._coerce_price(getattr(order, "stop_price", None))
+            if stop_price is None or self._is_invalid_price(stop_price):
+                return None
+            # Quote-based stop trigger:
+            # - Buy stop triggers when the market trades/quotes at or above the stop. Use ask as the
+            #   executable reference.
+            # - Sell stop triggers when the market trades/quotes at or below the stop. Use bid as the
+            #   executable reference.
+            if is_buy:
+                if ask is not None and not self._is_invalid_price(ask) and ask >= stop_price:
+                    fill_price = ask
+                    crossed = True
+            else:
+                if bid is not None and not self._is_invalid_price(bid) and bid <= stop_price:
+                    fill_price = bid
+                    crossed = True
+
+        elif order.order_type == Order.OrderType.STOP_LIMIT:
+            stop_price = self._coerce_price(getattr(order, "stop_price", None))
+            limit_price = self._coerce_price(getattr(order, "limit_price", None))
+            if stop_price is None or limit_price is None:
+                return None
+            # Stop prices must be strictly positive. Limit prices are allowed to be <=0 in
+            # backtests as a shorthand for "marketable" (common pattern: sell limit @ 0).
+            if self._is_invalid_price(stop_price):
+                return None
+            try:
+                if isinstance(limit_price, float) and math.isnan(limit_price):
+                    return None
+                if pd.isna(limit_price):
+                    return None
+            except Exception:
+                pass
+
+            if not getattr(order, "price_triggered", False):
+                triggered = False
+                if is_buy:
+                    if ask is not None and not self._is_invalid_price(ask) and ask >= stop_price:
+                        triggered = True
+                else:
+                    if bid is not None and not self._is_invalid_price(bid) and bid <= stop_price:
+                        triggered = True
+                if not triggered:
+                    return None
+                order.price_triggered = True
+
+            # Once triggered, behave like a normal limit order against the quote.
+            if is_buy:
+                if ask is not None and limit_price >= ask:
+                    fill_price = ask
+                    crossed = True
+                elif bid is not None and limit_price >= bid:
+                    fill_price = limit_price
+            else:
+                if bid is not None and limit_price <= bid:
+                    fill_price = bid
+                    crossed = True
+                elif ask is not None and limit_price <= ask:
+                    fill_price = limit_price
+
+        elif order.order_type == Order.OrderType.TRAIL:
+            # Quote-based trailing stop support for feeds that do not provide OHLC bars.
+            #
+            # WHY: IBKR crypto/futures history sources can be effectively quote-like (open/high/low
+            # missing). Trailing stops still need to advance their stop level and be able to trigger
+            # against bid/ask without relying on OHLC highs/lows.
+            update_price = None
+            if is_buy:
+                update_price = bid
+            else:
+                update_price = ask
+            if update_price is None or self._is_invalid_price(update_price):
+                if bid is not None and ask is not None and not (self._is_invalid_price(bid) or self._is_invalid_price(ask)):
+                    update_price = (bid + ask) / 2
+
+            if update_price is None or self._is_invalid_price(update_price):
+                return None
+
+            try:
+                order.update_trail_stop_price(float(update_price))
+            except Exception:
+                return None
+
+            trail_stop = self._coerce_price(getattr(order, "_trail_stop_price", None))
+            if trail_stop is None or self._is_invalid_price(trail_stop):
+                return None
+
+            if is_buy:
+                if ask is not None and not self._is_invalid_price(ask) and ask >= trail_stop:
+                    fill_price = ask
+                    crossed = True
+            else:
+                if bid is not None and not self._is_invalid_price(bid) and bid <= trail_stop:
+                    fill_price = bid
+                    crossed = True
 
         if fill_price is None or self._is_invalid_price(fill_price):
             return None
@@ -2841,8 +3505,9 @@ class BacktestingBroker(Broker):
                 "fill.model": "quote_fallback",
                 "fill.order_type": str(getattr(order, "order_type", None)),
                 "fill.price": float(fill_price),
-                "fill.crossed": bool(crossed) if order.order_type != Order.OrderType.MARKET else True,
+                "fill.crossed": bool(crossed),
                 "order.limit_price": self._coerce_price(getattr(order, "limit_price", None)),
+                "order.stop_price": self._coerce_price(getattr(order, "stop_price", None)),
                 "spread.limit": spread_limit,
                 "spread.pct": spread_pct,
             },
@@ -2892,7 +3557,7 @@ class BacktestingBroker(Broker):
                 return None, True
 
         bid = ask = None
-        if order.order_class == Order.OrderClass.MULTILEG and order.child_orders:
+        if order.order_class is Order.OrderClass.MULTILEG and order.child_orders:
             net_bid = 0.0
             net_ask = 0.0
             order_side = "buy" if order.is_buy_order() else "sell"
@@ -2956,7 +3621,7 @@ class BacktestingBroker(Broker):
             if not state.get("missing_quote_warned", False):
                 if strategy is not None:
                     missing_target = order.asset
-                    if order.order_class == Order.OrderClass.MULTILEG and order.child_orders:
+                    if order.order_class is Order.OrderClass.MULTILEG and order.child_orders:
                         missing_target = "one or more multileg legs"
                     strategy.log_message(
                         f"[SMART_LIMIT] Missing bid/ask for {missing_target}; downgrading to market.",
@@ -2979,7 +3644,16 @@ class BacktestingBroker(Broker):
             return open_, False
 
         side = "buy" if order.is_buy_order() else "sell"
-        tick = infer_tick_size(bid, ask)
+        tick = None
+        if order.order_class is not Order.OrderClass.MULTILEG:
+            try:
+                asset_tick = getattr(order.asset, "min_tick", None)
+                if asset_tick is not None and float(asset_tick) > 0:
+                    tick = float(asset_tick)
+            except Exception:
+                tick = None
+        if tick is None:
+            tick = infer_tick_size(bid, ask)
         mid = compute_mid(bid, ask)
         final_price = compute_final_price(bid, ask, side, smart_limit.final_price_pct)
         slippage_amount = smart_limit.get_slippage_amount()
@@ -3005,14 +3679,14 @@ class BacktestingBroker(Broker):
 
         multiplier = (
             getattr(order.child_orders[0].asset, "multiplier", 1)
-            if order.order_class == Order.OrderClass.MULTILEG and order.child_orders
+            if order.order_class is Order.OrderClass.MULTILEG and order.child_orders
             else getattr(order.asset, "multiplier", 1)
         ) or 1
         order.trade_slippage = abs(fill_price - mid) * float(order.quantity) * multiplier
         setattr(order, "_price_source", "smart_limit")
         if audit_enabled:
             payload: dict[str, Any] = {
-                "fill.model": "smart_limit_net" if order.order_class == Order.OrderClass.MULTILEG else "smart_limit",
+                "fill.model": "smart_limit_net" if order.order_class is Order.OrderClass.MULTILEG else "smart_limit",
                 "fill.price": float(fill_price),
                 "smart_limit.bid": bid,
                 "smart_limit.ask": ask,
@@ -3022,7 +3696,7 @@ class BacktestingBroker(Broker):
                 "smart_limit.final_price_pct": getattr(smart_limit, "final_price_pct", None),
                 "smart_limit.slippage_amount": slippage_amount,
             }
-            if order.order_class == Order.OrderClass.MULTILEG and order.child_orders:
+            if order.order_class is Order.OrderClass.MULTILEG and order.child_orders:
                 payload["smart_limit.legs"] = legs_audit
             self._audit_merge(order, payload, overwrite=False)
             self._audit_merge(order, self._audit_underlying_quote_fields(order), overwrite=False)
@@ -3087,7 +3761,15 @@ class BacktestingBroker(Broker):
 
             raw_fill = leg_mid + adj if leg.is_buy_order() else leg_mid - adj
             raw_fill = round(raw_fill, 6)
-            tick = infer_tick_size(leg_info["bid"], leg_info["ask"])
+            tick = None
+            try:
+                asset_tick = getattr(leg.asset, "min_tick", None)
+                if asset_tick is not None and float(asset_tick) > 0:
+                    tick = float(asset_tick)
+            except Exception:
+                tick = None
+            if tick is None:
+                tick = infer_tick_size(leg_info["bid"], leg_info["ask"])
             fill_price = round_to_tick(raw_fill, tick, side="buy" if leg.is_buy_order() else "sell")
 
             multiplier = getattr(leg.asset, "multiplier", 1) or 1
@@ -3230,11 +3912,26 @@ class BacktestingBroker(Broker):
         low_val = self._coerce_price(low)
         limit_val = self._coerce_price(limit_price)
 
-        if any(self._is_invalid_price(val) for val in (open_val, high_val, low_val, limit_val)):
+        # For limit orders:
+        # - bar prices must be strictly positive
+        # - limit prices must be present (not None/NaN)
+        #
+        # BUT: allow `limit_price <= 0` as a shorthand for "marketable sell" (common pattern: sell limit @ 0).
+        # This is used in tests and real strategies to express "fill immediately at best available price".
+        if any(self._is_invalid_price(val) for val in (open_val, high_val, low_val)):
             return None
+        if limit_val is None:
+            return None
+        try:
+            if isinstance(limit_val, float) and math.isnan(limit_val):
+                return None
+            if pd.isna(limit_val):
+                return None
+        except Exception:
+            pass
 
         # Gap Up case: Limit wasn't triggered by previous candle but current candle opens higher, fill it now
-        if side == "sell" and limit_val <= open_val:
+        if side == "sell" and (limit_val <= 0 or limit_val <= open_val):
             return open_val
 
         # Gap Down case: Limit wasn't triggered by previous candle but current candle opens lower, fill it now
@@ -3355,6 +4052,48 @@ class BacktestingBroker(Broker):
                 broker._process_trade_event(
                     order,
                     broker.CASH_SETTLED,
+                    price=price,
+                    filled_quantity=filled_quantity,
+                    multiplier=order.asset.multiplier,
+                )
+                return True
+            except:
+                logger.error(traceback.format_exc())
+
+        @broker.stream.add_action(broker.ASSIGNED)
+        def on_trade_event(order, price, filled_quantity):
+            try:
+                broker._process_trade_event(
+                    order,
+                    broker.ASSIGNED,
+                    price=price,
+                    filled_quantity=filled_quantity,
+                    multiplier=order.asset.multiplier,
+                )
+                return True
+            except:
+                logger.error(traceback.format_exc())
+
+        @broker.stream.add_action(broker.EXERCISED)
+        def on_trade_event(order, price, filled_quantity):
+            try:
+                broker._process_trade_event(
+                    order,
+                    broker.EXERCISED,
+                    price=price,
+                    filled_quantity=filled_quantity,
+                    multiplier=order.asset.multiplier,
+                )
+                return True
+            except:
+                logger.error(traceback.format_exc())
+
+        @broker.stream.add_action(broker.EXPIRED_OPTION)
+        def on_trade_event(order, price, filled_quantity):
+            try:
+                broker._process_trade_event(
+                    order,
+                    broker.EXPIRED_OPTION,
                     price=price,
                     filled_quantity=filled_quantity,
                     multiplier=order.asset.multiplier,

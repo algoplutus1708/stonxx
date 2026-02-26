@@ -131,6 +131,7 @@ def run_backtest(run_type):
 
 
 @pytest.mark.apitest
+@pytest.mark.thetadata
 @pytest.mark.skipif(
     not THETADATA_CONFIG.get("THETADATA_USERNAME") or not THETADATA_CONFIG.get("THETADATA_PASSWORD"),
     reason="ThetaData credentials not configured - skipping API test"

@@ -17,6 +17,10 @@ from lumibot.credentials import DATABENTO_CONFIG
 
 DATABENTO_API_KEY = DATABENTO_CONFIG.get("API_KEY")
 
+# Live DataBento API integration test. Excluded from the default CI unit run
+# (`-m "not apitest and not downloader"`) unless explicitly enabled.
+pytestmark = [pytest.mark.apitest]
+
 
 class UltraSimpleStrategy(Strategy):
     """Buy on iteration 1, sell on iteration 5. That's it."""

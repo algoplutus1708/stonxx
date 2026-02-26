@@ -395,13 +395,24 @@ def _format_futures_symbol_for_databento(asset: Asset, reference_date: datetime 
         # For specific contracts, return full year format (not DataBento short format)
         return formatted_symbol
 
-    # IDIOT-PROOFING: If asset_type is FUTURE but no expiration, treat as continuous
+    # If asset_type is FUTURE but no expiration, resolve as a rolling contract.
+    #
+    # - For explicit futures contracts, callers should pass `expiration=...`.
+    # - For rolling contracts, callers can use either:
+    #   - `Asset.AssetType.CONT_FUTURE`, or
+    #   - `Asset.AssetType.FUTURE` with `auto_expiry=...` (roll wrapper).
     if asset.asset_type == Asset.AssetType.FUTURE and not asset.expiration:
-        logger.warning(
-            f"Asset '{symbol}' has asset_type=FUTURE but no expiration specified. "
-            f"Auto-treating as continuous future and resolving to front month contract. "
-            f"To avoid this warning, use Asset.AssetType.CONT_FUTURE instead."
-        )
+        if getattr(asset, "auto_expiry", None):
+            logger.info(
+                "Resolving auto-expiry future %s as rolling contract via cont_future resolution for DataBento.",
+                symbol,
+            )
+        else:
+            logger.warning(
+                f"Asset '{symbol}' has asset_type=FUTURE but no expiration specified. "
+                f"Auto-treating as continuous future and resolving to front month contract. "
+                f"To avoid this warning, use Asset.AssetType.CONT_FUTURE (or set auto_expiry=...)."
+            )
         # Create temporary continuous futures asset and resolve
         temp_asset = Asset(symbol=symbol, asset_type=Asset.AssetType.CONT_FUTURE)
         resolved_symbol = temp_asset.resolve_continuous_futures_contract(

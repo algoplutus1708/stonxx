@@ -24,10 +24,24 @@ from lumibot.backtesting import ThetaDataBacktesting, PolygonDataBacktesting
 load_dotenv()
 
 
-@pytest.mark.skipif(
-    not os.environ.get("THETADATA_USERNAME") or not os.environ.get("THETADATA_PASSWORD"),
-    reason="Requires ThetaData credentials",
-)
+@pytest.fixture
+def require_thetadata_credentials():
+    """Ensure ThetaData credentials are present and not placeholders.
+
+    Skips the test at setup time if credentials are missing or invalid.
+    """
+    username = os.environ.get("THETADATA_USERNAME")
+    password = os.environ.get("THETADATA_PASSWORD")
+    if not username or not password or username == "uname":
+        pytest.skip(
+            "Skipping due to missing/placeholder ThetaData credentials: "
+            "THETADATA_USERNAME/THETADATA_PASSWORD"
+        )
+
+
+@pytest.mark.apitest
+@pytest.mark.downloader
+@pytest.mark.usefixtures("require_thetadata_credentials")
 class TestIndexDataVerification:
     """Comprehensive index data verification tests."""
 

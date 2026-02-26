@@ -282,12 +282,8 @@ def stock_runs():
     return theta_data, polygon_data
 
 
-@pytest.mark.skipif(
-    not os.environ.get("POLYGON_API_KEY")
-    or not os.environ.get("THETADATA_USERNAME")
-    or not os.environ.get("THETADATA_PASSWORD"),
-    reason="Requires Polygon + ThetaData credentials",
-)
+@pytest.mark.apitest
+@pytest.mark.downloader
 class TestThetaDataVsPolygonComparison:
     """Comparison tests between ThetaData and Polygon."""
 

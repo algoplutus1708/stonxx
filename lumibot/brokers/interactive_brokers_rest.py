@@ -861,7 +861,7 @@ class InteractiveBrokersREST(Broker):
 
             orderType = ORDERTYPE_MAPPING[order.order_type]
 
-            conid = self.data_source.get_conid_from_asset(order.asset)
+            conid = self.data_source.get_conid_from_asset(order.asset, exchange=order.exchange)
 
             if conid is None:
                 asset_type = order.asset.asset_type
@@ -983,7 +983,7 @@ class InteractiveBrokersREST(Broker):
                 return None
 
             # Get the conid for the asset
-            conid = self.data_source.get_conid_from_asset(order.asset)
+            conid = self.data_source.get_conid_from_asset(order.asset, exchange=order.exchange)
             if conid is None:
                 logger.error(colored("Order conid Not Found", "red"))
                 return None

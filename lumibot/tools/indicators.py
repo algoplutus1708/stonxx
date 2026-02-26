@@ -6,6 +6,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import pytz
 import quantstats_lumi as qs
@@ -13,13 +14,20 @@ from plotly.subplots import make_subplots
 
 from ..constants import LUMIBOT_DEFAULT_TIMEZONE
 from lumibot.tools import to_datetime_aware
-from plotly.subplots import make_subplots
 
 from .yahoo_helper import YahooHelper as yh
 
 from lumibot.tools.lumibot_logger import get_logger
+from lumibot.tools.parquet_utils import (
+    coerce_object_columns_to_json_strings,
+    is_parquet_required,
+    write_parquet_with_logging,
+)
 
 logger = get_logger(__name__)
+
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_FALSE_ENV_VALUES = {"0", "false", "no", "off"}
 
 TERMINAL_TRADE_STATUSES_FOR_MARKERS = {
     "fill",
@@ -33,6 +41,34 @@ TERMINAL_TRADE_STATUSES_FOR_MARKERS = {
     "expired",
     "expire",
 }
+
+
+def _format_indicator_plotly_text(value: object, detail_text: object) -> str:
+    """Format plotly hover text for indicator markers/lines.
+
+    Strategies frequently omit `detail_text` for some points. When those points are collected
+    into a pandas DataFrame, missing values are represented as `NaN` (a float), not `None`.
+    This helper treats None/NaN/NA/empty strings as "no detail text" and always returns a
+    string, never raising.
+    """
+
+    base = "Value: " + str(value)
+
+    if detail_text is None:
+        return base
+
+    try:
+        if bool(pd.isna(detail_text)):
+            return base
+    except Exception:
+        # `pd.isna(list)` returns an array; `bool(array)` raises. Treat those as not-missing.
+        pass
+
+    detail_str = str(detail_text)
+    if detail_str.strip() == "":
+        return base
+
+    return base + "<br>" + detail_str
 
 
 def _build_trade_marker_tooltip(row: pd.Series):
@@ -208,9 +244,21 @@ def cagr(_df):
     df = df.sort_index(ascending=True)
     df["cum_return"] = (1 + df["return"]).cumprod()
     total_ret = df["cum_return"].iloc[-1]
-    start = datetime.fromtimestamp(df.index.values[0].astype("O") / 1e9, pytz.UTC)
-    end = datetime.fromtimestamp(df.index.values[-1].astype("O") / 1e9, pytz.UTC)
-    period_years = (end - start).days / 365.25
+    try:
+        start = pd.Timestamp(df.index[0])
+        end = pd.Timestamp(df.index[-1])
+        if start.tzinfo is None:
+            start = start.tz_localize(pytz.UTC)
+        else:
+            start = start.tz_convert(pytz.UTC)
+        if end.tzinfo is None:
+            end = end.tz_localize(pytz.UTC)
+        else:
+            end = end.tz_convert(pytz.UTC)
+        period_years = (end - start).days / 365.25
+    except Exception:
+        # Avoid tearing down backtests during end-of-run stats generation; return neutral CAGR.
+        return 0
     if period_years == 0:
         return 0
     CAGR = (total_ret) ** (1 / period_years) - 1
@@ -223,9 +271,21 @@ def volatility(_df):
     has the return for that time period (eg. daily)
     """
     df = _df.copy()
-    start = datetime.fromtimestamp(df.index.values[0].astype("O") / 1e9, pytz.UTC)
-    end = datetime.fromtimestamp(df.index.values[-1].astype("O") / 1e9, pytz.UTC)
-    period_years = (end - start).days / 365.25
+    try:
+        start = pd.Timestamp(df.index[0])
+        end = pd.Timestamp(df.index[-1])
+        if start.tzinfo is None:
+            start = start.tz_localize(pytz.UTC)
+        else:
+            start = start.tz_convert(pytz.UTC)
+        if end.tzinfo is None:
+            end = end.tz_localize(pytz.UTC)
+        else:
+            end = end.tz_convert(pytz.UTC)
+        period_years = (end - start).days / 365.25
+    except Exception:
+        # Avoid tearing down backtests during end-of-run stats generation; return neutral volatility.
+        return 0
     if period_years == 0:
         return 0
     ratio_to_annual = df["return"].count() / period_years
@@ -348,6 +408,8 @@ def get_symbol_returns(symbol, start=datetime(1900, 1, 1), end=datetime.now()):
 
     # Filter the DataFrame based on date range
     returns_df = returns_df.loc[(returns_df.index.date >= start.date()) & (returns_df.index.date <= end.date())]
+    if returns_df.empty:
+        return returns_df
 
     # Calculate percentage change and dividend yield
     returns_df.loc[:, "pct_change"] = returns_df["Close"].pct_change()
@@ -388,6 +450,31 @@ def _safe_color(raw_color, key_hint=""):
     return SAFE_COLOR_CYCLE[idx]
 
 
+def _env_flag_enabled(name: str, default: bool = False) -> bool:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+
+    normalized = str(raw_value).strip().lower()
+    if normalized in _TRUE_ENV_VALUES:
+        return True
+    if normalized in _FALSE_ENV_VALUES:
+        return False
+    return default
+
+
+def _safe_subplot_vertical_spacing(rows: int, default_spacing: float = 0.15, epsilon: float = 1e-6) -> float:
+    # Plotly requires vertical_spacing <= 1 / (rows - 1) for multi-row layouts.
+    if rows <= 1:
+        return 0.0
+
+    max_allowed = (1.0 / float(rows - 1)) - epsilon
+    if max_allowed <= 0:
+        return 0.0
+
+    return min(default_spacing, max_allowed)
+
+
 def calculate_returns(symbol, start=datetime(1900, 1, 1), end=datetime.now()):
     start = to_datetime_aware(start)
     end = to_datetime_aware(end)
@@ -402,6 +489,7 @@ def plot_indicators(
     plot_file_html="indicators.html",
     chart_markers_df=None,
     chart_lines_df=None,
+    chart_ohlc_df=None,
     strategy_name=None,
     show_indicators=True,
 ):
@@ -427,6 +515,13 @@ def plot_indicators(
         else:
             chart_lines_df["plot_name"] = chart_lines_df["plot_name"].fillna("default_plot")
 
+    if chart_ohlc_df is not None and not chart_ohlc_df.empty:
+        chart_ohlc_df = chart_ohlc_df.copy()
+        if "plot_name" not in chart_ohlc_df.columns:
+            chart_ohlc_df["plot_name"] = "default_plot"
+        else:
+            chart_ohlc_df["plot_name"] = chart_ohlc_df["plot_name"].fillna("default_plot")
+
     # Get unique plot_names from markers and lines
     plot_names = set()
 
@@ -436,229 +531,332 @@ def plot_indicators(
     if chart_lines_df is not None and not chart_lines_df.empty:
         plot_names.update(chart_lines_df["plot_name"].unique())
 
-    # Convert to sorted list to ensure consistent order
-    plot_names = sorted(list(plot_names))
+    if chart_ohlc_df is not None and not chart_ohlc_df.empty:
+        plot_names.update(chart_ohlc_df["plot_name"].unique())
 
-    # Ensure num_subplots is at least 1 to avoid ValueError in make_subplots
-    num_subplots = max(1, len(plot_names))
-    subplot_titles = plot_names if num_subplots > 0 else ["default_plot"]
+    # Convert to sorted list to ensure consistent order. Ensure at least one subplot exists
+    # even when the strategy emitted no chart data (empty indicators should still produce artifacts).
+    plot_names = sorted(list(plot_names)) or ["default_plot"]
+    num_subplots = len(plot_names)
+    subplot_titles = plot_names
 
-    # Create subplots without shared x-axes
-    fig = make_subplots(
-        rows=num_subplots,
-        cols=1,
-        subplot_titles=subplot_titles,
-        shared_xaxes=False,  # Do not use shared x-axes
-        vertical_spacing=0.15,  # Increase spacing between subplots to prevent range slider overlap,
-    )
+    vertical_spacing = _safe_subplot_vertical_spacing(num_subplots)
+    if vertical_spacing < 0.15:
+        logger.info(
+            f"Adjusted indicators subplot vertical spacing from 0.15 to {vertical_spacing:.6f} for {num_subplots} rows."
+        )
 
-    has_chart_data = False
+    try:
+        # Create subplots without shared x-axes
+        fig = make_subplots(
+            rows=num_subplots,
+            cols=1,
+            subplot_titles=subplot_titles,
+            shared_xaxes=False,  # Do not use shared x-axes
+            vertical_spacing=vertical_spacing,
+        )
 
-    ###############################
-    # Chart Markers
-    ###############################
+        has_chart_data = False
 
-    def generate_marker_plotly_text(row):
-        if row["detail_text"] is None:
-            return "Value: " + str(row["value"])
-        else:
-            return "Value: " + str(row["value"]) + "<br>" + row["detail_text"]
+        ###############################
+        # Chart Markers
+        ###############################
 
-    # Plot the chart markers
-    if chart_markers_df is not None and not chart_markers_df.empty:
-        chart_markers_df["detail_text"] = chart_markers_df.apply(generate_marker_plotly_text, axis=1)
+        def generate_marker_plotly_text(row):
+            return _format_indicator_plotly_text(row.get("value"), row.get("detail_text"))
 
-        # Group by plot_name first, then by name
-        for plot_name, plot_df in chart_markers_df.groupby("plot_name"):
-            # Loop over the marker names for this plot_name
-            for marker_name, group_df in plot_df.groupby("name"):
-                group_df = group_df.copy()
-                # Get the marker symbol
-                marker_symbol = group_df["symbol"].iloc[0]
+        # Plot the chart markers
+        if chart_markers_df is not None and not chart_markers_df.empty:
+            chart_markers_df["detail_text"] = chart_markers_df.apply(generate_marker_plotly_text, axis=1)
 
-                # Determine marker size(s), falling back to sensible defaults when unspecified
-                default_marker_size = 25
-                raw_sizes = group_df.get("size")
-                marker_size = default_marker_size
+            # Group by plot_name first, then by name
+            for plot_name, plot_df in chart_markers_df.groupby("plot_name"):
+                # Loop over the marker names for this plot_name
+                for marker_name, group_df in plot_df.groupby("name"):
+                    group_df = group_df.copy()
+                    # Get the marker symbol
+                    marker_symbol = group_df["symbol"].iloc[0]
 
-                if raw_sizes is not None:
-                    marker_sizes = pd.to_numeric(raw_sizes, errors="coerce")
+                    # Determine marker size(s), falling back to sensible defaults when unspecified
+                    default_marker_size = 25
+                    raw_sizes = group_df.get("size")
+                    marker_size = default_marker_size
 
-                    if isinstance(marker_sizes, pd.Series):
-                        marker_sizes = marker_sizes.fillna(default_marker_size).clip(lower=1)
-                        unique_sizes = marker_sizes.unique()
-                        if len(unique_sizes) == 1:
-                            marker_size = float(unique_sizes[0])
+                    if raw_sizes is not None:
+                        marker_sizes = pd.to_numeric(raw_sizes, errors="coerce")
+
+                        if isinstance(marker_sizes, pd.Series):
+                            marker_sizes = marker_sizes.fillna(default_marker_size).clip(lower=1)
+                            unique_sizes = marker_sizes.unique()
+                            if len(unique_sizes) == 1:
+                                marker_size = float(unique_sizes[0])
+                            else:
+                                marker_size = marker_sizes.tolist()
                         else:
-                            marker_size = marker_sizes.tolist()
-                    else:
-                        if pd.isna(marker_sizes) or marker_sizes <= 0:
-                            marker_size = default_marker_size
-                        else:
-                            marker_size = float(marker_sizes)
+                            if pd.isna(marker_sizes) or marker_sizes <= 0:
+                                marker_size = default_marker_size
+                            else:
+                                marker_size = float(marker_sizes)
 
-                if "color" not in group_df.columns:
-                    group_df["color"] = None
-                group_df.loc[:, "color"] = group_df["color"].apply(
-                    lambda val: _safe_color(val, f"{plot_name}:{marker_name}")
+                    if "color" not in group_df.columns:
+                        group_df["color"] = None
+                    group_df.loc[:, "color"] = group_df["color"].apply(
+                        lambda val: _safe_color(val, f"{plot_name}:{marker_name}")
+                    )
+
+                    # Determine which subplot to use
+                    row = plot_names.index(plot_name) + 1
+
+                    # Create a new trace for this marker name
+                    fig.add_trace(
+                        go.Scatter(
+                            x=group_df["datetime"],
+                            y=group_df["value"],
+                            mode="markers",
+                            name=marker_name,
+                            marker_color=group_df["color"],
+                            marker_size=marker_size,
+                            marker_symbol=marker_symbol,
+                            hovertemplate=f"{marker_name}<br>%{{text}}<br>%{{x|%b %d %Y %I:%M:%S %p}}<extra></extra>",
+                            text=group_df["detail_text"],
+                        ),
+                        row=row,
+                        col=1
+                    )
+
+            has_chart_data = True
+
+        ###############################
+        # Chart Lines
+        ###############################
+
+        def generate_line_plotly_text(row):
+            return _format_indicator_plotly_text(row.get("value"), row.get("detail_text"))
+
+        # Plot the chart lines
+        if chart_lines_df is not None and not chart_lines_df.empty:
+            chart_lines_df["detail_text"] = chart_lines_df.apply(generate_line_plotly_text, axis=1)
+
+            # Group by plot_name first, then by name
+            for plot_name, plot_df in chart_lines_df.groupby("plot_name"):
+                # Loop over the line names for this plot_name
+                for line_name, group_df in plot_df.groupby("name"):
+                    if "color" not in group_df.columns:
+                        group_df = group_df.assign(color=None)
+                    color = _safe_color(group_df["color"].iloc[0], f"{plot_name}:{line_name}")
+
+                    # Determine which subplot to use
+                    row = plot_names.index(plot_name) + 1
+
+                    # Create a new trace for this line name
+                    fig.add_trace(
+                        go.Scatter(
+                            x=group_df["datetime"],
+                            y=group_df["value"],
+                            mode="lines",
+                            name=line_name,
+                            line_color=color,
+                            hovertemplate=f"{line_name}<br>%{{text}}<br>%{{x|%b %d %Y %I:%M:%S %p}}<extra></extra>",
+                            text=group_df["detail_text"],
+                        ),
+                        row=row,
+                        col=1
+                    )
+
+            has_chart_data = True
+
+        ###############################
+        # Chart OHLC
+        ###############################
+
+        def _generate_ohlc_hover_text(row):
+            base = f"O: {row['open']}<br>H: {row['high']}<br>L: {row['low']}<br>C: {row['close']}"
+            if row.get("detail_text") is None:
+                return base
+            return base + "<br>" + str(row.get("detail_text"))
+
+        if chart_ohlc_df is not None and not chart_ohlc_df.empty:
+            chart_ohlc_df = chart_ohlc_df.copy()
+
+            for col in ("open", "high", "low", "close"):
+                if col not in chart_ohlc_df.columns:
+                    logger.warning(f"OHLC data missing required column '{col}', skipping OHLC plotting.")
+                    chart_ohlc_df = None
+                    break
+
+            if chart_ohlc_df is not None and not chart_ohlc_df.empty:
+                if "color" not in chart_ohlc_df.columns:
+                    chart_ohlc_df["color"] = None
+
+                # Default per-bar colors: green for bullish, red for bearish (matches Strategy.add_ohlc defaults).
+                chart_ohlc_df["color"] = chart_ohlc_df["color"].where(
+                    chart_ohlc_df["color"].notna(),
+                    np.where(chart_ohlc_df["close"] >= chart_ohlc_df["open"], "green", "red"),
                 )
 
-                # Determine which subplot to use
-                row = plot_names.index(plot_name) + 1
+                chart_ohlc_df["detail_text"] = chart_ohlc_df.apply(_generate_ohlc_hover_text, axis=1)
 
-                # Create a new trace for this marker name
-                fig.add_trace(
-                    go.Scatter(
-                        x=group_df["datetime"],
-                        y=group_df["value"],
-                        mode="markers",
-                        name=marker_name,
-                        marker_color=group_df["color"],
-                        marker_size=marker_size,
-                        marker_symbol=marker_symbol,
-                        hovertemplate=f"{marker_name}<br>%{{text}}<br>%{{x|%b %d %Y %I:%M:%S %p}}<extra></extra>",
-                        text=group_df["detail_text"],
-                    ),
-                    row=row,
-                    col=1
-                )
+                # Group by plot_name first, then by series name.
+                for plot_name, plot_df in chart_ohlc_df.groupby("plot_name"):
+                    for ohlc_name, group_df in plot_df.groupby("name"):
+                        row = plot_names.index(plot_name) + 1
 
-        has_chart_data = True
+                        # Preserve per-bar colors by splitting into separate traces per color.
+                        color_groups = list(group_df.groupby("color"))
+                        for idx, (bar_color, colored_df) in enumerate(color_groups):
+                            trace_color = _safe_color(bar_color, f"{plot_name}:{ohlc_name}:{bar_color}")
 
-    ###############################
-    # Chart Lines
-    ###############################
+                            fig.add_trace(
+                                go.Candlestick(
+                                    x=colored_df["datetime"],
+                                    open=colored_df["open"],
+                                    high=colored_df["high"],
+                                    low=colored_df["low"],
+                                    close=colored_df["close"],
+                                    name=ohlc_name,
+                                    showlegend=idx == 0,
+                                    legendgroup=ohlc_name,
+                                    increasing_line_color=trace_color,
+                                    decreasing_line_color=trace_color,
+                                    increasing_fillcolor=trace_color,
+                                    decreasing_fillcolor=trace_color,
+                                    hovertext=colored_df["detail_text"],
+                                    hoverinfo="x+text",
+                                ),
+                                row=row,
+                                col=1,
+                            )
 
-    def generate_line_plotly_text(row):
-        if row["detail_text"] is None:
-            return "Value: " + str(row["value"])
-        else:
-            return "Value: " + str(row["value"]) + "<br>" + row["detail_text"]
+                has_chart_data = True
 
-    # Plot the chart lines
-    if chart_lines_df is not None and not chart_lines_df.empty:
-        chart_lines_df["detail_text"] = chart_lines_df.apply(generate_line_plotly_text, axis=1)
+        ###############################
+        # Chart Titles and Layouts
+        ###############################
 
-        # Group by plot_name first, then by name
-        for plot_name, plot_df in chart_lines_df.groupby("plot_name"):
-            # Loop over the line names for this plot_name
-            for line_name, group_df in plot_df.groupby("name"):
-                if "color" not in group_df.columns:
-                    group_df = group_df.assign(color=None)
-                color = _safe_color(group_df["color"].iloc[0], f"{plot_name}:{line_name}")
-
-                # Determine which subplot to use
-                row = plot_names.index(plot_name) + 1
-
-                # Create a new trace for this line name
-                fig.add_trace(
-                    go.Scatter(
-                        x=group_df["datetime"],
-                        y=group_df["value"],
-                        mode="lines",
-                        name=line_name,
-                        line_color=color,
-                        hovertemplate=f"{line_name}<br>%{{text}}<br>%{{x|%b %d %Y %I:%M:%S %p}}<extra></extra>",
-                        text=group_df["detail_text"],
-                    ),
-                    row=row,
-                    col=1
-                )
-
-        has_chart_data = True
-
-    ###############################
-    # Chart Titles and Layouts
-    ###############################
-
-    if has_chart_data:
         # Set title and layout
         # Calculate height based on number of subplots
         # 400px per subplot
         height = max(800, num_subplots * 400)
 
+        title_text = f"Indicators for {strategy_name}" if strategy_name else "Indicators"
+        if not has_chart_data:
+            title_text = title_text + " (no indicator data)"
+
         fig.update_layout(
-            title_text=f"Indicators for {strategy_name}",
+            title_text=title_text,
             title_font_size=30,
             template="plotly_dark",
             height=height,  # Dynamic height based on number of subplots
             margin=dict(t=150),  # Add more space between title and first subplot
         )
 
-        # Range selector buttons
-        rangeselector_buttons = list([
-            dict(count=1, label="1m", step="month", stepmode="backward"),
-            dict(count=6, label="6m", step="month", stepmode="backward"),
-            dict(count=1, label="YTD", step="year", stepmode="todate"),
-            dict(count=1, label="1y", step="year", stepmode="backward"),
-            dict(step="all"),
-        ])
+        if has_chart_data:
+            # Range selector buttons
+            rangeselector_buttons = list([
+                dict(count=1, label="1m", step="month", stepmode="backward"),
+                dict(count=6, label="6m", step="month", stepmode="backward"),
+                dict(count=1, label="YTD", step="year", stepmode="todate"),
+                dict(count=1, label="1y", step="year", stepmode="backward"),
+                dict(step="all"),
+            ])
 
-        # Update axes for all subplots
-        for i in range(1, num_subplots + 1):
-            # Get the plot name for this subplot
-            plot_title = plot_names[i - 1]
+            # Update axes for all subplots
+            for i in range(1, num_subplots + 1):
+                # Get the plot name for this subplot
+                plot_title = plot_names[i - 1]
 
-            # Set y-axes titles for each subplot
-            fig.update_yaxes(
-                title_text=plot_title,
-                secondary_y=False,
-                row=i,
-                col=1
+                # Set y-axes titles for each subplot
+                fig.update_yaxes(
+                    title_text=plot_title,
+                    secondary_y=False,
+                    row=i,
+                    col=1
+                )
+
+                # Add range selector and range slider to each subplot
+                fig.update_xaxes(
+                    rangeselector=dict(
+                        buttons=rangeselector_buttons,
+                        font=dict(color="black"),
+                        activecolor="grey",
+                        bgcolor="white",
+                    ),
+                    rangeslider=dict(
+                        visible=True,
+                        thickness=0.02  # Make the range slider height shorter to make line graph appear taller
+                    ),
+                    row=i,
+                    col=1
+                )
+
+        disable_ui = _env_flag_enabled("LUMIBOT_DISABLE_UI", default=False) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        write_indicators_html = _env_flag_enabled("LUMIBOT_WRITE_INDICATORS_HTML", default=True)
+
+        if write_indicators_html:
+            # Create graph (auto_open disabled for CI/tests).
+            fig.write_html(plot_file_html, auto_open=show_indicators and not disable_ui)
+        else:
+            logger.info(
+                "Skipping indicators HTML generation because LUMIBOT_WRITE_INDICATORS_HTML is disabled."
             )
-
-            # Add range selector and range slider to each subplot
-            fig.update_xaxes(
-                rangeselector=dict(
-                    buttons=rangeselector_buttons,
-                    font=dict(color="black"),
-                    activecolor="grey",
-                    bgcolor="white",
-                ),
-                rangeslider=dict(
-                    visible=True,
-                    thickness=0.02  # Make the range slider height shorter to make line graph appear taller
-                ),
-                row=i,
-                col=1
-            )
-
-        disable_ui = (
-            os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
-            or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    except Exception:
+        logger.exception(
+            "Indicators subplot rendering failed; continuing with indicators CSV/parquet export."
         )
 
-        # Create graph (auto_open disabled for CI/tests).
-        fig.write_html(plot_file_html, auto_open=show_indicators and not disable_ui)
+    # Get the file name for the CSV file by removing the .html extension and adding .csv
+    csv_file = plot_file_html.replace(".html", ".csv")
 
-        # Get the file name for the CSV file by removing the .html extension and adding .csv
-        csv_file = plot_file_html.replace(".html", ".csv")
+    # Export chart markers and lines to CSV - combine them and sort by datetime
+    standard_columns = [
+        "datetime",
+        "name",
+        "plot_name",
+        "type",
+        "value",
+        "symbol",
+        "size",
+        "color",
+        "detail_text",
+        "open",
+        "high",
+        "low",
+        "close",
+    ]
+    export_dfs = []
+    if chart_markers_df is not None and not chart_markers_df.empty:
+        markers_out = chart_markers_df.copy()
+        markers_out["type"] = "marker"
+        export_dfs.append(markers_out)
+    if chart_lines_df is not None and not chart_lines_df.empty:
+        lines_out = chart_lines_df.copy()
+        lines_out["type"] = "line"
+        export_dfs.append(lines_out)
+    if chart_ohlc_df is not None and not chart_ohlc_df.empty:
+        ohlc_out = chart_ohlc_df.copy()
+        ohlc_out["type"] = "ohlc"
+        export_dfs.append(ohlc_out)
 
-        # Export chart markers and lines to CSV - combine them and sort by datetime
-        if chart_markers_df is not None and not chart_markers_df.empty and chart_lines_df is not None and not chart_lines_df.empty:
-            # Add type column to both dataframes
-            chart_markers_df = chart_markers_df.copy()
-            chart_markers_df["type"] = "marker"
+    if export_dfs:
+        combined_df = pd.concat(export_dfs, ignore_index=True).sort_values(by="datetime")
+    else:
+        # Always emit indicators.csv so downstream systems can reliably query it.
+        # Some strategies produce no markers/lines/OHLC; treat this as "empty indicators", not a missing artifact.
+        combined_df = pd.DataFrame(columns=standard_columns)
 
-            chart_lines_df = chart_lines_df.copy()
-            chart_lines_df["type"] = "line"
-
-            # Both markers and lines exist - combine them and sort by datetime
-            combined_df = pd.concat([chart_markers_df, chart_lines_df], ignore_index=True)
-            combined_df = combined_df.sort_values(by="datetime")
-            combined_df.to_csv(csv_file, index=False)
-        elif chart_markers_df is not None and not chart_markers_df.empty:
-            # Only markers exist
-            chart_markers_df = chart_markers_df.copy()
-            chart_markers_df["type"] = "marker"
-            chart_markers_df = chart_markers_df.sort_values(by="datetime")
-            chart_markers_df.to_csv(csv_file, index=False)
-        elif chart_lines_df is not None and not chart_lines_df.empty:
-            # Only lines exist
-            chart_lines_df = chart_lines_df.copy()
-            chart_lines_df["type"] = "line"
-            chart_lines_df = chart_lines_df.sort_values(by="datetime")
-            chart_lines_df.to_csv(csv_file, index=False)
+    combined_df.to_csv(csv_file, index=False)
+    parquet_file = csv_file.replace(".csv", ".parquet")
+    required = is_parquet_required()
+    write_parquet_with_logging(
+        df=combined_df,
+        path=parquet_file,
+        artifact="indicators",
+        logger=logger,
+        index=False,
+        required=required,
+        compression="zstd",
+        sanitizer=coerce_object_columns_to_json_strings,
+    )
 
 
 def plot_returns(
@@ -678,10 +876,7 @@ def plot_returns(
         logger.info("show_plot is False, not creating the plot file or CSV.")
         return
 
-    disable_ui = (
-        os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
-        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
-    )
+    disable_ui = _env_flag_enabled("LUMIBOT_DISABLE_UI", default=False) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
     logger.info("\nCreating trades plot and CSV...")
 
@@ -699,6 +894,17 @@ def plot_returns(
         # Create an empty DataFrame with standard headers for the CSV
         empty_trades_for_csv = pd.DataFrame(columns=standard_trade_columns)
         empty_trades_for_csv.to_csv(trades_csv_file, index=False)
+        trades_parquet_file = trades_csv_file.replace(".csv", ".parquet")
+        write_parquet_with_logging(
+            df=empty_trades_for_csv,
+            path=trades_parquet_file,
+            artifact="trades",
+            logger=logger,
+            index=False,
+            required=is_parquet_required(),
+            compression="zstd",
+            sanitizer=coerce_object_columns_to_json_strings,
+        )
     else:
         # Prepare a copy of trades_df for CSV export, ensuring standard columns
         trades_df_for_csv = trades_df.copy()
@@ -710,6 +916,17 @@ def plot_returns(
         trades_df_for_csv = trades_df_for_csv[standard_trade_columns]
         trades_df_for_csv.to_csv(trades_csv_file, index=False)
         logger.info(f"Trades data saved to CSV: {trades_csv_file}")
+        trades_parquet_file = trades_csv_file.replace(".csv", ".parquet")
+        write_parquet_with_logging(
+            df=trades_df_for_csv,
+            path=trades_parquet_file,
+            artifact="trades",
+            logger=logger,
+            index=False,
+            required=is_parquet_required(),
+            compression="zstd",
+            sanitizer=coerce_object_columns_to_json_strings,
+        )
     # --- End: CSV Generation for trades_df ---
 
     dfs_concat = []
@@ -736,16 +953,19 @@ def plot_returns(
     # Make all the benchmark_df columns lowercase
     benchmark_df.columns = benchmark_df.columns.str.lower()
 
-    # Get the ratio of the strategy to the initial_budget
-    close_ratio = initial_budget / benchmark_df["close"].iloc[0]
-    open_ratio = initial_budget / benchmark_df["open"].iloc[0]
-    high_ratio = initial_budget / benchmark_df["high"].iloc[0]
-    low_ratio = initial_budget / benchmark_df["low"].iloc[0]
+    # Optional: scale OHLC series into the same units as the strategy budget.
+    # Some benchmark sources (e.g. IBKR fallback-to-equity-curve) intentionally provide only
+    # returns/cumprod and do not include OHLC. These series are not required for the plot itself.
+    if {"close", "open", "high", "low"}.issubset(set(benchmark_df.columns)):
+        close_ratio = initial_budget / benchmark_df["close"].iloc[0]
+        open_ratio = initial_budget / benchmark_df["open"].iloc[0]
+        high_ratio = initial_budget / benchmark_df["high"].iloc[0]
+        low_ratio = initial_budget / benchmark_df["low"].iloc[0]
 
-    df_final["Close"] = benchmark_df["close"] * close_ratio
-    df_final["Open"] = benchmark_df["open"] * open_ratio
-    df_final["High"] = benchmark_df["high"] * high_ratio
-    df_final["Low"] = benchmark_df["low"] * low_ratio
+        df_final["Close"] = benchmark_df["close"] * close_ratio
+        df_final["Open"] = benchmark_df["open"] * open_ratio
+        df_final["High"] = benchmark_df["high"] * high_ratio
+        df_final["Low"] = benchmark_df["low"] * low_ratio
 
     # Prepare trades data for merging into df_final for the plot
     # `processed_trades_for_merge` will be indexed by 'time' and contain standard trade columns (excluding 'time')
@@ -1020,6 +1240,11 @@ def _prepare_tearsheet_returns(strategy_df: pd.DataFrame, benchmark_df: pd.DataF
     if pd.notna(first_strategy_idx):
         first_strategy_idx = pd.to_datetime(first_strategy_idx)
         initial_equity = _strategy_df.loc[first_strategy_idx, "portfolio_value"]
+        # Some backtests record multiple portfolio snapshots at the same timestamp. In that case
+        # `.loc[...]` returns a Series; pick the last value to preserve the later
+        # `df.index.duplicated(keep="last")` de-dup semantics.
+        if isinstance(initial_equity, pd.Series):
+            initial_equity = initial_equity.iloc[-1]
         anchor_idx = first_strategy_idx.normalize() - pd.Timedelta(microseconds=1)
         anchor_row = pd.DataFrame(
             {
@@ -1073,12 +1298,6 @@ def create_tearsheet(
 
     logger.info("\nCreating tearsheet...")
 
-    df_final = _prepare_tearsheet_returns(strategy_df, benchmark_df)
-
-    if df_final is None:
-        logger.warning("No data to create tearsheet, skipping")
-        return
-
     def _write_placeholder_tearsheet(reason: str) -> None:
         """Write a small HTML file explaining why QuantStats was skipped/failed."""
         try:
@@ -1099,6 +1318,13 @@ def create_tearsheet(
                 f.write(placeholder)
         except Exception as exc:  # pragma: no cover
             logger.warning("Failed to write placeholder tearsheet to %s: %s", tearsheet_file, exc)
+
+    df_final = _prepare_tearsheet_returns(strategy_df, benchmark_df)
+
+    if df_final is None:
+        logger.warning("No data to create tearsheet; writing placeholder and skipping QuantStats.")
+        _write_placeholder_tearsheet("Insufficient data to compute strategy/benchmark return series for this window.")
+        return
 
     # Uncomment for debugging
     # _df1.to_csv(f"df1.csv")
@@ -1154,14 +1380,158 @@ def create_tearsheet(
                 backtest_time_seconds=backtest_time_seconds,
             )
     except Exception as exc:
-        logger.warning("QuantStats tearsheet generation failed: %s", exc)
-        _write_placeholder_tearsheet(f"QuantStats error: {exc}")
-        return
+        # QuantStats can fail on short windows when seaborn tries to fit a KDE on
+        # near-singular data. Retry once with the histogram KDE disabled so we still
+        # produce a useful tearsheet for short/deterministic windows.
+        message = str(exc)
+        logger.warning("QuantStats tearsheet generation failed: %s", message)
 
-    disable_ui = (
-        os.environ.get("LUMIBOT_DISABLE_UI", "").strip().lower() in ("1", "true", "yes")
-        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
-    )
+        retried = False
+        if any(token in message for token in ("gaussian_kde", "singular", "covariance matrix")):
+            try:
+                import quantstats_lumi._plotting.core as _qs_core
+                import quantstats_lumi.plots as _qs_plots
+                import quantstats_lumi.utils as _qs_utils
+
+                def _histogram_no_kde(
+                    returns,
+                    benchmark=None,
+                    resample="ME",
+                    fontname="Arial",
+                    grayscale=False,
+                    figsize=(10, 5),
+                    ylabel=True,
+                    subtitle=True,
+                    compounded=True,
+                    savefig=None,
+                    show=True,
+                    prepare_returns=True,
+                ):
+                    if prepare_returns:
+                        returns = _qs_utils._prepare_returns(returns)
+                        if benchmark is not None:
+                            benchmark = _qs_utils._prepare_returns(benchmark)
+
+                    if resample == "W":
+                        title_prefix = "Weekly "
+                    elif resample == "ME":
+                        title_prefix = "Monthly "
+                    elif resample == "Q":
+                        title_prefix = "Quarterly "
+                    elif resample == "YE":
+                        title_prefix = "Annual "
+                    else:
+                        title_prefix = ""
+
+                    return _qs_core.plot_histogram(
+                        returns,
+                        benchmark,
+                        resample=resample,
+                        grayscale=grayscale,
+                        fontname=fontname,
+                        title="Distribution of %sReturns" % title_prefix,
+                        kde=False,
+                        figsize=figsize,
+                        ylabel=ylabel,
+                        subtitle=subtitle,
+                        compounded=compounded,
+                        savefig=savefig,
+                        show=show,
+                    )
+
+                _qs_plots.histogram = _histogram_no_kde
+
+                with open(os.devnull, "w") as f, contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
+                    result = qs.reports.html(
+                        df_final["strategy"],
+                        df_final["benchmark"],
+                        title=title,
+                        output=tearsheet_file,
+                        download_filename=tearsheet_file,
+                        rf=risk_free_rate,
+                        parameters=strategy_parameters,
+                        lumibot_version=lumibot_version,
+                        backtesting_data_source=backtesting_data_source,
+                        backtesting_data_sources=backtesting_data_sources,
+                        backtest_time_seconds=backtest_time_seconds,
+                    )
+                retried = True
+            except Exception as retry_exc:
+                logger.warning("QuantStats retry (disable KDE) failed: %s", retry_exc)
+
+        if not retried:
+            _write_placeholder_tearsheet(f"QuantStats error: {exc}")
+            return
+
+    # QuantStats occasionally emits malformed or low-precision percent cells
+    # (e.g., "-" or "-11%" instead of "-11.89%"). Our CI acceptance harness pins to 0.01%
+    # resolution, so normalize the headline metrics using stable computations over the exact
+    # return series passed into QuantStats (df_final).
+    try:
+        import re
+
+        if isinstance(result, pd.DataFrame) and "Strategy" in result.columns:
+            # Acceptance baselines are pinned to 0.01% resolution.
+            percent_re = re.compile(r"^-?\\d[\\d,]*\\.\\d{2}%$")
+
+            def _is_valid_percent(value: object) -> bool:
+                if value is None:
+                    return False
+                s = str(value).strip()
+                return bool(percent_re.match(s))
+
+            def _fmt_percent(value: float) -> str:
+                return f"{float(value) * 100.0:.2f}%"
+
+            try:
+                import quantstats_lumi as _qs
+
+                strat_returns = _qs.utils._prepare_returns(df_final["strategy"].astype(float))
+                bench_returns = _qs.utils._prepare_returns(df_final["benchmark"].astype(float))
+
+                headline_values = {
+                    "Total Return": (
+                        float(_qs.stats.comp(strat_returns)),
+                        float(_qs.stats.comp(bench_returns)),
+                    ),
+                    "CAGR% (Annual Return)": (
+                        float(_qs.stats.cagr(strat_returns)),
+                        float(_qs.stats.cagr(bench_returns)),
+                    ),
+                    "Max Drawdown": (
+                        float(_qs.stats.max_drawdown(strat_returns)),  # negative fraction
+                        float(_qs.stats.max_drawdown(bench_returns)),  # negative fraction
+                    ),
+                }
+            except Exception:
+                headline_values = {}
+
+            # Best-effort detect benchmark column (QuantStats names it using `df_final["benchmark"].name`).
+            # QuantStats emits metrics with `Metric` as the index name, not a column.
+            benchmark_cols = [c for c in result.columns if c != "Strategy"]
+            benchmark_col = benchmark_cols[0] if benchmark_cols else None
+
+            for metric_name, pair in headline_values.items():
+                idx = None
+                if "Metric" in result.columns:
+                    row = result.index[result["Metric"] == metric_name]
+                    if len(row) == 1:
+                        idx = row[0]
+                else:
+                    if metric_name in result.index:
+                        idx = metric_name
+                if idx is None:
+                    continue
+
+                if not _is_valid_percent(result.at[idx, "Strategy"]):
+                    result.at[idx, "Strategy"] = _fmt_percent(pair[0])
+
+                if benchmark_col is not None and not _is_valid_percent(result.at[idx, benchmark_col]):
+                    result.at[idx, benchmark_col] = _fmt_percent(pair[1])
+    except Exception:  # pragma: no cover
+        pass
+
+    disable_ui = _env_flag_enabled("LUMIBOT_DISABLE_UI", default=False) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
     if show_tearsheet and not disable_ui:
         url = "file://" + os.path.abspath(str(tearsheet_file))
