@@ -49,6 +49,14 @@ _FUTURES_EXCHANGE_CACHE_LOADED = False
 _NEGATIVE_CONID_CACHE: Dict[str, Dict[str, Any]] = {}
 _NEGATIVE_CONID_CACHE_LOADED = False
 
+
+def _normalize_asset_type(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if "." in raw:
+        raw = raw.split(".")[-1]
+    return raw
+
+
 def _enable_futures_bid_ask_derivation() -> bool:
     """Whether to derive bid/ask quotes for futures from Bid_Ask + Midpoint history.
 
@@ -299,7 +307,7 @@ def get_price_data(
     start_local = start_utc.astimezone(LUMIBOT_DEFAULT_PYTZ)
     end_local = end_utc.astimezone(LUMIBOT_DEFAULT_PYTZ)
 
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     asset_auto_expiry = getattr(asset, "auto_expiry", None)
     if asset_type == "future" and getattr(asset, "expiration", None) is None and not asset_auto_expiry:
         raise ValueError(
@@ -774,6 +782,9 @@ def get_price_data(
     if "missing" in frame.columns:
         frame = frame[~frame["missing"].fillna(False)]
         frame = frame.drop(columns=["missing"], errors="ignore")
+    if asset_type in {"stock", "index"} and str(timestep_component).endswith("day"):
+        frame = _align_stock_index_daily_to_session_close(frame)
+        frame = _repair_isolated_split_spikes_daily(frame)
     return frame
 
 
@@ -786,6 +797,182 @@ def _frame_has_actionable_bid_ask(df: pd.DataFrame) -> bool:
     ask = pd.to_numeric(df["ask"], errors="coerce")
     spread = ask - bid
     return bool((spread > 0).any())
+
+
+def _align_stock_index_daily_to_session_close(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize IBKR stock/index daily timestamps to the session close.
+
+    Why:
+    - IBKR day bars are often timestamped near UTC midnight, which appears as ~04:00/05:00 ET.
+    - Daily backtests that run at market open can then incorrectly treat the current session's
+      bar as already available.
+    - Re-indexing day bars to 16:00 ET aligns them with end-of-session semantics used by
+      other providers (for example ThetaData day bars at 21:00 UTC in winter).
+    """
+    if df is None or df.empty:
+        return df
+
+    frame = df.sort_index().copy()
+    idx = pd.DatetimeIndex(frame.index)
+    if idx.tz is None:
+        idx = idx.tz_localize(LUMIBOT_DEFAULT_PYTZ)
+    else:
+        idx = idx.tz_convert(LUMIBOT_DEFAULT_PYTZ)
+
+    aligned_idx = idx.normalize() + pd.Timedelta(hours=16)
+    frame.index = aligned_idx
+    frame = frame[~frame.index.duplicated(keep="last")].sort_index()
+    return frame
+
+
+def _repair_isolated_split_spikes_daily(df: pd.DataFrame) -> pd.DataFrame:
+    """Repair isolated split-like spikes in daily stock/index bars.
+
+    Why:
+    - Some IBKR daily stock/index series can contain a one-day bar scaled by a split factor
+      (2x/3x/...) that immediately reverts the next day.
+    - This creates impossible +100%/+200% followed by -50%/-66% portfolio jumps.
+
+    Scope:
+    - Only isolated one-day anomalies are repaired.
+    - Persistent level shifts are left untouched.
+    """
+    if df is None or df.empty or "close" not in df.columns or len(df) < 3:
+        return df
+
+    frame = df.sort_index().copy()
+    candidate_cols = [c for c in ("open", "high", "low", "close", "bid", "ask", "last", "vwap") if c in frame.columns]
+    if not candidate_cols:
+        return frame
+
+    numeric = {col: pd.to_numeric(frame[col], errors="coerce").copy() for col in candidate_cols}
+    close = numeric["close"]
+
+    factors = (2.0, 3.0, 4.0, 5.0, 10.0)
+    factor_tol = 0.25
+    reversion_tol = 0.25
+    adjusted_rows = 0
+
+    def _near(value: float, target: float, rel_tol: float) -> bool:
+        if value <= 0 or target <= 0:
+            return False
+        return abs(value - target) <= abs(target) * rel_tol
+
+    def _row_scales_like(idx: int, factor: float, upward: bool) -> bool:
+        # Require most OHLC fields to indicate the same factor jump.
+        ratios: list[float] = []
+        for col in ("open", "high", "low", "close"):
+            series = numeric.get(col)
+            if series is None:
+                continue
+            prev_val = series.iat[idx - 1]
+            cur_val = series.iat[idx]
+            if pd.isna(prev_val) or pd.isna(cur_val) or prev_val <= 0 or cur_val <= 0:
+                continue
+            ratio = (cur_val / prev_val) if upward else (prev_val / cur_val)
+            ratios.append(float(ratio))
+        if len(ratios) < 2:
+            return False
+        hits = sum(1 for ratio in ratios if _near(ratio, factor, factor_tol))
+        return hits >= max(2, len(ratios) - 1)
+
+    def _trailing_level_stable(last_idx: int) -> bool:
+        # Guard against mutating genuine regime shifts by requiring a stable
+        # trailing level before we adjust a terminal-row spike.
+        start = max(0, last_idx - 6)
+        trailing = close.iloc[start:last_idx].dropna()
+        if len(trailing) < 3:
+            return False
+        ref = float(trailing.median())
+        if ref <= 0:
+            return False
+        return abs(float(close.iat[last_idx - 1]) / ref - 1.0) <= 0.35
+
+    for i in range(1, len(frame) - 1):
+        prev_close = close.iat[i - 1]
+        cur_close = close.iat[i]
+        next_close = close.iat[i + 1]
+        if (
+            pd.isna(prev_close)
+            or pd.isna(cur_close)
+            or pd.isna(next_close)
+            or prev_close <= 0
+            or cur_close <= 0
+            or next_close <= 0
+        ):
+            continue
+
+        action = None
+        for factor in factors:
+            # Upward spike on day i that reverts on day i+1.
+            if (
+                _near(float(cur_close / prev_close), factor, factor_tol)
+                and _near(float(next_close / prev_close), 1.0, reversion_tol)
+                and _row_scales_like(i, factor, upward=True)
+            ):
+                action = ("divide", factor)
+                break
+
+            # Downward spike on day i that reverts on day i+1.
+            if (
+                _near(float(prev_close / cur_close), factor, factor_tol)
+                and _near(float(next_close / prev_close), 1.0, reversion_tol)
+                and _row_scales_like(i, factor, upward=False)
+            ):
+                action = ("multiply", factor)
+                break
+
+        if action is None:
+            continue
+
+        op, factor = action
+        for col, series in numeric.items():
+            val = series.iat[i]
+            if pd.isna(val):
+                continue
+            series.iat[i] = (val / factor) if op == "divide" else (val * factor)
+        close = numeric["close"]
+        adjusted_rows += 1
+
+    # Terminal-row fallback:
+    # In rolling backtests we often evaluate up to the current day only, so the latest row does
+    # not yet have the next-day reversion available. Detect obvious split-factor spikes on that
+    # final row using trailing-level stability as a safety check.
+    last_i = len(frame) - 1
+    if last_i >= 1 and _trailing_level_stable(last_i):
+        prev_close = close.iat[last_i - 1]
+        cur_close = close.iat[last_i]
+        if (
+            not pd.isna(prev_close)
+            and not pd.isna(cur_close)
+            and prev_close > 0
+            and cur_close > 0
+        ):
+            terminal_action = None
+            for factor in factors:
+                if _near(float(cur_close / prev_close), factor, factor_tol) and _row_scales_like(last_i, factor, upward=True):
+                    terminal_action = ("divide", factor)
+                    break
+                if _near(float(prev_close / cur_close), factor, factor_tol) and _row_scales_like(last_i, factor, upward=False):
+                    terminal_action = ("multiply", factor)
+                    break
+
+            if terminal_action is not None:
+                op, factor = terminal_action
+                for col, series in numeric.items():
+                    val = series.iat[last_i]
+                    if pd.isna(val):
+                        continue
+                    series.iat[last_i] = (val / factor) if op == "divide" else (val * factor)
+                close = numeric["close"]
+                adjusted_rows += 1
+
+    if adjusted_rows > 0:
+        for col, series in numeric.items():
+            frame[col] = series
+        logger.warning("IBKR daily split-spike repair adjusted %s row(s).", adjusted_rows)
+
+    return frame
 
 
 def _resolve_cont_future_segments(*, asset: Asset, start_dt: datetime, end_dt: datetime, exchange: Optional[str]) -> list[tuple[Asset, datetime, datetime]]:
@@ -1195,7 +1382,7 @@ def _fetch_history_between_dates(
     conid = _resolve_conid(asset=asset, quote=quote, exchange=exchange)
     bar, bar_seconds, _cache_timestep = _timestep_to_ibkr_bar(timestep)
     period = _max_period_for_bar(bar)
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     # IBKR's `continuous=true` is IBKR-specific roll behavior. For LumiBot `cont_future` assets
     # we prefer our own synthetic roll (explicit contract series per expiration) so parity is
     # stable across data providers. Only request IBKR "continuous" when we truly do not have an
@@ -1854,7 +2041,7 @@ def _resolve_conid(*, asset: Asset, quote: Optional[Asset], exchange: Optional[s
                 except Exception:
                     pass
 
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     effective_exchange = exchange
     if asset_type in {"future", "cont_future"} and not effective_exchange:
         effective_exchange = _resolve_futures_exchange(getattr(asset, "symbol", ""))
@@ -2048,7 +2235,7 @@ def _lookup_conid_remote(
     mapping: Optional[Dict[str, int]] = None,
     keys_added: Optional[set[str]] = None,
 ) -> int:
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     if asset_type in {"future", "cont_future"}:
         if getattr(asset, "expiration", None) is None and asset_type != "cont_future" and not getattr(asset, "auto_expiry", None):
             raise ValueError(
@@ -2265,7 +2452,7 @@ def _cache_file_for(
 
 
 def _asset_folder(asset: Asset) -> str:
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     if asset_type in {"crypto"}:
         return "crypto"
     if asset_type in {"future", "cont_future"}:
@@ -2435,7 +2622,7 @@ def _fetch_contract_info(conid: int) -> Dict[str, Any]:
 
 def _maybe_apply_future_contract_metadata(*, asset: Asset, exchange: Optional[str]) -> None:
     """Best-effort: populate futures multiplier + min_tick for accurate PnL and tick rounding."""
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     if asset_type not in {"future", "cont_future"}:
         return
 
@@ -2510,7 +2697,7 @@ def _remote_payload_from_path(path: Path) -> Dict[str, object]:
 
 
 def _conid_key(asset: Asset, quote: Optional[Asset], exchange: Optional[str]) -> IbkrConidKey:
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     symbol = str(getattr(asset, "symbol", "") or "")
     quote_symbol = str(getattr(quote, "symbol", "") or "") if quote else ""
     exch = (exchange or "").strip().upper()

@@ -37,6 +37,13 @@ def _normalize_token(value: str) -> str:
     return re.sub(r"[\s_\-]+", "", (value or "").strip().lower())
 
 
+def _normalize_asset_type(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if "." in raw:
+        raw = raw.split(".")[-1]
+    return raw
+
+
 def _ccxt_exchange_id_from_token(token: str) -> str | None:
     """Resolve a user token to a CCXT exchange id (case/sep-insensitive).
 
@@ -331,7 +338,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
             except Exception:
                 pass
 
-        asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+        asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
         df = None
 
         # PERF: warm-cache minute strategies can call `get_historical_prices()` tens of thousands of
@@ -489,7 +496,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
         require_quote_data: bool,
         require_ohlc_data: bool,
     ) -> pd.DataFrame | None:
-        asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+        asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
 
         # PERF: warm-cache minute strategies can call `get_historical_prices()` tens of thousands of
         # times. In the router data source, IBKR history fetches must be amortized by prefetching
@@ -615,7 +622,7 @@ class _PolygonRoutingAdapter(_DataFrameRoutingAdapter):
         else:
             timespan = "minute"
 
-        asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+        asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
         if asset_type == "crypto" and ts_unit == "day" and canonical_key not in self._fully_loaded_series:
             try:
                 lookback_days = max(7, int(length) + 5)
@@ -889,7 +896,7 @@ class RoutedBacktestingPandas(ThetaDataBacktestingPandas):
         if getattr(self, "_registry", None) is None:
             # Defensive: some unit tests construct the router via __new__ without running __init__.
             self._registry = _ProviderRegistry(self)
-        asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+        asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
         raw = self._routing.get(asset_type) or self._routing.get("default") or "thetadata"
         return self._registry.resolve_provider_spec(raw)
 
@@ -942,7 +949,10 @@ class RoutedBacktestingPandas(ThetaDataBacktestingPandas):
             spec = ProviderSpec(provider="thetadata")
 
         if spec.provider != "thetadata" and timestep == "minute":
-            if not bool(getattr(self, "_observed_intraday_cadence", False)) and bool(
+            source_timestep = str(getattr(self, "_timestep", "") or "").strip().lower()
+            if source_timestep == "day":
+                timestep = "day"
+            elif not bool(getattr(self, "_observed_intraday_cadence", False)) and bool(
                 getattr(self, "_effective_day_mode", False)
             ):
                 timestep = "day"
@@ -968,7 +978,10 @@ class RoutedBacktestingPandas(ThetaDataBacktestingPandas):
             spec = ProviderSpec(provider="thetadata")
 
         if spec.provider != "thetadata" and timestep == "minute":
-            if not bool(getattr(self, "_observed_intraday_cadence", False)) and bool(
+            source_timestep = str(getattr(self, "_timestep", "") or "").strip().lower()
+            if source_timestep == "day":
+                timestep = "day"
+            elif not bool(getattr(self, "_observed_intraday_cadence", False)) and bool(
                 getattr(self, "_effective_day_mode", False)
             ):
                 timestep = "day"

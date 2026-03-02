@@ -3118,6 +3118,10 @@ class BacktestingBroker(Broker):
         if data_source is None:
             return False
 
+        source_timestep = str(getattr(data_source, "_timestep", "") or "").strip().lower()
+        if source_timestep == "day":
+            return True
+
         if not bool(getattr(data_source, "_effective_day_mode", False)):
             return False
         if bool(getattr(data_source, "_observed_intraday_cadence", False)):

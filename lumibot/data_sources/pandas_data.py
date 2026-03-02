@@ -374,6 +374,10 @@ class PandasData(DataSourceBacktesting):
 
         requested_unit = None
         normalized_key = None
+        asset_for_type = asset[0] if isinstance(asset, tuple) else asset
+        requested_asset_type = str(getattr(asset_for_type, "asset_type", "") or "").strip().lower()
+        if "." in requested_asset_type:
+            requested_asset_type = requested_asset_type.split(".")[-1]
         if timestep is not None:
             try:
                 qty, requested_unit = parse_timestep_qty_and_unit(str(timestep))
@@ -410,7 +414,15 @@ class PandasData(DataSourceBacktesting):
                 # Hour requests can be satisfied by either hour data or minute data (resample).
                 return data_ts in {"hour", "minute"}
             if requested_unit == "day":
-                # Day requests can be satisfied by either day data or minute data (resample).
+                # IMPORTANT:
+                # Keep explicit day requests pinned to native day datasets.
+                #
+                # Allowing minute datasets to satisfy day requests can silently bypass provider-
+                # specific day-bar normalization (for example split-spike repair/timestamp
+                # alignment in IBKR helpers), and can trigger expensive minute fetch churn in
+                # daily-cadence backtests.
+                if requested_asset_type in {"stock", "index"}:
+                    return data_ts == "day"
                 return data_ts in {"day", "minute"}
             # Fallback: require exact match for other timesteps.
             return data_ts == requested_unit
