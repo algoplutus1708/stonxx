@@ -424,19 +424,11 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 return None
             self._fully_loaded_series.add(canonical_key)
         elif asset_type in {"stock", "index"} and unit == "day" and canonical_key not in self._fully_loaded_series:
-            try:
-                # Daily lookback requests are in bars (trading sessions). Use a modest calendar
-                # warmup that stays close to ThetaData's start-window behavior for parity.
-                lookback_days = max(7, int(length) + 5)
-            except Exception:
-                lookback_days = 7
-            base_start = pd.Timestamp(self._router.datetime_start - timedelta(days=lookback_days))
-            # Keep routed stock/index warmup bounded to backtest-start minus lookback_days.
-            # Using `start_datetime` here can pull much deeper history than ThetaData baseline,
-            # which shifts first signals and breaks parity in mixed-source comparisons.
-            if base_start.tzinfo is None:
-                base_start = base_start.tz_localize(LUMIBOT_DEFAULT_PYTZ)
-            prefetch_start = base_start.to_pydatetime()
+            # Daily lookback requests are in trading bars, so rely on the provider-agnostic
+            # `start_datetime` computed by `get_start_datetime_and_ts_unit()`.
+            # Capping prefetch to a short calendar window from backtest start can underfill warmup
+            # bars and shift first signals by weeks/months.
+            prefetch_start = start_datetime
             prefetch_end = self._router.datetime_end or end_dt
             df = ibkr_helper.get_price_data(
                 asset=asset,

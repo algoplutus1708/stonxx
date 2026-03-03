@@ -114,6 +114,8 @@ Publishing is **tag-driven** via `.github/workflows/release.yml`.
    - Ensure required CI checks are green (unit + backtest + acceptance gates as applicable).
    - Local quick check (matches release workflow selection):
      - `python3 -m pytest -m "not apitest and not downloader" --tb=short -q --durations=30`
+   - If the local quick check times out, do not guess. Record the timeout result, run targeted tests for the changed
+     areas, push the version branch, and gate release on green GitHub CI for the same marker expression.
 
 2) **Update changelog (FULL RANGE, not just “recent work”)**
    - Add/refresh the `CHANGELOG.md` entry for `X.Y.Z` (dated) and ensure it includes:
@@ -243,6 +245,9 @@ Publishing is **tag-driven** via `.github/workflows/release.yml`.
     may not have those secrets available and will fail even when normal CI is green.
   - Fix direction: keep unit tests pure; use markers/skips for tests that require external services; document any
     required secrets and ensure the workflow environment is configured intentionally.
+- **Local-only commits can silently hitch a ride in a release branch.**
+  - Symptom: `git log origin/dev..HEAD` includes commits that were never pushed/reviewed on the mainline.
+  - Fix: treat that range as required release-review input (code + changelog + risk) before creating the deploy marker.
 - **Workflow file edits can be permission-gated**.
   - Some auth setups cannot push changes under `.github/workflows/` without a token that has the `workflow` scope.
   - If you hit this, don’t thrash: either use an appropriately-scoped token, or make a safe repo-side change that

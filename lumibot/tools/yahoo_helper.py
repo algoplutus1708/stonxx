@@ -486,14 +486,14 @@ class YahooHelper:
     @staticmethod
     def get_symbol_actions(symbol, caching=True):
         """https://github.com/ranaroussi/yfinance/blob/main/yfinance/base.py"""
-        history = YahooHelper.get_symbol__data(symbol, caching=caching)
+        history = YahooHelper.get_symbol_data(symbol, caching=caching)
         actions = history[["Dividends", "Stock Splits"]]
         return actions[actions != 0].dropna(how="all").fillna(0)
 
     @staticmethod
     def get_symbols_actions(symbols, caching=True):
         result = {}
-        data = YahooHelper.get_symbols__data(symbols, caching=caching)
+        data = YahooHelper.get_symbols_data(symbols, caching=caching)
         for symbol, df in data.items():
             actions = df[["Dividends", "Stock Splits"]]
             result[symbol] = actions[actions != 0].dropna(how="all").fillna(0)

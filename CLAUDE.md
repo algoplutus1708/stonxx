@@ -584,3 +584,13 @@ Without MCP tools, debugging these issues is slow and error-prone. With them, yo
 **USEFUL** for debugging Data Downloader issues:
 - Test API endpoints directly
 - Inspect network responses from ThetaData
+
+---
+
+## North Star Metrics and OKRs (CRITICAL)
+
+**Every project MUST have clearly defined North Star metrics and OKRs.** If metrics don't exist for this project, propose them as your first action. If they exist, reference them when making decisions.
+
+- Track leading indicators weekly. Create dashboards and graphs to visualize progress.
+- When starting any task, check: does this move a North Star metric? If not, question its priority.
+- See `/Users/robertgrzesik/Documents/Development/CLAUDE.md` for the full framework.

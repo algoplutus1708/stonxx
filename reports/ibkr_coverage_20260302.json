@@ -1,0 +1,85 @@
+{
+  "end": "2026-03-02 13:53:46.391269-05:00",
+  "generated_at": "2026-03-02T18:54:54.473148Z",
+  "pass_all": true,
+  "rows": [
+    {
+      "asset_type": "stock",
+      "first_dt": "2014-03-06 09:30:00-05:00",
+      "last_dt": "2026-02-27 09:30:00-05:00",
+      "notes": "",
+      "pass_10y": true,
+      "rows": 4011,
+      "span_days": 4376,
+      "span_years": 11.98,
+      "symbol": "TQQQ"
+    },
+    {
+      "asset_type": "stock",
+      "first_dt": "2014-03-06 04:00:00-05:00",
+      "last_dt": "2026-02-27 09:30:00-05:00",
+      "notes": "",
+      "pass_10y": true,
+      "rows": 4011,
+      "span_days": 4376,
+      "span_years": 11.98,
+      "symbol": "SPY"
+    },
+    {
+      "asset_type": "stock",
+      "first_dt": "2014-03-06 09:30:00-05:00",
+      "last_dt": "2026-02-27 09:30:00-05:00",
+      "notes": "",
+      "pass_10y": true,
+      "rows": 3014,
+      "span_days": 4376,
+      "span_years": 11.98,
+      "symbol": "QQQ"
+    },
+    {
+      "asset_type": "stock",
+      "first_dt": "2014-03-06 09:30:00-05:00",
+      "last_dt": "2026-02-27 09:30:00-05:00",
+      "notes": "",
+      "pass_10y": true,
+      "rows": 3014,
+      "span_days": 4376,
+      "span_years": 11.98,
+      "symbol": "AAPL"
+    },
+    {
+      "asset_type": "index",
+      "first_dt": "2014-03-06 09:30:00-05:00",
+      "last_dt": "2026-02-27 09:30:00-05:00",
+      "notes": "",
+      "pass_10y": true,
+      "rows": 3014,
+      "span_days": 4376,
+      "span_years": 11.98,
+      "symbol": "XSP"
+    },
+    {
+      "asset_type": "index",
+      "first_dt": "2014-03-06 09:30:00-05:00",
+      "last_dt": "2026-02-27 09:30:00-05:00",
+      "notes": "",
+      "pass_10y": true,
+      "rows": 3014,
+      "span_days": 4376,
+      "span_years": 11.98,
+      "symbol": "SPX"
+    },
+    {
+      "asset_type": "index",
+      "first_dt": "2014-03-06 09:30:00-05:00",
+      "last_dt": "2026-02-27 03:15:00-05:00",
+      "notes": "",
+      "pass_10y": true,
+      "rows": 3012,
+      "span_days": 4375,
+      "span_years": 11.98,
+      "symbol": "VIX"
+    }
+  ],
+  "start": "2014-03-05 13:53:46.391269-05:00"
+}

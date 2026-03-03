@@ -1,9 +1,20 @@
 # Changelog
 
-## 4.4.52 - Unreleased
+## 4.4.52 - 2026-03-03
 
-### Notes
-- _No changes yet._
+### Added
+- Regression tests for Yahoo corporate-actions helpers (`get_symbol_actions`, `get_symbols_actions`) and IBKR daily equity action enrichment.
+- Regression test for routed IBKR daily stock prefetch to guarantee full lookback warmup coverage.
+
+### Changed
+- Production-readiness harness (`scripts/ibkr_theta_prod_readiness.py`) now defaults SPX stress windows to 3 months (`2025-01-01` through `2025-03-31`) with a longer timeout.
+- Prod-like runner (`scripts/run_backtest_prodlike.py`) now supports `--perf-mode` for cleaner runtime benchmarking without plot/indicator/progress noise.
+- Routed IBKR daily stock/index prefetch now uses the computed bar lookback window (`start_datetime`) instead of a short calendar cap from backtest start.
+- Acceptance performance history records were refreshed for ongoing regression tracking.
+- Deployment runbook now documents local-timeout fallback and explicit review of local-only commit ranges before release.
+
+### Fixed
+- Yahoo helper typo in corporate-actions paths (`get_symbol_actions` / `get_symbols_actions`) that prevented IBKR equity split/dividend enrichment from loading actions.
 
 ## 4.4.51 - 2026-02-26
 

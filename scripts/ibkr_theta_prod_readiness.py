@@ -4,7 +4,7 @@
 Matrix:
 - Stock canonical: strategy_slowibkr.py (2013-01-01 -> 2026-01-31)
 - Options smoke: ZeroDTELastFridayStraddle.py
-- Options stress: SPX Short Straddle Intraday (Copy 4).py
+- Options stress: SPX Short Straddle Intraday (Copy 4).py (3-month minimum by default)
 
 Sources:
 - thetadata baseline
@@ -35,6 +35,8 @@ DEFAULT_SMOKE_STRATEGY = "/Users/robertgrzesik/Documents/Development/Strategy Li
 DEFAULT_STRESS_STRATEGY = "/Users/robertgrzesik/Documents/Development/Strategy Library/Demos/SPX Short Straddle Intraday (Copy 4).py"
 DEFAULT_LUMIBOT_ROOT = "/Users/robertgrzesik/Documents/Development/lumibot"
 DEFAULT_OUT_ROOT = "/Users/robertgrzesik/Documents/Development/backtest_runs"
+DEFAULT_STRESS_START = "2025-01-01"
+DEFAULT_STRESS_END = "2025-03-31"
 
 MIXED_SOURCE = json.dumps(
     {
@@ -514,9 +516,11 @@ def main() -> int:
     parser.add_argument("--stress-strategy", default=DEFAULT_STRESS_STRATEGY)
     parser.add_argument("--out-root", default=DEFAULT_OUT_ROOT)
     parser.add_argument("--run-stress", action="store_true", help="Include SPX stress strategy matrix")
+    parser.add_argument("--stress-start", default=DEFAULT_STRESS_START, help="Stress scenario start date (YYYY-MM-DD)")
+    parser.add_argument("--stress-end", default=DEFAULT_STRESS_END, help="Stress scenario end date (YYYY-MM-DD)")
     parser.add_argument("--timeout-stock", type=int, default=7200)
     parser.add_argument("--timeout-smoke", type=int, default=3600)
-    parser.add_argument("--timeout-stress", type=int, default=3600)
+    parser.add_argument("--timeout-stress", type=int, default=14400)
     args = parser.parse_args()
 
     run_root = Path(args.out_root).resolve() / f"ibkr_prod_readiness_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -543,8 +547,8 @@ def main() -> int:
             {
                 "name": "options_spx_stress",
                 "main": args.stress_strategy,
-                "start": "2025-01-06",
-                "end": "2025-01-10",
+                "start": args.stress_start,
+                "end": args.stress_end,
                 "timeout": args.timeout_stress,
             }
         )

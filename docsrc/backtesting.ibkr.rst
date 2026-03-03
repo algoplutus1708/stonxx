@@ -34,6 +34,17 @@ Supported Data
 
 - **Futures**: US futures across CME/CBOT/COMEX/NYMEX via IBKR historical endpoints (minute/hour/day bars).
 - **Spot crypto**: IBKR crypto bars (availability depends on region and IBKR product support).
+- **Stocks / Indexes (day bars)**: supported in routed backtests (for example mixed Theta+IBKR routing).
+
+Daily Stocks/Indexes: Warmup + Corporate Actions
+------------------------------------------------
+
+For routed daily stock/index backtests, LumiBot prefetches the full computed lookback window so long
+lookbacks (for example 200-day SMA signals) are not under-warmed near the backtest start.
+
+IBKR day-bar payloads do not include corporate-action columns directly. LumiBot enriches cached IBKR
+daily equity bars with ``dividend`` and ``stock_splits`` values using Yahoo actions as a best-effort
+source so split/dividend accounting remains available in backtests.
 
 Futures Exchange Routing (auto + override)
 ------------------------------------------
