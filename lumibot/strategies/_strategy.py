@@ -1595,19 +1595,6 @@ class _Strategy:
                     else:
                         # Keep behavior consistent with Yahoo benchmarks: use daily series.
                         benchmark_asset = Asset(symbol=benchmark_asset, asset_type="stock")
-                if (
-                    isinstance(benchmark_asset, Asset)
-                    and str(getattr(benchmark_asset, "asset_type", "")).lower() == "stock"
-                ):
-                    try:
-                        self._benchmark_returns_df = get_symbol_returns(
-                            benchmark_asset.symbol,
-                            self._backtesting_start,
-                            backtesting_end_adjusted,
-                        )
-                        return
-                    except Exception:
-                        pass
 
                 # Use daily bars for benchmark across intraday strategies to keep tearsheet cost bounded.
                 timestep = "day"
