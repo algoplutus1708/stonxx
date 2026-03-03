@@ -219,6 +219,9 @@ def main() -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
+    # Prevent recursive `.env` discovery from loading unrelated files near strategy paths
+    # (for example in Downloads). We inject required vars explicitly below.
+    env["LUMIBOT_DISABLE_DOTENV"] = "1"
 
     # Ensure we use local lumibot source
     lumibot_root = str(Path(args.lumibot_root).resolve())

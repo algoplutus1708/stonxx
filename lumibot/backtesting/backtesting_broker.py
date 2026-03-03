@@ -207,6 +207,13 @@ class BacktestingBroker(Broker):
         # Track end-of-data to prevent infinite loops when end date is in the future
         self._end_of_trading_days_reached = False
 
+    @staticmethod
+    def _normalize_asset_type(value: Any) -> str:
+        raw = str(value or "").strip().lower()
+        if "." in raw:
+            raw = raw.split(".")[-1]
+        return raw
+
     def _mark_end_of_trading_days(self, now):
         if self._end_of_trading_days_reached:
             return
@@ -2689,7 +2696,7 @@ class BacktestingBroker(Broker):
                     # maintenance break / weekend reopen).
                     should_use_next_bar = (
                         data_source_name in {"INTERACTIVEBROKERSREST"}
-                        and str(getattr(order.asset, "asset_type", "") or "").lower() in {"future", "cont_future"}
+                        and self._normalize_asset_type(getattr(order.asset, "asset_type", "")) in {"future", "cont_future"}
                         and str(getattr(self.data_source, "_timestep", "minute")) != "day"
                     )
                     if should_use_next_bar:
@@ -2990,7 +2997,7 @@ class BacktestingBroker(Broker):
         # Match IBKR's `get_quote()` special-case for crypto at midnight: use the daily series.
         timestep = getattr(data_source, "_timestep", None) or "minute"
         if (
-            str(getattr(asset, "asset_type", "") or "").lower() == "crypto"
+            self._normalize_asset_type(getattr(asset, "asset_type", "")) == "crypto"
             and now.hour == 0
             and now.minute == 0
             and now.second == 0
@@ -3106,7 +3113,7 @@ class BacktestingBroker(Broker):
         if self._is_option_asset(asset):
             return False
 
-        asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+        asset_type = self._normalize_asset_type(getattr(asset, "asset_type", ""))
         if asset_type not in {"stock", "index"}:
             return False
 
@@ -3132,7 +3139,7 @@ class BacktestingBroker(Broker):
     def _is_option_asset(self, asset) -> bool:
         if asset is None:
             return False
-        return str(getattr(asset, "asset_type", "")).lower() == "option"
+        return self._normalize_asset_type(getattr(asset, "asset_type", "")) == "option"
 
     def _should_attempt_quote_fallback(self, order, open_, high_, low_) -> bool:
         """Determine whether to attempt quote-based fills.
@@ -3277,7 +3284,7 @@ class BacktestingBroker(Broker):
 
     def _audit_underlying_quote_fields(self, order: Order) -> dict[str, Any]:
         asset = getattr(order, "asset", None)
-        if asset is None or str(getattr(asset, "asset_type", "")).lower() != "option":
+        if asset is None or self._normalize_asset_type(getattr(asset, "asset_type", "")) != "option":
             return {}
 
         underlying = getattr(asset, "underlying_asset", None)
@@ -3356,7 +3363,7 @@ class BacktestingBroker(Broker):
 
         # Underlying quote at submission time (options only), kept distinct from fill-time fields.
         try:
-            if asset is not None and str(getattr(asset, "asset_type", "")).lower() == "option":
+            if asset is not None and self._normalize_asset_type(getattr(asset, "asset_type", "")) == "option":
                 underlying = getattr(asset, "underlying_asset", None)
                 fields["submit.underlying.symbol"] = getattr(underlying, "symbol", None) if underlying else None
                 if underlying is not None:

@@ -94,6 +94,56 @@ def test_router_accepts_futures_key_alias(monkeypatch):
     assert calls["ibkr"] == 1
 
 
+def test_router_uses_rth_for_ibkr_stock_daily(monkeypatch):
+    import lumibot.tools.thetadata_helper as thetadata_helper
+    import lumibot.tools.ibkr_helper as ibkr_helper
+
+    monkeypatch.setattr(ThetaDataBacktestingPandas, "kill_processes_by_name", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(thetadata_helper, "reset_theta_terminal_tracking", lambda *_args, **_kwargs: None)
+
+    captured = {"include_after_hours": None, "calls": 0}
+
+    def fake_get_price_data(*, asset, quote, timestep, start_dt, end_dt, exchange=None, include_after_hours=True):
+        captured["calls"] += 1
+        captured["include_after_hours"] = bool(include_after_hours)
+        idx = pd.DatetimeIndex(
+            [
+                datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc),
+                datetime(2025, 1, 2, 0, 0, tzinfo=timezone.utc),
+            ]
+        ).tz_convert("America/New_York")
+        return pd.DataFrame(
+            {
+                "open": [100.0, 101.0],
+                "high": [101.0, 102.0],
+                "low": [99.0, 100.0],
+                "close": [100.5, 101.5],
+                "volume": [1000, 1100],
+            },
+            index=idx,
+        )
+
+    monkeypatch.setattr(ibkr_helper, "get_price_data", fake_get_price_data)
+
+    ds = RoutedBacktestingPandas(
+        datetime_start=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        datetime_end=datetime(2025, 1, 5, tzinfo=timezone.utc),
+        config={"backtesting_data_routing": {"stock": "ibkr", "default": "thetadata"}},
+        username="dev",
+        password="dev",
+        use_quote_data=False,
+        show_progress_bar=False,
+        log_backtest_progress_to_file=False,
+    )
+
+    stock = Asset(symbol="TQQQ", asset_type="stock")
+    quote = Asset(symbol="USD", asset_type="forex")
+    ds._update_pandas_data(stock, quote, length=2, timestep="day", start_dt=datetime(2025, 1, 2, tzinfo=timezone.utc))
+
+    assert captured["calls"] == 1
+    assert captured["include_after_hours"] is False
+
+
 def test_router_get_quote_aligns_non_theta_daily_mode(monkeypatch):
     routed = RoutedBacktestingPandas.__new__(RoutedBacktestingPandas)
     routed._routing = {"default": "thetadata", "stock": "ibkr"}  # type: ignore[attr-defined]

@@ -63,6 +63,22 @@ class InteractiveBrokersRESTBacktesting(PandasData):
         exch = (exchange or "").strip().upper()
         return exch or "AUTO"
 
+    @staticmethod
+    def _normalize_asset_type(value: object) -> str:
+        raw = str(value or "").strip().lower()
+        if "." in raw:
+            raw = raw.split(".")[-1]
+        return raw
+
+    @staticmethod
+    def _ibkr_include_after_hours(asset_type: str, timestep_unit: str) -> bool:
+        """Return IBKR outsideRth policy for backtests.
+
+        Stock/index day bars should be regular-session only so they line up with
+        ThetaData/Yahoo daily semantics.
+        """
+        return not (asset_type in {"stock", "index"} and timestep_unit == "day")
+
     def _build_dataset_keys(
         self,
         asset: Asset,
@@ -144,7 +160,7 @@ class InteractiveBrokersRESTBacktesting(PandasData):
 
         effective_exchange = exchange if exchange is not None else self.exchange
 
-        asset_type = str(getattr(base_asset, "asset_type", "") or "").lower()
+        asset_type = self._normalize_asset_type(getattr(base_asset, "asset_type", ""))
         now = self.get_datetime()
         # Futures backtests should not look ahead into the current (incomplete) bar. Interpret
         # "last price at dt" as the last completed bar's close by nudging dt slightly earlier.
@@ -223,7 +239,7 @@ class InteractiveBrokersRESTBacktesting(PandasData):
 
         effective_exchange = exchange if exchange is not None else self.exchange
 
-        asset_type = str(getattr(base_asset, "asset_type", "") or "").lower()
+        asset_type = self._normalize_asset_type(getattr(base_asset, "asset_type", ""))
         now = self.get_datetime()
         if asset_type == "crypto" and now.hour == 0 and now.minute == 0 and now.second == 0 and now.microsecond == 0:
             day_key = (base_asset, quote_asset, "day", self._normalize_exchange_key(effective_exchange))
@@ -417,7 +433,8 @@ class InteractiveBrokersRESTBacktesting(PandasData):
             length, timestep, start_dt=end_dt, start_buffer=timedelta(0)
         )
         ts_unit = str(ts_unit or "").strip().lower()
-        asset_type = str(getattr(asset_separated, "asset_type", "") or "").lower()
+        asset_type = self._normalize_asset_type(getattr(asset_separated, "asset_type", ""))
+        include_after_hours = self._ibkr_include_after_hours(asset_type, ts_unit)
         if asset_type in {"future", "cont_future"} and ts_unit in {"minute", "hour", "day"}:
             # Futures strategies frequently request very small slices (e.g., `length=2`) at the
             # beginning of the backtest window. If we only fetch the tiny requested slice, IBKR's
@@ -505,15 +522,15 @@ class InteractiveBrokersRESTBacktesting(PandasData):
                 )
                 self._fully_loaded_series.add(key)
         else:
-            self._update_pandas_data(
-                asset_separated,
-                quote_asset,
-                dataset_key,
-                start_dt=start_dt,
-                end_dt=end_dt,
-                exchange=effective_exchange,
-                include_after_hours=include_after_hours,
-            )
+                self._update_pandas_data(
+                    asset_separated,
+                    quote_asset,
+                    dataset_key,
+                    start_dt=start_dt,
+                    end_dt=end_dt,
+                    exchange=effective_exchange,
+                    include_after_hours=include_after_hours,
+                )
         # PERF: avoid `PandasData.find_asset_in_data_store()` candidate generation on every call.
         # IBKR uses stable canonical keys; slice directly from the cached `Data` object.
         canonical_key, legacy_key = self._build_dataset_keys(asset_separated, quote_asset, dataset_key, effective_exchange)
@@ -550,6 +567,10 @@ class InteractiveBrokersRESTBacktesting(PandasData):
             return None
 
         dataset_key = self._normalize_timestep_key(timestep)
+        qty, unit = parse_timestep_qty_and_unit(dataset_key)
+        unit = str(unit or "").strip().lower()
+        asset_type = self._normalize_asset_type(getattr(asset_separated, "asset_type", ""))
+        include_after_hours = self._ibkr_include_after_hours(asset_type, unit)
         effective_exchange = exchange if exchange is not None else self.exchange
         self._update_pandas_data(
             asset_separated,

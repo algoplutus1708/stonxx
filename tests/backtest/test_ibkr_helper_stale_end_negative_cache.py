@@ -49,6 +49,7 @@ def test_ibkr_stale_end_marks_missing_window_to_avoid_repeated_history_fetches(m
             timestep=timestep,
             exchange=exchange,
             source=source,
+            include_after_hours=True,
         )
 
         df_seed = pd.DataFrame(

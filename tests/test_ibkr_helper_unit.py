@@ -11,6 +11,7 @@ def test_ibkr_helper_caches_history_and_reuses_cache(monkeypatch, tmp_path):
     import lumibot.tools.ibkr_helper as ibkr_helper
 
     monkeypatch.setattr(ibkr_helper, "LUMIBOT_CACHE_FOLDER", tmp_path.as_posix())
+    ibkr_helper._RUNTIME_CONID_CACHE.clear()
 
     calls = {"secdef": 0, "history": 0}
 
@@ -81,6 +82,7 @@ def test_ibkr_helper_persists_fetched_bars_even_when_requested_window_has_no_ove
     import lumibot.tools.ibkr_helper as ibkr_helper
 
     monkeypatch.setattr(ibkr_helper, "LUMIBOT_CACHE_FOLDER", tmp_path.as_posix())
+    ibkr_helper._RUNTIME_CONID_CACHE.clear()
 
     calls = {"secdef": 0, "history": 0}
 
@@ -126,7 +128,7 @@ def test_ibkr_helper_persists_fetched_bars_even_when_requested_window_has_no_ove
 
     # Multiple parquet files may be produced when `ibkr_helper` fetches/derives bid/ask.
     # We require that the Trades series was persisted even if it doesn't overlap the request.
-    trades_files = list(tmp_path.rglob("*_TRADES.parquet"))
+    trades_files = list(tmp_path.rglob("*_TRADES_AHR.parquet"))
     assert len(trades_files) == 1
     cached = pd.read_parquet(trades_files[0])
     assert len(cached) == 2

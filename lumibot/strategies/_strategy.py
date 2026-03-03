@@ -1476,29 +1476,13 @@ class _Strategy:
             # - For equity benchmarks (e.g., SPY), prefer Yahoo to avoid IBKR history flakiness impacting
             #   tearsheet generation (benchmark is cosmetic; strategy stats are authoritative).
             elif str(getattr(self.broker.data_source, "SOURCE", "") or "").upper() == "INTERACTIVEBROKERSREST":
-                def _fallback_benchmark_from_strategy() -> None:
-                    """Fallback: use the strategy equity curve as a benchmark so tearsheets remain available."""
-                    try:
-                        if self._strategy_returns_df is None or self._strategy_returns_df.empty:
-                            return
-                        if "portfolio_value" not in self._strategy_returns_df.columns:
-                            return
-                        series = self._strategy_returns_df["portfolio_value"].astype(float).copy()
-                        first = float(series.dropna().iloc[0]) if not series.dropna().empty else None
-                        if first is None or first == 0:
-                            return
-                        bench = pd.DataFrame(index=self._strategy_returns_df.index)
-                        # Match the shape expected by plotting + tearsheet code:
-                        # - `plot_returns()` expects a `return` column
-                        # - tearsheets typically consume `symbol_cumprod`
-                        bench["return"] = series.pct_change(fill_method=None)
-                        bench["symbol_cumprod"] = (1 + bench["return"]).cumprod()
-                        self._benchmark_returns_df = bench
-                        self.logger.warning(
-                            "IBKR benchmark bars unavailable; using strategy equity curve as benchmark for tearsheet generation."
-                        )
-                    except Exception:
-                        return
+                def _fallback_benchmark() -> None:
+                    """Avoid benchmark contamination by leaving benchmark empty on fetch failure."""
+                    self.logger.warning(
+                        "IBKR benchmark bars unavailable; leaving benchmark empty (no strategy-equity fallback)."
+                    )
+                    self._benchmark_returns_df = None
+                    return
 
                 benchmark_asset = self._benchmark_asset
                 if isinstance(benchmark_asset, str):
@@ -1516,7 +1500,7 @@ class _Strategy:
                                 backtesting_end_adjusted,
                             )
                         except Exception:
-                            _fallback_benchmark_from_strategy()
+                            _fallback_benchmark()
                         return
                 elif isinstance(benchmark_asset, Asset) and str(getattr(benchmark_asset, "asset_type", "")).lower() == "stock":
                     try:
@@ -1526,7 +1510,7 @@ class _Strategy:
                             backtesting_end_adjusted,
                         )
                     except Exception:
-                        _fallback_benchmark_from_strategy()
+                        _fallback_benchmark()
                     return
 
                 timestep = "minute"
@@ -1542,12 +1526,12 @@ class _Strategy:
                 )
                 if bars is None or getattr(bars, "df", None) is None:
                     self.logger.error(f"Couldn't get benchmark bars from IBKR data source: {benchmark_asset}")
-                    _fallback_benchmark_from_strategy()
+                    _fallback_benchmark()
                     return
                 df = bars.df
                 if df is None or df.empty or "close" not in df.columns:
                     self.logger.error(f"IBKR benchmark bars empty/invalid: {benchmark_asset}")
-                    _fallback_benchmark_from_strategy()
+                    _fallback_benchmark()
                     return
                 df = df.copy()
                 df["return"] = df["close"].pct_change(fill_method=None)
@@ -1558,26 +1542,47 @@ class _Strategy:
             # Prefer the routed data source over Yahoo so benchmarks remain cacheable and don't
             # require external network access (Yahoo can be rate-limited and slow).
             elif RoutedBacktestingPandas is not None and isinstance(self.broker.data_source, RoutedBacktestingPandas):
-                def _fallback_benchmark_from_strategy() -> None:
-                    """Fallback: use the strategy equity curve as a benchmark so tearsheets remain available."""
-                    try:
-                        if self._strategy_returns_df is None or self._strategy_returns_df.empty:
-                            return
-                        if "portfolio_value" not in self._strategy_returns_df.columns:
-                            return
-                        series = self._strategy_returns_df["portfolio_value"].astype(float).copy()
-                        first = float(series.dropna().iloc[0]) if not series.dropna().empty else None
-                        if first is None or first == 0:
-                            return
-                        bench = pd.DataFrame(index=self._strategy_returns_df.index)
-                        bench["return"] = series.pct_change(fill_method=None)
-                        bench["symbol_cumprod"] = (1 + bench["return"]).cumprod()
-                        self._benchmark_returns_df = bench
-                        self.logger.warning(
-                            "Router benchmark bars unavailable; using strategy equity curve as benchmark for tearsheet generation."
-                        )
-                    except Exception:
-                        return
+                def _fallback_benchmark(local_benchmark_asset) -> None:
+                    """Fallback for router benchmark failures without using strategy-equity returns.
+
+                    Why:
+                    - Router benchmark fetches can fail transiently for symbols like SPY.
+                    - Using strategy-equity as a benchmark contaminates tearsheet metrics.
+                    - A Yahoo stock benchmark fallback keeps benchmark reporting available while
+                      preserving strategy metric integrity.
+                    """
+                    fallback_symbol = None
+                    if isinstance(local_benchmark_asset, str):
+                        parts = [p.strip() for p in local_benchmark_asset.split("/") if p.strip()]
+                        if len(parts) == 1:
+                            fallback_symbol = parts[0]
+                    elif (
+                        isinstance(local_benchmark_asset, Asset)
+                        and str(getattr(local_benchmark_asset, "asset_type", "")).lower() == "stock"
+                    ):
+                        fallback_symbol = local_benchmark_asset.symbol
+
+                    if fallback_symbol:
+                        try:
+                            self._benchmark_returns_df = get_symbol_returns(
+                                fallback_symbol,
+                                self._backtesting_start,
+                                backtesting_end_adjusted,
+                            )
+                            if self._benchmark_returns_df is not None and not self._benchmark_returns_df.empty:
+                                self.logger.warning(
+                                    "Router benchmark bars unavailable for %s; using Yahoo fallback.",
+                                    fallback_symbol,
+                                )
+                                return
+                        except Exception:
+                            pass
+
+                    self.logger.warning(
+                        "Router benchmark bars unavailable; leaving benchmark empty (no strategy-equity fallback)."
+                    )
+                    self._benchmark_returns_df = None
+                    return
 
                 benchmark_asset = self._benchmark_asset
                 if isinstance(benchmark_asset, str):
@@ -1590,6 +1595,19 @@ class _Strategy:
                     else:
                         # Keep behavior consistent with Yahoo benchmarks: use daily series.
                         benchmark_asset = Asset(symbol=benchmark_asset, asset_type="stock")
+                if (
+                    isinstance(benchmark_asset, Asset)
+                    and str(getattr(benchmark_asset, "asset_type", "")).lower() == "stock"
+                ):
+                    try:
+                        self._benchmark_returns_df = get_symbol_returns(
+                            benchmark_asset.symbol,
+                            self._backtesting_start,
+                            backtesting_end_adjusted,
+                        )
+                        return
+                    except Exception:
+                        pass
 
                 # Use daily bars for benchmark across intraday strategies to keep tearsheet cost bounded.
                 timestep = "day"
@@ -1607,12 +1625,12 @@ class _Strategy:
 
                 if bars is None or getattr(bars, "df", None) is None:
                     self.logger.error(f"Couldn't get benchmark bars from Router data source: {benchmark_asset}")
-                    _fallback_benchmark_from_strategy()
+                    _fallback_benchmark(benchmark_asset)
                     return
                 df = bars.df
                 if df is None or df.empty or "close" not in df.columns:
                     self.logger.error(f"Router benchmark bars empty/invalid: {benchmark_asset}")
-                    _fallback_benchmark_from_strategy()
+                    _fallback_benchmark(benchmark_asset)
                     return
                 df = df.copy()
                 df["return"] = df["close"].pct_change(fill_method=None)

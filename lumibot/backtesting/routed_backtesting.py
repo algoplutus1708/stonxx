@@ -44,6 +44,15 @@ def _normalize_asset_type(value: Any) -> str:
     return raw
 
 
+def _ibkr_include_after_hours(asset_type: str, timestep_unit: str) -> bool:
+    """Return IBKR outsideRth policy for routed backtests.
+
+    For stock/index daily bars we explicitly use regular-session bars (outsideRth=false)
+    to match ThetaData/Yahoo daily close semantics and avoid after-hours-driven signal drift.
+    """
+    return not (asset_type in {"stock", "index"} and timestep_unit == "day")
+
+
 def _ccxt_exchange_id_from_token(token: str) -> str | None:
     """Resolve a user token to a CCXT exchange id (case/sep-insensitive).
 
@@ -339,13 +348,35 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 pass
 
         asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
+        include_after_hours = _ibkr_include_after_hours(asset_type, unit)
         df = None
 
         # PERF: warm-cache minute strategies can call `get_historical_prices()` tens of thousands of
         # times. In the router data source, IBKR history fetches must be amortized by prefetching
         # the full backtest window once, then slicing in-memory thereafter (same principle as the
         # IBKR-only backtesting data source).
-        if asset_type in {"future", "cont_future"} and unit in {"minute", "hour", "day"} and canonical_key not in self._fully_loaded_series:
+        if asset_type in {"stock", "index"} and unit in {"minute", "hour"} and canonical_key not in self._fully_loaded_series:
+            # Perf: routed minute/index strategies (for example SPX intraday options) can call
+            # `get_historical_prices()` every loop iteration. Prefetch the full window once, then
+            # serve slices from in-memory Data to avoid one downloader roundtrip per minute.
+            try:
+                prefetch_start = min(start_datetime, self._router.datetime_start)
+            except Exception:
+                prefetch_start = start_datetime
+            prefetch_end = self._router.datetime_end or end_dt
+            df = ibkr_helper.get_price_data(
+                asset=asset,
+                quote=quote_asset,
+                timestep=dataset_key,
+                start_dt=prefetch_start,
+                end_dt=prefetch_end,
+                exchange=None,
+                include_after_hours=include_after_hours,
+            )
+            if df is None or df.empty:
+                return None
+            self._fully_loaded_series.add(canonical_key)
+        elif asset_type in {"future", "cont_future"} and unit in {"minute", "hour", "day"} and canonical_key not in self._fully_loaded_series:
             try:
                 from lumibot.backtesting.interactive_brokers_rest_backtesting import InteractiveBrokersRESTBacktesting
 
@@ -369,7 +400,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
@@ -387,23 +418,25 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
             self._fully_loaded_series.add(canonical_key)
         elif asset_type in {"stock", "index"} and unit == "day" and canonical_key not in self._fully_loaded_series:
             try:
+                # Daily lookback requests are in bars (trading sessions). Use a modest calendar
+                # warmup that stays close to ThetaData's start-window behavior for parity.
                 lookback_days = max(7, int(length) + 5)
             except Exception:
                 lookback_days = 7
-            req_start = pd.Timestamp(start_datetime)
             base_start = pd.Timestamp(self._router.datetime_start - timedelta(days=lookback_days))
-            if req_start.tzinfo is None and base_start.tzinfo is not None:
-                req_start = req_start.tz_localize(base_start.tzinfo)
-            elif req_start.tzinfo is not None and base_start.tzinfo is None:
-                base_start = base_start.tz_localize(req_start.tzinfo)
-            prefetch_start = min(req_start, base_start).to_pydatetime()
+            # Keep routed stock/index warmup bounded to backtest-start minus lookback_days.
+            # Using `start_datetime` here can pull much deeper history than ThetaData baseline,
+            # which shifts first signals and breaks parity in mixed-source comparisons.
+            if base_start.tzinfo is None:
+                base_start = base_start.tz_localize(LUMIBOT_DEFAULT_PYTZ)
+            prefetch_start = base_start.to_pydatetime()
             prefetch_end = self._router.datetime_end or end_dt
             df = ibkr_helper.get_price_data(
                 asset=asset,
@@ -412,7 +445,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
@@ -431,7 +464,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
@@ -444,7 +477,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=start_datetime,
                 end_dt=end_dt,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
 
         if df is None or df.empty:
@@ -497,6 +530,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
         require_ohlc_data: bool,
     ) -> pd.DataFrame | None:
         asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
+        include_after_hours = _ibkr_include_after_hours(asset_type, ts_unit)
 
         # PERF: warm-cache minute strategies can call `get_historical_prices()` tens of thousands of
         # times. In the router data source, IBKR history fetches must be amortized by prefetching
@@ -532,7 +566,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
@@ -553,7 +587,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
@@ -575,7 +609,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
@@ -589,7 +623,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
             start_dt=start_datetime,
             end_dt=end_dt,
             exchange=None,
-            include_after_hours=True,
+            include_after_hours=include_after_hours,
         )
 
 
