@@ -1,5 +1,10 @@
 # Changelog
 
+## 4.4.53 - Unreleased
+
+### Notes
+- _No changes yet._
+
 ## 4.4.52 - 2026-03-03
 
 ### Added
