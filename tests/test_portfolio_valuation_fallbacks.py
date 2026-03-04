@@ -358,6 +358,43 @@ class TestForwardFill:
         expected_value = starting_cash + 160.0 * 10 * 100
         assert value == pytest.approx(expected_value)
 
+    def test_forward_fill_ignores_off_session_option_marks(self):
+        """
+        Backtest option valuation should ignore off-session fresh marks and preserve
+        the previous in-session last-known price for forward-fill.
+        """
+        strategy, option_asset = self._setup_strategy_with_option()
+
+        position = Position(strategy._name, option_asset, quantity=10, avg_fill_price=150.0)
+        strategy.broker.get_tracked_positions = MagicMock(return_value=[position])
+        strategy._quote_asset = Asset("USD", asset_type="forex")
+
+        pre_open = LUMIBOT_DEFAULT_PYTZ.localize(datetime(2024, 1, 5, 8, 30, 0))
+
+        # Source returns an exaggerated off-session mark.
+        source = FakeSourceWithQuote()
+        source.snapshot = {
+            "close": 401.4,
+            "bid": 400.0,
+            "ask": 402.0,
+            "last_trade_time": pre_open,
+            "last_bid_time": pre_open,
+            "last_ask_time": pre_open,
+        }
+        strategy.broker.option_source = source
+        strategy.broker.data_source = MagicMock()
+        strategy.broker.data_source.get_datetime = MagicMock(return_value=pre_open)
+
+        # Seed a sane prior in-session mark that should be retained.
+        strategy._last_known_prices = {option_asset: 80.0}
+
+        starting_cash = strategy.cash
+        value = strategy._update_portfolio_value()
+
+        expected_value = starting_cash + 80.0 * 10 * 100
+        assert value == pytest.approx(expected_value)
+        assert strategy._last_known_prices[option_asset] == 80.0
+
     def test_forward_fill_skips_position_with_no_history(self):
         """
         When no last known price exists, position should be skipped (not crash).

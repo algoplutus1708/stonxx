@@ -769,6 +769,25 @@ class _Strategy:
             if not hasattr(self, '_last_known_prices'):
                 self._last_known_prices = {}
 
+            # Option quotes are frequently sparse/unreliable outside regular session hours.
+            # For backtests, avoid ingesting off-session option marks into portfolio valuation,
+            # which can otherwise poison forward-fill with stale placeholder values.
+            option_mark_time_local = None
+            broker_dt = getattr(self.broker, "datetime", None)
+            if isinstance(broker_dt, datetime.datetime):
+                try:
+                    if broker_dt.tzinfo is None:
+                        option_mark_time_local = LUMIBOT_DEFAULT_PYTZ.localize(broker_dt)
+                    else:
+                        option_mark_time_local = broker_dt.astimezone(LUMIBOT_DEFAULT_PYTZ)
+                except Exception:
+                    option_mark_time_local = None
+
+            option_marking_allowed = True
+            if option_mark_time_local is not None:
+                t_local = option_mark_time_local.time()
+                option_marking_allowed = (t_local >= datetime.time(9, 30)) and (t_local <= datetime.time(16, 0))
+
             # Used for traditional brokers, for crypto this could be 0
             portfolio_value = self.cash
 
@@ -801,6 +820,7 @@ class _Strategy:
                 )
                 quantity = position.quantity
                 price = prices.get(asset)
+                is_option_asset = isinstance(asset, Asset) and asset.asset_type == "option"
 
                 # If the asset is the quote asset, then we already have included it from cash
                 # Eg. if we have a position of USDT and USDT is the quote_asset then we already consider it as cash
@@ -825,6 +845,10 @@ class _Strategy:
                             price = None
                         else:
                             price = price_float
+
+                # For backtests, ignore option marks outside regular options hours.
+                if self.is_backtesting and is_option_asset and not option_marking_allowed:
+                    price = None
 
                 # Track valid prices for forward-fill fallback
                 if price is not None:
