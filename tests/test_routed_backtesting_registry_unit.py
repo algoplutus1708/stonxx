@@ -97,3 +97,36 @@ def test_ccxt_exchange_id_alias_routes_without_network(exchange_id: str, monkeyp
 
     assert calls == [exchange_id]
     assert ds._data_store
+
+
+def test_routed_get_last_price_aligns_1d_source_timestep_to_day_for_non_theta(monkeypatch):
+    ds = _make_ds(routing={"stock": "ibkr", "default": "thetadata"}, monkeypatch=monkeypatch)
+    ds._timestep = "1D"
+
+    seen: list[str] = []
+
+    def _fake_super_get_last_price(self, asset, timestep="minute", quote=None, exchange=None, **kwargs):
+        seen.append(str(timestep))
+        return 123.45
+
+    monkeypatch.setattr(ThetaDataBacktestingPandas, "get_last_price", _fake_super_get_last_price)
+
+    price = ds.get_last_price(Asset("AAPL", asset_type="stock"))
+    assert price == 123.45
+    assert seen == ["day"]
+
+
+def test_routed_get_quote_aligns_1d_source_timestep_to_day_for_non_theta(monkeypatch):
+    ds = _make_ds(routing={"stock": "ibkr", "default": "thetadata"}, monkeypatch=monkeypatch)
+    ds._timestep = "1D"
+
+    seen: list[str] = []
+
+    def _fake_super_get_quote(self, asset, quote=None, exchange=None, timestep="minute", **kwargs):
+        seen.append(str(timestep))
+        return None
+
+    monkeypatch.setattr(ThetaDataBacktestingPandas, "get_quote", _fake_super_get_quote)
+
+    _ = ds.get_quote(Asset("AAPL", asset_type="stock"))
+    assert seen == ["day"]

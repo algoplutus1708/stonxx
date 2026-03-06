@@ -1055,6 +1055,18 @@ class ThetaDataBacktestingPandas(PandasData):
         expiration_dt = self._option_expiration_end(asset_separated)
         if expiration_dt is not None and end_requirement is not None and expiration_dt < end_requirement:
             end_requirement = expiration_dt
+        end_for_fetch = end_requirement
+        # Perf: daily option mark-to-market paths can otherwise extend cache one trading day at a time,
+        # causing one downloader call per day per open contract in long runs.
+        # Fetch forward in chunks (capped to expiration) so subsequent days hit warm cache.
+        if is_option_asset and ts_unit == "day" and end_for_fetch is not None:
+            prefetch_horizon = end_for_fetch + timedelta(days=45)
+            if expiration_dt is not None:
+                end_for_fetch = min(prefetch_horizon, expiration_dt)
+            else:
+                end_for_fetch = prefetch_horizon
+            if self.datetime_end is not None and end_for_fetch is not None and end_for_fetch > self.datetime_end:
+                end_for_fetch = self.datetime_end
 
         canonical_key, legacy_key = self._build_dataset_keys(asset_separated, quote_asset, ts_unit)
         dataset_key = canonical_key
@@ -1813,7 +1825,7 @@ class ThetaDataBacktestingPandas(PandasData):
             frame = thetadata_helper.get_price_data(
                 fetch_asset,
                 start_for_fetch,
-                end_requirement,
+                end_for_fetch,
                 timespan=ts_unit,
                 quote_asset=quote_asset,
                 dt=date_time_now,
@@ -1839,7 +1851,7 @@ class ThetaDataBacktestingPandas(PandasData):
             frame = thetadata_helper.get_price_data(
                 fetch_asset,
                 start_for_fetch,
-                end_requirement,
+                end_for_fetch,
                 timespan=ts_unit,
                 quote_asset=quote_asset,
                 dt=date_time_now,

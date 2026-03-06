@@ -1491,7 +1491,18 @@ def _fetch_history_between_dates(
         # IBKR typically returns {"data":[...]} (empty list means no data).
         data = payload.get("data") if isinstance(payload, dict) else None
         if not data:
-            # True no-data: write placeholders so we don't hammer IBKR for the same range.
+            # If we already fetched earlier chunks, keep them and stop paging.
+            #
+            # WHY:
+            # - During long backward pagination windows, an occasional empty page can occur due to
+            #   transient gateway behavior even when previous pages were valid.
+            # - Returning an empty frame here would discard all collected bars and can poison the
+            #   cache with a broad missing-window marker.
+            if chunks:
+                break
+
+            # True no-data at the first page: write placeholders so we don't hammer IBKR for the
+            # same fully empty range.
             _record_missing_window(
                 asset=asset,
                 quote=quote,
@@ -1506,6 +1517,10 @@ def _fetch_history_between_dates(
 
         df = _history_payload_to_frame(data, source_was_explicit=source_was_explicit)
         if df.empty:
+            # Same rationale as above: preserve already-fetched chunks when a later page is empty.
+            if chunks:
+                break
+
             _record_missing_window(
                 asset=asset,
                 quote=quote,
@@ -2698,12 +2713,20 @@ def _normalize_history_source(source: Optional[str]) -> str:
     raise ValueError(f"Unsupported IBKR history source '{source}'. Expected Trades, Midpoint, or Bid_Ask.")
 
 
-def _get_cached_equity_actions(symbol: str) -> pd.DataFrame:
+def _get_cached_equity_actions(symbol: str, last_needed_datetime: Optional[datetime] = None) -> pd.DataFrame:
     """Return cached split/dividend actions for an equity symbol (best effort)."""
     key = str(symbol or "").strip().upper()
     if not key:
         return pd.DataFrame(columns=["Dividends", "Stock Splits"])
-    cached = _IBKR_EQUITY_ACTIONS_CACHE.get(key)
+    cache_key = key
+    if isinstance(last_needed_datetime, datetime):
+        try:
+            # Bucket by date to maximize in-process reuse while keeping "needed coverage" stable.
+            cache_key = f"{key}:{last_needed_datetime.date().isoformat()}"
+        except Exception:
+            cache_key = key
+
+    cached = _IBKR_EQUITY_ACTIONS_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
@@ -2711,7 +2734,19 @@ def _get_cached_equity_actions(symbol: str) -> pd.DataFrame:
     try:
         from lumibot.tools.yahoo_helper import YahooHelper
 
-        raw = YahooHelper.get_symbol_actions(key, caching=True)
+        history = YahooHelper.get_symbol_data(
+            key,
+            interval="1d",
+            caching=True,
+            auto_adjust=False,
+            last_needed_datetime=last_needed_datetime,
+        )
+        if history is not None and not history.empty:
+            raw = history[["Dividends", "Stock Splits"]]
+            raw = raw[(raw != 0).any(axis=1)].fillna(0)
+        else:
+            raw = None
+
         if raw is not None and not raw.empty:
             actions = raw.copy()
             actions.index = pd.to_datetime(actions.index, errors="coerce")
@@ -2724,7 +2759,9 @@ def _get_cached_equity_actions(symbol: str) -> pd.DataFrame:
     except Exception as exc:
         logger.debug("IBKR equity corporate actions unavailable for %s: %s", key, exc)
 
-    _IBKR_EQUITY_ACTIONS_CACHE[key] = actions
+    _IBKR_EQUITY_ACTIONS_CACHE[cache_key] = actions
+    if cache_key != key and key not in _IBKR_EQUITY_ACTIONS_CACHE:
+        _IBKR_EQUITY_ACTIONS_CACHE[key] = actions
     return actions
 
 
@@ -2756,7 +2793,16 @@ def _append_equity_corporate_actions_daily(frame: pd.DataFrame, asset: Asset) ->
             out["stock_splits"] = 0.0
         changed = True
 
-    actions = _get_cached_equity_actions(symbol)
+    last_needed_datetime: Optional[datetime] = None
+    try:
+        if len(out.index):
+            last_idx = pd.to_datetime(out.index, errors="coerce")
+            if isinstance(last_idx, pd.DatetimeIndex) and len(last_idx) > 0 and not pd.isna(last_idx.max()):
+                last_needed_datetime = last_idx.max().to_pydatetime()
+    except Exception:
+        last_needed_datetime = None
+
+    actions = _get_cached_equity_actions(symbol, last_needed_datetime=last_needed_datetime)
     if actions.empty:
         return out, changed
 

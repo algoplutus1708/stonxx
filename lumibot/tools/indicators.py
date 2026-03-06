@@ -493,9 +493,47 @@ def plot_indicators(
     strategy_name=None,
     show_indicators=True,
 ):
-    # If show plot is False, then we don't want to open the plot in the browser
+    # When show_indicators is False, skip HTML rendering but still emit CSV/parquet
+    # so that required-mode parquet uploads don't fail due to missing artifacts.
     if not show_indicators:
-        logger.debug("show_indicators is False, not creating the plot file.")
+        logger.debug("show_indicators is False; skipping HTML, emitting indicators CSV/parquet.")
+        csv_file = plot_file_html.replace(".html", ".csv")
+        standard_columns = [
+            "datetime", "name", "plot_name", "type", "value",
+            "symbol", "size", "color", "detail_text",
+            "open", "high", "low", "close",
+        ]
+        # Build combined_df from whatever data was passed in, or empty.
+        export_dfs = []
+        if chart_markers_df is not None and not chart_markers_df.empty:
+            m = chart_markers_df.copy()
+            m["type"] = "marker"
+            export_dfs.append(m)
+        if chart_lines_df is not None and not chart_lines_df.empty:
+            l = chart_lines_df.copy()
+            l["type"] = "line"
+            export_dfs.append(l)
+        if chart_ohlc_df is not None and not chart_ohlc_df.empty:
+            o = chart_ohlc_df.copy()
+            o["type"] = "ohlc"
+            export_dfs.append(o)
+        combined_df = (
+            pd.concat(export_dfs, ignore_index=True).sort_values(by="datetime")
+            if export_dfs
+            else pd.DataFrame(columns=standard_columns)
+        )
+        combined_df.to_csv(csv_file, index=False)
+        parquet_file = csv_file.replace(".csv", ".parquet")
+        write_parquet_with_logging(
+            df=combined_df,
+            path=parquet_file,
+            artifact="indicators",
+            logger=logger,
+            index=False,
+            required=is_parquet_required(),
+            compression="zstd",
+            sanitizer=coerce_object_columns_to_json_strings,
+        )
         return
 
     logger.info("\nCreating indicators plot...")
@@ -871,14 +909,9 @@ def plot_returns(
     # chart_markers_df=None,
     # chart_lines_df=None,
 ):
-    # If show plot is False, then we don't want to open the plot in the browser
-    if not show_plot:
-        logger.info("show_plot is False, not creating the plot file or CSV.")
-        return
-
     disable_ui = _env_flag_enabled("LUMIBOT_DISABLE_UI", default=False) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
-    logger.info("\nCreating trades plot and CSV...")
+    logger.info("\nCreating trades CSV/parquet%s...", " and plot" if show_plot else " (show_plot=False, skipping HTML)")
 
     # --- Start: CSV Generation for trades_df ---
     trades_csv_file = plot_file_html.replace(".html", ".csv")
@@ -928,6 +961,12 @@ def plot_returns(
             sanitizer=coerce_object_columns_to_json_strings,
         )
     # --- End: CSV Generation for trades_df ---
+
+    # If show_plot is False, skip the HTML chart rendering but CSV/parquet artifacts
+    # have already been written above so that required-mode parquet uploads succeed.
+    if not show_plot:
+        logger.info("show_plot is False; trades CSV/parquet written, skipping HTML plot.")
+        return
 
     dfs_concat = []
 

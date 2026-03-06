@@ -1,8 +1,10 @@
 from datetime import date, datetime, timedelta
 import logging
 import uuid
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 import pytest
+import pandas as pd
 
 from lumibot.backtesting import BacktestingBroker, YahooDataBacktesting
 from lumibot.example_strategies.stock_buy_and_hold import BuyAndHold
@@ -184,6 +186,31 @@ class TestStrategyMethods:
         assert result == 42.0
         strat._pick_snapshot_price.assert_called_once()
         strat.get_last_price.assert_not_called()
+
+    def test_get_last_price_prefers_day_bars_for_routed_backtesting_daily_cadence(self):
+        strat = self._make_strategy_stub()
+        strat._quote_asset = Asset("USD", Asset.AssetType.FOREX)
+        strat._should_use_daily_last_price = MagicMock(return_value=True)
+        strat._sanitize_user_asset = lambda asset: asset
+
+        class RoutedBacktestingPandas:
+            pass
+
+        broker = MagicMock()
+        broker.IS_BACKTESTING_BROKER = True
+        broker.data_source = RoutedBacktestingPandas()
+        broker.get_last_price = MagicMock(return_value=999.0)
+        strat.broker = broker
+
+        strat.get_historical_prices = MagicMock(
+            return_value=SimpleNamespace(df=pd.DataFrame({"close": [100.0, 101.0]}))
+        )
+
+        price = Strategy.get_last_price(strat, Asset("SPY", Asset.AssetType.STOCK))
+
+        assert price == 101.0
+        strat.get_historical_prices.assert_called_once()
+        broker.get_last_price.assert_not_called()
 
     def test_validate_order_with_invalid_order_type(self):
         """

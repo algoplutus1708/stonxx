@@ -7431,3 +7431,5 @@ timestamp,test_name,data_source,trading_days,execution_time_seconds,git_commit,l
 2026-03-03T00:54:00.157695,test_acceptance_meli_deep_drawdown,unknown,,254.087,d59a5bc5,4.4.52,,,,,Auto-tracked from test_acceptance_backtests_ci
 2026-03-03T00:59:17.066589,test_acceptance_backdoor_smartlimit,unknown,,316.805,d59a5bc5,4.4.52,,,,,Auto-tracked from test_acceptance_backtests_ci
 2026-03-03T01:03:29.285602,test_acceptance_ibkr_crypto_btc_usd,unknown,,6.083,d59a5bc5,4.4.52,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-03-06T14:13:53.655937,test_acceptance_aapl_deep_dip_calls,unknown,,55.513,,4.4.53,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-03-06T14:14:05.355109,test_acceptance_leaps_alpha_picks,unknown,,11.555,,4.4.53,,,,,Auto-tracked from test_acceptance_backtests_ci

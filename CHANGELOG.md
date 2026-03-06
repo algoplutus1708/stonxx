@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.4.53 - 2026-03-06
+
+### Added
+- Regression tests for daily-cadence datasource seeding in `StrategyExecutor`, routed `1D` timestep normalization, put-delta normalization/model-path strike selection, and IBKR equity corporate-action cache reuse.
+- Regression tests for IBKR paged-history retention when later pages are empty, plus option valuation fallback coverage for off-session stale mark scenarios.
+
+### Changed
+- Daily-cadence backtests now seed datasource cadence to `day` during strategy initialization to avoid first-lookup minute prefetch blowups.
+- `Strategy.get_last_price()` now consistently prefers daily bars for stock/index assets in daily backtest cadence, including routed IBKR stock/index paths.
+- Routed backtesting now treats day-like timestep aliases (`1D`, `1day`, etc.) as daily cadence for non-Theta last-price/quote reads.
+- ThetaData daily option fetches now prefetch forward in bounded chunks (capped by expiration/end) to reduce repeated downloader round-trips during long runs.
+- Option helper strike selection now normalizes absolute delta inputs by option side and uses a fast model-based strike pick for Theta daily option backtests.
+- IBKR equity corporate-action enrichment now uses Yahoo history with coverage hints (`last_needed_datetime`) and date-bucket cache keys for stable reuse.
+- Backtest artifact export now always writes CSV/parquet outputs for trades/stats/indicators/trade-events regardless of `show_plot` mode.
+
+### Fixed
+- Guarded option MTM valuation against off-session stale marks that could cause transient portfolio-value drops in backtests.
+- Fixed IBKR history pagination to preserve already-fetched chunks when a subsequent page returns empty.
+- Refreshed acceptance baseline metrics for `aapl_deep_dip_calls` and `leaps_alpha_picks_short` to match current deterministic CI outputs.
+- Updated `test_classic_60_40` drift-rebalancer expectations to the corrected daily-cadence fill quantities.
+
 ## 4.4.52 - 2026-03-03
 
 ### Added

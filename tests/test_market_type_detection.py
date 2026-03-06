@@ -17,6 +17,24 @@ class _NoopStrategy(Strategy):
         pass
 
 
+class _DailyNoopStrategy(Strategy):
+    def initialize(self):
+        self.sleeptime = "1D"
+        self.set_market("NYSE")
+
+    def on_trading_iteration(self):
+        pass
+
+
+class _MinuteNoopStrategy(Strategy):
+    def initialize(self):
+        self.sleeptime = "1M"
+        self.set_market("NYSE")
+
+    def on_trading_iteration(self):
+        pass
+
+
 @pytest.fixture
 def strategy_executor():
     broker = PandasDataBacktesting(
@@ -60,3 +78,31 @@ def test_ensure_progress_noop_when_market_closed(strategy_executor, mocker):
 
     update_spy.assert_not_called()
     assert result == 0
+
+
+def test_initialize_seeds_day_cadence_for_daily_backtests():
+    data_source = PandasDataBacktesting(
+        datetime_start=datetime(2025, 10, 28),
+        datetime_end=datetime(2025, 11, 6),
+    )
+    backtesting_broker = BacktestingBroker(data_source=data_source)
+    strat = _DailyNoopStrategy(broker=backtesting_broker)
+    executor = StrategyExecutor(strategy=strat)
+
+    assert data_source._timestep == "minute"
+    executor._initialize()
+    assert data_source._timestep == "day"
+
+
+def test_initialize_keeps_minute_cadence_for_intraday_backtests():
+    data_source = PandasDataBacktesting(
+        datetime_start=datetime(2025, 10, 28),
+        datetime_end=datetime(2025, 11, 6),
+    )
+    backtesting_broker = BacktestingBroker(data_source=data_source)
+    strat = _MinuteNoopStrategy(broker=backtesting_broker)
+    executor = StrategyExecutor(strategy=strat)
+
+    assert data_source._timestep == "minute"
+    executor._initialize()
+    assert data_source._timestep == "minute"
