@@ -18,6 +18,8 @@
 ### Fixed
 - Guarded option MTM valuation against off-session stale marks that could cause transient portfolio-value drops in backtests.
 - Fixed IBKR history pagination to preserve already-fetched chunks when a subsequent page returns empty.
+- Refreshed acceptance baseline metrics for `aapl_deep_dip_calls` and `leaps_alpha_picks_short` to match current deterministic CI outputs.
+- Updated `test_classic_60_40` drift-rebalancer expectations to the corrected daily-cadence fill quantities.
 
 ## 4.4.52 - 2026-03-03
 
