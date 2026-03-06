@@ -1067,7 +1067,7 @@ class ProjectX(Broker):
 
             # Create Position object. Lumibot uses positive quantity for long, negative for short
             direction = self.POSITION_TYPE_MAPPING.get(broker_position.get("type"), "")
-            quantity = broker_position.get("size", 0) if direction == "long" else -broker_position.get("size", 0)
+            quantity = broker_position.get("size", 0) if direction != "short" else -broker_position.get("size", 0)
 
             # Try both field names: avgPrice and averagePrice
             avg_price = broker_position.get("avgPrice") or broker_position.get("averagePrice", 0.0)
