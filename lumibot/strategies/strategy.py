@@ -2406,9 +2406,13 @@ class Strategy(_Strategy):
         if data_source is None:
             return False
         source_name = type(data_source).__name__.lower()
+        is_routed_backtesting = (
+            "routed" in source_name
+            and ("backtesting" in source_name or "backtest" in source_name)
+        )
         return (
             "thetadata" in source_name
-            or "routeddatasourcebacktesting" in source_name
+            or is_routed_backtesting
             or "ibkr" in source_name
         )
 

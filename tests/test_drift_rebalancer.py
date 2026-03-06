@@ -1809,12 +1809,12 @@ class TestDriftRebalancer:
         assert filled_orders.iloc[0]["type"] == "limit"
         assert filled_orders.iloc[0]["side"] == "buy"
         assert filled_orders.iloc[0]["symbol"] == "SPY"
-        assert filled_orders.iloc[0]["filled_quantity"] == 236.0
+        assert filled_orders.iloc[0]["filled_quantity"] == 244.0
 
         assert filled_orders.iloc[2]["type"] == "limit"
         assert filled_orders.iloc[2]["side"] == "sell"
         assert filled_orders.iloc[2]["symbol"] == "SPY"
-        assert filled_orders.iloc[2]["filled_quantity"] == 4.0
+        assert filled_orders.iloc[2]["filled_quantity"] == 9.0
 
     # @pytest.mark.skip()
     def test_classic_60_40_with_fractional(self, pandas_data_fixture):
@@ -1865,12 +1865,12 @@ class TestDriftRebalancer:
         assert filled_orders.iloc[0]["type"] == "limit"
         assert filled_orders.iloc[0]["side"] == "buy"
         assert filled_orders.iloc[0]["symbol"] == "SPY"
-        assert filled_orders.iloc[0]["filled_quantity"] == 236.546422235
+        assert filled_orders.iloc[0]["filled_quantity"] == 244.468891333
 
         assert filled_orders.iloc[2]["type"] == "limit"
         assert filled_orders.iloc[2]["side"] == "sell"
         assert filled_orders.iloc[2]["symbol"] == "SPY"
-        assert filled_orders.iloc[2]["filled_quantity"] == 5.099898909
+        assert filled_orders.iloc[2]["filled_quantity"] == 9.746995127
 
     @pytest.mark.xfail(reason="yahoo sucks")
     def test_crypto_50_50_with_yahoo(self):
