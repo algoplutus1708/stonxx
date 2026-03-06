@@ -87,7 +87,7 @@ def test_bracket_parent_submission_stores_meta_and_normalizes_tag(broker, mes):
     parent = _make_bracket_entry(mes, limit=5000.0, tp=5050.0, sl=4975.0)
     # No tag -> helper should generate, then normalize to BRK_ENTRY_*
     submitted = broker._submit_order(parent)
-    assert submitted.id is not None
+    assert submitted.identifier is not None
     assert hasattr(submitted, "_synthetic_bracket")
     meta = submitted._synthetic_bracket
     assert meta["tp_price"] == 5050.0 and meta["sl_price"] == 4975.0
@@ -102,14 +102,14 @@ def test_bracket_children_spawn_on_fill_and_tagging(broker, mes):
     # Submit parent
     parent = _make_bracket_entry(mes, limit=5000.0, tp=5050.0, sl=4975.0)
     broker._submit_order(parent)
-    pid = parent.id
+    pid = parent.identifier
     # Simulate fill event routing through dispatch
     filled = Order(asset=mes, quantity=1, order_type="limit", side="buy", strategy="Strat")
     filled.id = pid
     filled.identifier = pid
     filled.status = "filled"
     # Sync cache with parent to preserve meta
-    broker._orders_cache[pid] = parent
+    broker._process_new_order(parent)
     broker._dispatch_status_change(parent, filled)
     # Expect two additional placements (TP + SL)
     child_orders = broker.client.placed[1:]  # first was parent
@@ -120,8 +120,8 @@ def test_bracket_children_spawn_on_fill_and_tagging(broker, mes):
     sl_id = meta.get('children', {}).get('sl')
     assert tp_id and sl_id
     # Check tags
-    tp_order = broker._orders_cache.get(tp_id)
-    sl_order = broker._orders_cache.get(sl_id)
+    tp_order = broker.get_order(tp_id)
+    sl_order = broker.get_order(sl_id)
     assert tp_order.tag.startswith("BRK_TP_")
     assert sl_order.tag.startswith("BRK_STOP_")
     # Child price assignment
@@ -139,8 +139,8 @@ def test_bracket_child_fill_cancels_sibling(broker, mes):
     # Submit parent and spawn children
     parent = _make_bracket_entry(mes, limit=5000.0, tp=5050.0, sl=4975.0)
     broker._submit_order(parent)
-    pid = parent.id
-    broker._orders_cache[pid] = parent
+    pid = parent.identifier
+    broker._process_new_order(parent)
     filled = Order(asset=mes, quantity=1, order_type="limit", side="buy", strategy="Strat")
     filled.id = pid
     filled.identifier = pid
@@ -152,15 +152,17 @@ def test_bracket_child_fill_cancels_sibling(broker, mes):
     sl_id = meta['children']['sl']
 
     # Ensure children exist in cache
-    assert tp_id in broker._orders_cache and sl_id in broker._orders_cache
+    assert broker.get_order(tp_id) is not None
+    assert broker.get_order(sl_id) is not None
 
     # Simulate TP child fill
-    tp_order = broker._orders_cache[tp_id]
+    tp_order = broker.get_order(tp_id)
     tp_order.status = "filled"
     broker._handle_bracket_child_fill(tp_order)
 
     # SL sibling should be canceled or marked terminal
-    sl_order = broker._orders_cache.get(sl_id)
-    assert (getattr(sl_order, 'status', '') or '').lower() in {"canceled", "cancelled", "fill", "filled", "error"}
+    sl_order = broker.get_order(sl_id)
+    assert (getattr(sl_order, 'status', '') or '').lower() in {"canceled", "cancelled", "cancelling",
+                                                               "fill", "filled", "error"}
     # Bracket deactivated
     assert meta['active'] is False

@@ -1478,6 +1478,7 @@ class ProjectX(Broker):
             sibling_status = (getattr(sibling_order, 'status', '') or '').lower()
             if sibling_status not in {"fill", "filled", "canceled", "cancelled", "error"}:
                 try:
+                    sibling_order.status = "cancelling"
                     self.cancel_order(sibling_order)
                     self.logger.debug(f"[BRACKET SIBLING CANCEL] canceled sibling={sibling_id} after child_fill={child.identifier}")
                 except Exception as e:
@@ -1600,6 +1601,7 @@ class ProjectX(Broker):
 
                                 # Dispatch fill event - pass same order twice since it's the updated version
                                 # NOTE: This doesn't actually do anything since the status of both inputs are the same
+                                #       The actual order update should be handled by normal order processing.
                                 self._dispatch_status_change(cached_order, cached_order)
 
                                 self.logger.debug(f"Trade fill processed for order {order_id}: "
