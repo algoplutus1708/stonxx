@@ -95,6 +95,59 @@ def test_ibkr_fetch_history_between_dates_does_not_break_early_on_short_chunks(m
     assert df.index.min() <= start
 
 
+def test_ibkr_fetch_history_between_dates_keeps_prior_chunks_when_later_page_is_empty(monkeypatch):
+    calls = {"history": 0, "missing_window": 0}
+    tz = ibkr_helper.LUMIBOT_DEFAULT_PYTZ
+
+    base = Asset("VIX", asset_type=Asset.AssetType.INDEX)
+    quote = Asset("USD", asset_type=Asset.AssetType.FOREX)
+
+    start = tz.localize(datetime(2026, 1, 5, 9, 30, 0))
+    end = tz.localize(datetime(2026, 1, 5, 16, 0, 0))
+
+    monkeypatch.setattr(ibkr_helper, "_resolve_conid", lambda **kwargs: 13455763)
+
+    def _fake_missing_window(**kwargs):
+        calls["missing_window"] += 1
+
+    monkeypatch.setattr(ibkr_helper, "_record_missing_window", _fake_missing_window)
+
+    def _fake_history_request(**kwargs):
+        calls["history"] += 1
+        if calls["history"] == 1:
+            idx = pd.date_range(
+                start=end.astimezone(timezone.utc) - timedelta(hours=2),
+                end=end.astimezone(timezone.utc),
+                freq="1h",
+                tz="UTC",
+            )
+            data = []
+            for i, ts in enumerate(idx):
+                ms = int(ts.timestamp() * 1000)
+                data.append({"t": ms, "o": 20 + i, "h": 21 + i, "l": 19 + i, "c": 20 + i, "v": 1})
+            return {"data": data}
+        # Simulate an empty page on a later pagination request.
+        return {"data": []}
+
+    monkeypatch.setattr(ibkr_helper, "_ibkr_history_request", _fake_history_request)
+
+    df = ibkr_helper._fetch_history_between_dates(
+        asset=base,
+        quote=quote,
+        timestep="hour",
+        start_dt=start,
+        end_dt=end,
+        exchange=None,
+        include_after_hours=True,
+        source="Midpoint",
+        source_was_explicit=True,
+    )
+    assert calls["history"] >= 2
+    assert calls["missing_window"] == 0
+    assert not df.empty
+    assert df.index.max() <= end
+
+
 def test_ibkr_crypto_get_price_data_derives_daily_for_1d_like_timesteps(monkeypatch):
     base = Asset("BTC", asset_type=Asset.AssetType.CRYPTO)
     quote = Asset("USD", asset_type=Asset.AssetType.FOREX)

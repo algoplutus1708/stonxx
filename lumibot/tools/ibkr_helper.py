@@ -1491,7 +1491,18 @@ def _fetch_history_between_dates(
         # IBKR typically returns {"data":[...]} (empty list means no data).
         data = payload.get("data") if isinstance(payload, dict) else None
         if not data:
-            # True no-data: write placeholders so we don't hammer IBKR for the same range.
+            # If we already fetched earlier chunks, keep them and stop paging.
+            #
+            # WHY:
+            # - During long backward pagination windows, an occasional empty page can occur due to
+            #   transient gateway behavior even when previous pages were valid.
+            # - Returning an empty frame here would discard all collected bars and can poison the
+            #   cache with a broad missing-window marker.
+            if chunks:
+                break
+
+            # True no-data at the first page: write placeholders so we don't hammer IBKR for the
+            # same fully empty range.
             _record_missing_window(
                 asset=asset,
                 quote=quote,
@@ -1506,6 +1517,10 @@ def _fetch_history_between_dates(
 
         df = _history_payload_to_frame(data, source_was_explicit=source_was_explicit)
         if df.empty:
+            # Same rationale as above: preserve already-fetched chunks when a later page is empty.
+            if chunks:
+                break
+
             _record_missing_window(
                 asset=asset,
                 quote=quote,
