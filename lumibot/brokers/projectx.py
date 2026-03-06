@@ -292,7 +292,7 @@ class ProjectX(Broker):
 
             if success:
                 # Update order status
-                order.status = "cancelled"
+                # order.status = "cancelled"
                 # Downgrade adapter-level logs; centralized system handles lifecycle
                 self.logger.debug(f"Order {order.identifier} cancelled successfully")
                 return True
@@ -502,16 +502,24 @@ class ProjectX(Broker):
                 # Step 3: Add to _unprocessed_orders FIRST (following gold standard pattern)
                 # This is CRITICAL - must happen before _process_trade_event
                 # Also caches the order for quick lookup during event processing
-                self._unprocessed_orders.append(order)
-                
-                # Step 5: Process the NEW_ORDER event (moves from unprocessed to new)
-                try:
-                    self._process_trade_event(order, self.NEW_ORDER)
-                    self.logger.debug(f"Order submitted successfully with ID: {order.identifier} - NEW_ORDER event dispatched")
-                except Exception as e:
-                    self.logger.error(f"Error dispatching NEW_ORDER event for {order.identifier}: {e}")
-                    # Continue even if event dispatch fails
-                    self.logger.debug(f"Order submitted successfully with ID: {order.identifier} (event dispatch failed)")
+                # Locking is required because instantly-filling orders may trigger _handle_order_update before
+                # _submit_order finishes, causing race conditions and duplicate orders
+                with self._order_update_lock:
+                    existing_order = self.get_tracked_order(order.identifier)
+                    if existing_order:
+                        self.logger.debug(f"Order {order.identifier} already in tracking cache, skipping unprocessed "
+                                          f"append")
+                    else:
+                        self._unprocessed_orders.append(order)
+
+                    # Step 5: Process the NEW_ORDER event (moves from unprocessed to new)
+                    try:
+                        self._process_trade_event(order, self.NEW_ORDER)
+                        self.logger.debug(f"Order submitted successfully with ID: {order.identifier} - NEW_ORDER event dispatched")
+                    except Exception as e:
+                        self.logger.error(f"Error dispatching NEW_ORDER event for {order.identifier}: {e}")
+                        # Continue even if event dispatch fails
+                        self.logger.debug(f"Order submitted successfully with ID: {order.identifier} (event dispatch failed)")
 
                 # Note: children will be spawned upon fill event
             else:
@@ -1539,6 +1547,7 @@ class ProjectX(Broker):
                 position = self._convert_broker_position_to_lumibot_position(item)
                 if position is not None:
                     self._positions_cache[position.asset.symbol] = position
+                    self._filled_positions.append(position)
                     self.logger.debug(f"Position update received: {position.asset.symbol}")
         except Exception as e:
             self.logger.error(f"Error handling position update: {e}")
@@ -1590,6 +1599,7 @@ class ProjectX(Broker):
                                 cached_order.avg_fill_price = fill_price
 
                                 # Dispatch fill event - pass same order twice since it's the updated version
+                                # NOTE: This doesn't actually do anything since the status of both inputs are the same
                                 self._dispatch_status_change(cached_order, cached_order)
 
                                 self.logger.debug(f"Trade fill processed for order {order_id}: "
