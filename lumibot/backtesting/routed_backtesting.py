@@ -102,6 +102,22 @@ def _align_timestamp_to_index_tz(ts_value: datetime, ref_index_ts: pd.Timestamp)
     return ts
 
 
+def _is_day_like_timestep(value: str) -> bool:
+    """Return True when a timestep string represents daily cadence.
+
+    Accepts aliases like `day`, `1d`, `1day`, and normalized quantities returned by
+    `parse_timestep_qty_and_unit`.
+    """
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return False
+    try:
+        _qty, unit = parse_timestep_qty_and_unit(raw)
+        return str(unit).strip().lower() == "day"
+    except Exception:
+        return raw in {"day", "1d", "1day", "d"}
+
+
 class _RoutingAdapter:
     provider_key: str
 
@@ -976,7 +992,7 @@ class RoutedBacktestingPandas(ThetaDataBacktestingPandas):
 
         if spec.provider != "thetadata" and timestep == "minute":
             source_timestep = str(getattr(self, "_timestep", "") or "").strip().lower()
-            if source_timestep == "day":
+            if _is_day_like_timestep(source_timestep):
                 timestep = "day"
             elif not bool(getattr(self, "_observed_intraday_cadence", False)) and bool(
                 getattr(self, "_effective_day_mode", False)
@@ -1005,7 +1021,7 @@ class RoutedBacktestingPandas(ThetaDataBacktestingPandas):
 
         if spec.provider != "thetadata" and timestep == "minute":
             source_timestep = str(getattr(self, "_timestep", "") or "").strip().lower()
-            if source_timestep == "day":
+            if _is_day_like_timestep(source_timestep):
                 timestep = "day"
             elif not bool(getattr(self, "_observed_intraday_cadence", False)) and bool(
                 getattr(self, "_effective_day_mode", False)

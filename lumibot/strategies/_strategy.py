@@ -797,6 +797,10 @@ class _Strategy:
             # Set the base currency for crypto valuations.
 
             prices = {}
+            if not hasattr(self, "_forward_fill_warning_cache"):
+                # Throttle repetitive backtest forward-fill warnings (asset, day) to keep
+                # valuation logs informative without dominating runtime.
+                self._forward_fill_warning_cache = set()
             for asset in assets_original:
                 if asset != self._quote_asset:
                     asset_is_option = False
@@ -861,10 +865,16 @@ class _Strategy:
                         price = self._last_known_prices[asset]
                         base_asset = asset[0] if isinstance(asset, tuple) else asset
                         asset_symbol = getattr(base_asset, 'symbol', str(base_asset))
-                        self.logger.warning(
-                            "Using forward-filled price %.4f for %s at %s (no current price available).",
-                            price, asset_symbol, self.broker.datetime,
-                        )
+                        # Throttle noisy forward-fill warnings to once per contract/symbol per run.
+                        # Daily option strategies can otherwise emit thousands of lines that materially
+                        # slow long backtests and bloat logs.
+                        warn_key = str(base_asset)
+                        if warn_key not in self._forward_fill_warning_cache:
+                            self._forward_fill_warning_cache.add(warn_key)
+                            self.logger.warning(
+                                "Using forward-filled price %.4f for %s at %s (no current price available).",
+                                price, asset_symbol, self.broker.datetime,
+                            )
                     else:
                         # No price history - must skip this position
                         if isinstance(asset, Asset):
