@@ -231,8 +231,14 @@ class OptionsHelper:
     # Basic Utility Functions
     # ============================================================
 
-    def find_next_valid_option(self, underlying_asset: Asset, rounded_underlying_price: float,
-                                 expiry: date, put_or_call: str = "call") -> Optional[Asset]:
+    def find_next_valid_option(
+        self,
+        underlying_asset: Asset,
+        rounded_underlying_price: float,
+        expiry: date,
+        put_or_call: str = "call",
+        chains: Optional[Any] = None,
+    ) -> Optional[Asset]:
         """
         Find a valid option with the given expiry and strike.
         First tries the requested strike, then searches nearby strikes from the option chain.
@@ -326,14 +332,16 @@ class OptionsHelper:
         except Exception:
             max_expiration_hint = None
 
-        with self._chain_hint(expiry, max_expiration_hint):
-            chains = self.strategy.get_chains(underlying_asset)
-        if not chains:
+        chains_data = chains
+        if chains_data is None:
+            with self._chain_hint(expiry, max_expiration_hint):
+                chains_data = self.strategy.get_chains(underlying_asset)
+        if not chains_data:
             self.strategy.log_message("Option chains unavailable; cannot locate a valid option.", color="yellow")
             return None
 
         # Use the chain expirations (not "next day") to avoid churn and weekend/non-expiry dates.
-        expirations = self._get_chain_expirations(chains=chains, side=put_or_call)
+        expirations = self._get_chain_expirations(chains=chains_data, side=put_or_call)
         if not expirations:
             expirations = [expiry]
         expirations = [exp for exp in expirations if exp >= expiry]
@@ -383,7 +391,14 @@ class OptionsHelper:
                     except (TypeError, ValueError):
                         max_spread_pct = None
 
-            available_strikes = chains.strikes(exp_date, put_or_call.upper())
+            try:
+                available_strikes = chains_data.strikes(exp_date, put_or_call.upper())
+            except Exception:
+                if isinstance(chains_data, dict):
+                    strike_map = chains_data.get("Chains", {}).get(str(put_or_call).upper(), {})
+                    available_strikes = strike_map.get(exp_date.strftime("%Y-%m-%d"), []) if strike_map else []
+                else:
+                    available_strikes = []
             if not available_strikes:
                 # Fallback: if the chain doesn't provide strikes for this expiry (common when
                 # providers prune strike lists for performance), attempt to validate the requested
@@ -1080,8 +1095,146 @@ class OptionsHelper:
             )
         return delta
 
-    def find_strike_for_delta(self, underlying_asset: Asset, underlying_price: float,
-                              target_delta: float, expiry: date, right: str) -> Optional[float]:
+    def _is_theta_option_daily_backtest(self) -> bool:
+        """Return True when option pricing is routed through ThetaData in a daily backtest cadence."""
+        broker = getattr(self.strategy, "broker", None)
+        if broker is None or getattr(broker, "IS_BACKTESTING_BROKER", False) is not True:
+            return False
+
+        option_source = getattr(broker, "option_source", None)
+        data_source = option_source if option_source is not None else getattr(broker, "data_source", None)
+        if data_source is None:
+            return False
+
+        source_name = data_source.__class__.__name__
+        if source_name == "ThetaDataBacktestingPandas":
+            is_theta_option_provider = True
+        elif source_name == "RoutedBacktestingPandas":
+            routing = getattr(data_source, "_routing", {}) or {}
+            raw_option_provider = routing.get("option", routing.get("default", "thetadata"))
+            option_provider = str(raw_option_provider).strip().replace("-", "").replace("_", "").lower()
+            is_theta_option_provider = option_provider in {"thetadata", "theta"}
+        else:
+            is_theta_option_provider = False
+
+        if not is_theta_option_provider:
+            return False
+
+        is_daily_cadence = False
+        try:
+            sleeptime = getattr(self.strategy, "sleeptime", None)
+            if isinstance(sleeptime, str) and sleeptime.strip().upper().endswith("D"):
+                is_daily_cadence = True
+        except Exception:
+            pass
+        try:
+            if getattr(data_source, "_timestep", None) == "day":
+                is_daily_cadence = True
+        except Exception:
+            pass
+        return is_daily_cadence
+
+    def _normalize_target_delta_for_right(self, target_delta: float, option_type: str) -> float:
+        """Accept absolute-style user inputs while preserving signed-delta internals."""
+        normalized = float(target_delta)
+        if option_type == "PUT" and normalized > 0:
+            self.strategy.log_message(
+                f"⚠️ Received positive put delta {normalized:.4f}; interpreting as {-normalized:.4f}.",
+                color="yellow",
+            )
+            return -normalized
+        if option_type == "CALL" and normalized < 0:
+            self.strategy.log_message(
+                f"⚠️ Received negative call delta {normalized:.4f}; interpreting as {abs(normalized):.4f}.",
+                color="yellow",
+            )
+            return abs(normalized)
+        return normalized
+
+    @staticmethod
+    def _model_delta_for_strike(
+        *,
+        underlying_price: float,
+        strike: float,
+        t_years: float,
+        sigma: float,
+        is_call: bool,
+    ) -> Optional[float]:
+        """Cheap Black-Scholes-style delta approximation used to avoid expensive strike probes."""
+        if underlying_price <= 0 or strike <= 0 or t_years <= 0 or sigma <= 0:
+            return None
+        try:
+            sig_sqrt_t = sigma * math.sqrt(t_years)
+            if sig_sqrt_t <= 0:
+                return None
+            d1 = (math.log(underlying_price / strike) + 0.5 * sigma * sigma * t_years) / sig_sqrt_t
+            call_delta = NormalDist().cdf(d1)
+            return call_delta if is_call else (call_delta - 1.0)
+        except Exception:
+            return None
+
+    def _select_strike_by_model_delta(
+        self,
+        *,
+        underlying_asset: Asset,
+        underlying_price: float,
+        expiry: date,
+        option_type: str,
+        target_delta: float,
+        candidate_strikes: List[float],
+        as_of: Optional[date],
+    ) -> Optional[float]:
+        """Pick the chain strike closest to target delta using a model-only approximation."""
+        if not candidate_strikes:
+            return None
+
+        as_of_date = as_of or date.today()
+        days_to_expiry = (expiry - as_of_date).days
+        t_years = max(1.0 / 365.0, float(days_to_expiry) / 365.0)
+        is_call = option_type == "CALL"
+
+        try:
+            is_index_like = self._is_index_like_underlying(underlying_asset, getattr(underlying_asset, "symbol", None))
+        except Exception:
+            is_index_like = False
+        sigma = 0.25 if is_index_like else 0.35
+
+        best_strike: Optional[float] = None
+        best_delta: Optional[float] = None
+        best_diff: Optional[float] = None
+
+        for strike in candidate_strikes:
+            delta = self._model_delta_for_strike(
+                underlying_price=float(underlying_price),
+                strike=float(strike),
+                t_years=t_years,
+                sigma=sigma,
+                is_call=is_call,
+            )
+            if delta is None:
+                continue
+            diff = abs(float(delta) - float(target_delta))
+            if best_diff is None or diff < best_diff:
+                best_diff = diff
+                best_delta = float(delta)
+                best_strike = float(strike)
+
+        if best_strike is not None:
+            self.strategy.log_message(
+                f"⚡ Model strike pick: {best_strike:g} (approx delta={best_delta:.4f}, target={target_delta:.4f})",
+                color="blue",
+            )
+        return best_strike
+
+    def find_strike_for_delta(
+        self,
+        underlying_asset: Asset,
+        underlying_price: float,
+        target_delta: float,
+        expiry: date,
+        right: str,
+        chains: Optional[Any] = None,
+    ) -> Optional[float]:
         """
         Find the strike whose delta is closest to the target delta using binary search.
         (This function replaces the older "find_strike_for_delta_original".)
@@ -1129,16 +1282,17 @@ class OptionsHelper:
         # Prefer the actual strikes from the option chain to avoid querying non-existent strikes
         # (e.g., contracts that only list strikes every $5.00).
         candidate_strikes: List[float] = []
-        chains = None
-        try:
-            max_expiration_hint = self._default_chain_max_expiration_date(
-                underlying_asset=underlying_asset,
-                min_expiration_date=expiry,
-            )
-            with self._chain_hint(expiry, max_expiration_hint):
-                chains = self.strategy.get_chains(underlying_asset)
-        except Exception:
-            chains = None
+        chains_data = chains
+        if chains_data is None:
+            try:
+                max_expiration_hint = self._default_chain_max_expiration_date(
+                    underlying_asset=underlying_asset,
+                    min_expiration_date=expiry,
+                )
+                with self._chain_hint(expiry, max_expiration_hint):
+                    chains_data = self.strategy.get_chains(underlying_asset)
+            except Exception:
+                chains_data = None
 
         option_type = str(right).upper()
         if option_type.startswith("C"):
@@ -1146,13 +1300,15 @@ class OptionsHelper:
         elif option_type.startswith("P"):
             option_type = "PUT"
 
-        if chains:
+        normalized_target_delta = self._normalize_target_delta_for_right(float(target_delta), option_type)
+
+        if chains_data:
             strikes_raw = []
             try:
-                strikes_raw = chains.strikes(expiry, option_type)
+                strikes_raw = chains_data.strikes(expiry, option_type)
             except Exception:
-                if isinstance(chains, dict):
-                    strike_map = chains.get("Chains", {}).get(option_type, {})
+                if isinstance(chains_data, dict):
+                    strike_map = chains_data.get("Chains", {}).get(option_type, {})
                     strikes_raw = strike_map.get(expiry.strftime("%Y-%m-%d"), []) if strike_map else []
 
             if not isinstance(strikes_raw, (list, tuple, set)):
@@ -1209,7 +1365,7 @@ class OptionsHelper:
                 cache_date,
                 expiry,
                 option_type,
-                round(float(target_delta), 4),
+                round(float(normalized_target_delta), 4),
                 round(float(underlying_price), 2),
             )
             cached_strike = strike_cache.get(cache_key)
@@ -1217,6 +1373,22 @@ class OptionsHelper:
                 return float(cached_strike)
 
         is_call = option_type == "CALL"
+        is_theta_daily_backtest = self._is_theta_option_daily_backtest()
+
+        if is_theta_daily_backtest and candidate_strikes:
+            modeled = self._select_strike_by_model_delta(
+                underlying_asset=underlying_asset,
+                underlying_price=float(underlying_price),
+                expiry=expiry,
+                option_type=option_type,
+                target_delta=float(normalized_target_delta),
+                candidate_strikes=candidate_strikes,
+                as_of=cache_date,
+            )
+            if modeled is not None:
+                if cache_key is not None:
+                    strike_cache[cache_key] = float(modeled)
+                return float(modeled)
 
         best_strike: Optional[float] = None
         best_delta: Optional[float] = None
@@ -1230,7 +1402,7 @@ class OptionsHelper:
         # ------------------------------------------------------------------
         strike_estimate: Optional[float] = None
         try:
-            call_delta = float(target_delta) if is_call else float(target_delta) + 1.0
+            call_delta = float(normalized_target_delta) if is_call else float(normalized_target_delta) + 1.0
             if 0.01 < call_delta < 0.99:
                 as_of = cache_date or date.today()
                 days_to_expiry = (expiry - as_of).days
@@ -1269,7 +1441,7 @@ class OptionsHelper:
 
         if strike_estimate is not None and candidate_strikes:
             self.strategy.log_message(
-                f"🔍 BS estimate: strike≈{strike_estimate:.2f} (target_delta={target_delta})",
+                f"🔍 BS estimate: strike≈{strike_estimate:.2f} (target_delta={normalized_target_delta})",
                 color="blue",
             )
 
@@ -1297,14 +1469,14 @@ class OptionsHelper:
                             expiry,
                             strike,
                             mid_delta,
-                            target_delta,
+                            normalized_target_delta,
                         )
 
-                    if best_delta is None or abs(mid_delta - target_delta) < abs(best_delta - target_delta):
+                    if best_delta is None or abs(mid_delta - normalized_target_delta) < abs(best_delta - normalized_target_delta):
                         best_delta = mid_delta
                         best_strike = strike
 
-                    if abs(mid_delta - target_delta) < 0.001:
+                    if abs(mid_delta - normalized_target_delta) < 0.001:
                         self.strategy.log_message(
                             f"🎯 Exact match found at strike {strike:g} with delta {mid_delta:.4f}",
                             color="green",
@@ -1314,7 +1486,7 @@ class OptionsHelper:
                         return float(strike)
 
                 # Early exit if we are already very close.
-                if best_delta is not None and abs(best_delta - target_delta) < 0.02:
+                if best_delta is not None and abs(best_delta - normalized_target_delta) < 0.02:
                     break
 
         # Fallback: original binary-search walk (kept for robustness).
@@ -1371,16 +1543,16 @@ class OptionsHelper:
                     expiry,
                     strike,
                     mid_delta,
-                    target_delta,
+                    normalized_target_delta,
                     lo,
                     hi,
                 )
 
-            if best_delta is None or abs(mid_delta - target_delta) < abs(best_delta - target_delta):
+            if best_delta is None or abs(mid_delta - normalized_target_delta) < abs(best_delta - normalized_target_delta):
                 best_delta = mid_delta
                 best_strike = float(strike)
 
-            if abs(mid_delta - target_delta) < 0.001:
+            if abs(mid_delta - normalized_target_delta) < 0.001:
                 self.strategy.log_message(
                     f"🎯 Exact match found at strike {strike:g} with delta {mid_delta:.4f}",
                     color="green",
@@ -1392,22 +1564,22 @@ class OptionsHelper:
             # Preserve the legacy binary-walk direction logic to minimize behavior drift; the
             # best_strike accumulator above ensures we still return the closest delta.
             if is_call:
-                if mid_delta > target_delta:
+                if mid_delta > normalized_target_delta:
                     lo = mid + 1
                 else:
                     hi = mid - 1
             else:
-                if mid_delta < target_delta:
+                if mid_delta < normalized_target_delta:
                     lo = mid + 1
                 else:
                     hi = mid - 1
 
         if best_strike is None:
-            self.strategy.log_message(f"❌ No valid strike found for target delta {target_delta}", color="red")
+            self.strategy.log_message(f"❌ No valid strike found for target delta {normalized_target_delta}", color="red")
             return None
 
         self.strategy.log_message(
-            f"✅ RESULT: Closest strike {best_strike:g} with delta {best_delta:.4f} (target was {target_delta})",
+            f"✅ RESULT: Closest strike {best_strike:g} with delta {best_delta:.4f} (target was {normalized_target_delta})",
             color="green",
         )
         if cache_key is not None:

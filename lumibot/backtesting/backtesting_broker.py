@@ -207,6 +207,13 @@ class BacktestingBroker(Broker):
         # Track end-of-data to prevent infinite loops when end date is in the future
         self._end_of_trading_days_reached = False
 
+    @staticmethod
+    def _normalize_asset_type(value: Any) -> str:
+        raw = str(value or "").strip().lower()
+        if "." in raw:
+            raw = raw.split(".")[-1]
+        return raw
+
     def _mark_end_of_trading_days(self, now):
         if self._end_of_trading_days_reached:
             return
@@ -1862,9 +1869,11 @@ class BacktestingBroker(Broker):
             if trading_fee.taker is True and order_type_value in {"market", "stop"}:
                 trade_cost += trading_fee.flat_fee
                 trade_cost += Decimal(str(price)) * Decimal(str(order.quantity)) * trading_fee.percent_fee
+                trade_cost += Decimal(str(order.quantity)) * trading_fee.per_contract_fee
             elif trading_fee.maker is True and order_type_value in {"limit", "stop_limit", "smart_limit"}:
                 trade_cost += trading_fee.flat_fee
                 trade_cost += Decimal(str(price)) * Decimal(str(order.quantity)) * trading_fee.percent_fee
+                trade_cost += Decimal(str(order.quantity)) * trading_fee.per_contract_fee
 
         return trade_cost
         
@@ -2061,6 +2070,7 @@ class BacktestingBroker(Broker):
             open = high = low = close = volume = None
             fast_bid = None
             fast_ask = None
+            force_day_fill_timestep = self._should_force_day_fill_timestep(order)
 
             # PERF: MARKET orders dominate many warm-cache backtests (minute strategies, speed-burner).
             # When bid/ask are already present in the cached Data series, we can fill immediately
@@ -2106,11 +2116,24 @@ class BacktestingBroker(Broker):
                 and fast_bid is None
                 and fast_ask is None
             )
+            if (
+                not skip_quote_fills
+                and not audit_enabled
+                and force_day_fill_timestep
+                and order.order_type == Order.OrderType.MARKET
+                and (order.is_buy_order() or order.is_sell_order())
+            ):
+                skip_quote_fills = True
 
             # PERFORMANCE: Prefer quote-based fills when bid/ask are present so we avoid
             # fetching trade-only OHLC bars (which can be sparse/missing, especially for
             # options). When bid/ask are unavailable we fall back to the OHLC-based model.
+            should_try_quote_first = not (
+                force_day_fill_timestep and order.order_type == Order.OrderType.MARKET
+            )
             if (
+                should_try_quote_first
+                and
                 order.order_type in (Order.OrderType.MARKET, Order.OrderType.LIMIT)
                 and (order.is_buy_order() or order.is_sell_order())
             ):
@@ -2321,7 +2344,11 @@ class BacktestingBroker(Broker):
             elif self.data_source.SOURCE == "PANDAS" or data_source_name in {"INTERACTIVEBROKERSREST"}:
                 # Market orders: prefer quote-based fills when bid/ask are available to avoid
                 # expensive OHLC downloads and reflect real-world execution more closely.
-                if order.order_type == Order.OrderType.MARKET and not skip_quote_fills:
+                if (
+                    order.order_type == Order.OrderType.MARKET
+                    and not skip_quote_fills
+                    and not force_day_fill_timestep
+                ):
                     quote_fill_price = self._try_fill_with_quote(order, strategy, None, None, None)
                     if quote_fill_price is not None:
                         self._execute_filled_order(
@@ -2408,6 +2435,8 @@ class BacktestingBroker(Broker):
                     ohlc = None
                 else:
                     timestep = getattr(self.data_source, "_timestep", "minute")
+                    if force_day_fill_timestep:
+                        timestep = "day"
                     # PandasData's bar slicing is already careful about day-vs-minute lookahead
                     # (see Data._get_bars_dict). For daily bars, a negative `timeshift` can
                     # accidentally *advance* the slice into future sessions.
@@ -2609,7 +2638,9 @@ class BacktestingBroker(Broker):
 
                     # OHLC can be sparse/empty even when quotes exist. Attempt a quote-based fill
                     # before canceling so orders can still execute when bid/ask is actionable.
-                    quote_fill_price = self._try_fill_with_quote(order, strategy, None, None, None)
+                    quote_fill_price = None
+                    if not force_day_fill_timestep:
+                        quote_fill_price = self._try_fill_with_quote(order, strategy, None, None, None)
                     if quote_fill_price is not None:
                         self._execute_filled_order(
                             order=order,
@@ -2667,7 +2698,7 @@ class BacktestingBroker(Broker):
                     # maintenance break / weekend reopen).
                     should_use_next_bar = (
                         data_source_name in {"INTERACTIVEBROKERSREST"}
-                        and str(getattr(order.asset, "asset_type", "") or "").lower() in {"future", "cont_future"}
+                        and self._normalize_asset_type(getattr(order.asset, "asset_type", "")) in {"future", "cont_future"}
                         and str(getattr(self.data_source, "_timestep", "minute")) != "day"
                     )
                     if should_use_next_bar:
@@ -2967,7 +2998,7 @@ class BacktestingBroker(Broker):
         # Match IBKR's `get_quote()` special-case for crypto at midnight: use the daily series.
         timestep = getattr(data_source, "_timestep", None) or "minute"
         if (
-            str(getattr(asset, "asset_type", "") or "").lower() == "crypto"
+            self._normalize_asset_type(getattr(asset, "asset_type", "")) == "crypto"
             and now.hour == 0
             and now.minute == 0
             and now.second == 0
@@ -3046,10 +3077,70 @@ class BacktestingBroker(Broker):
 
         return bid, ask
 
+    def _resolve_provider_key_for_asset(self, asset: Asset) -> Optional[str]:
+        """Resolve a routing provider key for an asset when exposed by the data source."""
+        if asset is None:
+            return None
+
+        data_source = getattr(self, "data_source", None)
+        if data_source is None:
+            return None
+
+        class_name = data_source.__class__.__name__
+        if class_name == "InteractiveBrokersRESTBacktesting":
+            return "ibkr"
+
+        provider_spec_for_asset = getattr(data_source, "_provider_spec_for_asset", None)
+        if not callable(provider_spec_for_asset):
+            return None
+
+        try:
+            spec = provider_spec_for_asset(asset)
+        except Exception:
+            return None
+
+        provider = str(getattr(spec, "provider", "") or "").strip().lower()
+        return provider or None
+
+    def _should_force_day_fill_timestep(self, order: Order) -> bool:
+        """Whether market fills should bypass minute quote paths and use daily bars."""
+        if order is None:
+            return False
+
+        asset = getattr(order, "asset", None)
+        if asset is None:
+            return False
+
+        if self._is_option_asset(asset):
+            return False
+
+        asset_type = self._normalize_asset_type(getattr(asset, "asset_type", ""))
+        if asset_type not in {"stock", "index"}:
+            return False
+
+        provider = self._resolve_provider_key_for_asset(asset)
+        if provider != "ibkr":
+            return False
+
+        data_source = getattr(self, "data_source", None)
+        if data_source is None:
+            return False
+
+        source_timestep = str(getattr(data_source, "_timestep", "") or "").strip().lower()
+        if source_timestep == "day":
+            return True
+
+        if not bool(getattr(data_source, "_effective_day_mode", False)):
+            return False
+        if bool(getattr(data_source, "_observed_intraday_cadence", False)):
+            return False
+
+        return True
+
     def _is_option_asset(self, asset) -> bool:
         if asset is None:
             return False
-        return str(getattr(asset, "asset_type", "")).lower() == "option"
+        return self._normalize_asset_type(getattr(asset, "asset_type", "")) == "option"
 
     def _should_attempt_quote_fallback(self, order, open_, high_, low_) -> bool:
         """Determine whether to attempt quote-based fills.
@@ -3194,7 +3285,7 @@ class BacktestingBroker(Broker):
 
     def _audit_underlying_quote_fields(self, order: Order) -> dict[str, Any]:
         asset = getattr(order, "asset", None)
-        if asset is None or str(getattr(asset, "asset_type", "")).lower() != "option":
+        if asset is None or self._normalize_asset_type(getattr(asset, "asset_type", "")) != "option":
             return {}
 
         underlying = getattr(asset, "underlying_asset", None)
@@ -3273,7 +3364,7 @@ class BacktestingBroker(Broker):
 
         # Underlying quote at submission time (options only), kept distinct from fill-time fields.
         try:
-            if asset is not None and str(getattr(asset, "asset_type", "")).lower() == "option":
+            if asset is not None and self._normalize_asset_type(getattr(asset, "asset_type", "")) == "option":
                 underlying = getattr(asset, "underlying_asset", None)
                 fields["submit.underlying.symbol"] = getattr(underlying, "symbol", None) if underlying else None
                 if underlying is not None:

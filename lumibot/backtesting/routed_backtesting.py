@@ -37,6 +37,22 @@ def _normalize_token(value: str) -> str:
     return re.sub(r"[\s_\-]+", "", (value or "").strip().lower())
 
 
+def _normalize_asset_type(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if "." in raw:
+        raw = raw.split(".")[-1]
+    return raw
+
+
+def _ibkr_include_after_hours(asset_type: str, timestep_unit: str) -> bool:
+    """Return IBKR outsideRth policy for routed backtests.
+
+    For stock/index daily bars we explicitly use regular-session bars (outsideRth=false)
+    to match ThetaData/Yahoo daily close semantics and avoid after-hours-driven signal drift.
+    """
+    return not (asset_type in {"stock", "index"} and timestep_unit == "day")
+
+
 def _ccxt_exchange_id_from_token(token: str) -> str | None:
     """Resolve a user token to a CCXT exchange id (case/sep-insensitive).
 
@@ -71,6 +87,35 @@ def _infer_default_ccxt_exchange_id() -> str:
     if (KRAKEN_CONFIG.get("apiKey") or "").strip():
         return "kraken"
     return "binance"
+
+
+def _align_timestamp_to_index_tz(ts_value: datetime, ref_index_ts: pd.Timestamp) -> pd.Timestamp:
+    """Return a comparable timestamp aligned to the timezone mode of `ref_index_ts`."""
+    ts = pd.Timestamp(ts_value)
+    ref = pd.Timestamp(ref_index_ts)
+    if ref.tzinfo is not None and ts.tzinfo is None:
+        ts = ts.tz_localize(ref.tzinfo)
+    elif ref.tzinfo is None and ts.tzinfo is not None:
+        ts = ts.tz_localize(None)
+    elif ref.tzinfo is not None and ts.tzinfo is not None and ts.tzinfo != ref.tzinfo:
+        ts = ts.tz_convert(ref.tzinfo)
+    return ts
+
+
+def _is_day_like_timestep(value: str) -> bool:
+    """Return True when a timestep string represents daily cadence.
+
+    Accepts aliases like `day`, `1d`, `1day`, and normalized quantities returned by
+    `parse_timestep_qty_and_unit`.
+    """
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return False
+    try:
+        _qty, unit = parse_timestep_qty_and_unit(raw)
+        return str(unit).strip().lower() == "day"
+    except Exception:
+        return raw in {"day", "1d", "1day", "d"}
 
 
 class _RoutingAdapter:
@@ -195,7 +240,9 @@ class _DataFrameRoutingAdapter(_RoutingAdapter):
                 existing_start = existing_df.index.min()
                 existing_end = existing_df.index.max()
                 if existing_start is not None and existing_end is not None:
-                    if start_datetime >= existing_start and end_dt <= existing_end:
+                    start_cmp = _align_timestamp_to_index_tz(start_datetime, existing_start)
+                    end_cmp = _align_timestamp_to_index_tz(end_dt, existing_end)
+                    if start_cmp >= existing_start and end_cmp <= existing_end:
                         return None
             except Exception:
                 pass
@@ -299,6 +346,8 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
         unit = str(unit)
 
         canonical_key, legacy_key = self._router._build_dataset_keys(asset, quote_asset, dataset_key)
+        if canonical_key in self._fully_loaded_series and canonical_key in self._router._data_store:
+            return None
         existing = self._router._data_store.get(canonical_key)
         existing_df = getattr(existing, "df", None) if existing is not None else None
 
@@ -307,19 +356,43 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 existing_start = existing_df.index.min()
                 existing_end = existing_df.index.max()
                 if existing_start is not None and existing_end is not None:
-                    if start_datetime >= existing_start and end_dt <= existing_end:
+                    start_cmp = _align_timestamp_to_index_tz(start_datetime, existing_start)
+                    end_cmp = _align_timestamp_to_index_tz(end_dt, existing_end)
+                    if start_cmp >= existing_start and end_cmp <= existing_end:
                         return None
             except Exception:
                 pass
 
-        asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+        asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
+        include_after_hours = _ibkr_include_after_hours(asset_type, unit)
         df = None
 
         # PERF: warm-cache minute strategies can call `get_historical_prices()` tens of thousands of
         # times. In the router data source, IBKR history fetches must be amortized by prefetching
         # the full backtest window once, then slicing in-memory thereafter (same principle as the
         # IBKR-only backtesting data source).
-        if asset_type in {"future", "cont_future"} and unit in {"minute", "hour", "day"} and canonical_key not in self._fully_loaded_series:
+        if asset_type in {"stock", "index"} and unit in {"minute", "hour"} and canonical_key not in self._fully_loaded_series:
+            # Perf: routed minute/index strategies (for example SPX intraday options) can call
+            # `get_historical_prices()` every loop iteration. Prefetch the full window once, then
+            # serve slices from in-memory Data to avoid one downloader roundtrip per minute.
+            try:
+                prefetch_start = min(start_datetime, self._router.datetime_start)
+            except Exception:
+                prefetch_start = start_datetime
+            prefetch_end = self._router.datetime_end or end_dt
+            df = ibkr_helper.get_price_data(
+                asset=asset,
+                quote=quote_asset,
+                timestep=dataset_key,
+                start_dt=prefetch_start,
+                end_dt=prefetch_end,
+                exchange=None,
+                include_after_hours=include_after_hours,
+            )
+            if df is None or df.empty:
+                return None
+            self._fully_loaded_series.add(canonical_key)
+        elif asset_type in {"future", "cont_future"} and unit in {"minute", "hour", "day"} and canonical_key not in self._fully_loaded_series:
             try:
                 from lumibot.backtesting.interactive_brokers_rest_backtesting import InteractiveBrokersRESTBacktesting
 
@@ -343,7 +416,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
@@ -361,7 +434,26 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
+            )
+            if df is None or df.empty:
+                return None
+            self._fully_loaded_series.add(canonical_key)
+        elif asset_type in {"stock", "index"} and unit == "day" and canonical_key not in self._fully_loaded_series:
+            # Daily lookback requests are in trading bars, so rely on the provider-agnostic
+            # `start_datetime` computed by `get_start_datetime_and_ts_unit()`.
+            # Capping prefetch to a short calendar window from backtest start can underfill warmup
+            # bars and shift first signals by weeks/months.
+            prefetch_start = start_datetime
+            prefetch_end = self._router.datetime_end or end_dt
+            df = ibkr_helper.get_price_data(
+                asset=asset,
+                quote=quote_asset,
+                timestep=dataset_key,
+                start_dt=prefetch_start,
+                end_dt=prefetch_end,
+                exchange=None,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
@@ -380,7 +472,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
@@ -393,7 +485,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=start_datetime,
                 end_dt=end_dt,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
 
         if df is None or df.empty:
@@ -445,7 +537,8 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
         require_quote_data: bool,
         require_ohlc_data: bool,
     ) -> pd.DataFrame | None:
-        asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+        asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
+        include_after_hours = _ibkr_include_after_hours(asset_type, ts_unit)
 
         # PERF: warm-cache minute strategies can call `get_historical_prices()` tens of thousands of
         # times. In the router data source, IBKR history fetches must be amortized by prefetching
@@ -481,7 +574,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
@@ -502,7 +595,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
@@ -524,7 +617,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
                 start_dt=prefetch_start,
                 end_dt=prefetch_end,
                 exchange=None,
-                include_after_hours=True,
+                include_after_hours=include_after_hours,
             )
             if df is None or df.empty:
                 return None
@@ -538,7 +631,7 @@ class _IbkrRoutingAdapter(_DataFrameRoutingAdapter):
             start_dt=start_datetime,
             end_dt=end_dt,
             exchange=None,
-            include_after_hours=True,
+            include_after_hours=include_after_hours,
         )
 
 
@@ -571,7 +664,7 @@ class _PolygonRoutingAdapter(_DataFrameRoutingAdapter):
         else:
             timespan = "minute"
 
-        asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+        asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
         if asset_type == "crypto" and ts_unit == "day" and canonical_key not in self._fully_loaded_series:
             try:
                 lookback_days = max(7, int(length) + 5)
@@ -845,7 +938,7 @@ class RoutedBacktestingPandas(ThetaDataBacktestingPandas):
         if getattr(self, "_registry", None) is None:
             # Defensive: some unit tests construct the router via __new__ without running __init__.
             self._registry = _ProviderRegistry(self)
-        asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+        asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
         raw = self._routing.get(asset_type) or self._routing.get("default") or "thetadata"
         return self._registry.resolve_provider_spec(raw)
 
@@ -898,9 +991,41 @@ class RoutedBacktestingPandas(ThetaDataBacktestingPandas):
             spec = ProviderSpec(provider="thetadata")
 
         if spec.provider != "thetadata" and timestep == "minute":
-            if not bool(getattr(self, "_observed_intraday_cadence", False)) and bool(
+            source_timestep = str(getattr(self, "_timestep", "") or "").strip().lower()
+            if _is_day_like_timestep(source_timestep):
+                timestep = "day"
+            elif not bool(getattr(self, "_observed_intraday_cadence", False)) and bool(
                 getattr(self, "_effective_day_mode", False)
             ):
                 timestep = "day"
 
         return super().get_last_price(asset, timestep=timestep, quote=quote, exchange=exchange, **kwargs)
+
+    def get_quote(self, asset, quote=None, exchange=None, timestep="minute", **kwargs):
+        """Align routed quote lookups away from minute bars in daily non-Theta runs.
+
+        In daily stock/index backtests routed to IBKR, market-order fills can call get_quote()
+        and trigger expensive minute history downloads. When we have day-cadence evidence and
+        no intraday cadence observed, align quote requests to day bars for non-Theta providers.
+        """
+        try:
+            dt = self.get_datetime()
+            self._update_cadence_from_dt(dt)
+        except Exception:
+            pass
+
+        try:
+            spec = self._provider_spec_for_asset(asset if not isinstance(asset, tuple) else asset[0])
+        except Exception:
+            spec = ProviderSpec(provider="thetadata")
+
+        if spec.provider != "thetadata" and timestep == "minute":
+            source_timestep = str(getattr(self, "_timestep", "") or "").strip().lower()
+            if _is_day_like_timestep(source_timestep):
+                timestep = "day"
+            elif not bool(getattr(self, "_observed_intraday_cadence", False)) and bool(
+                getattr(self, "_effective_day_mode", False)
+            ):
+                timestep = "day"
+
+        return super().get_quote(asset, quote=quote, exchange=exchange, timestep=timestep, **kwargs)

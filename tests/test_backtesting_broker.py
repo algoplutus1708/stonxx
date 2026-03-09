@@ -1,6 +1,7 @@
 import datetime
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 import pandas as pd
 from datetime import datetime as dt, time, timedelta # Renamed datetime to dt to avoid conflict
@@ -169,6 +170,84 @@ class TestBacktestingBroker:
         assert order._audit.get("fill.model") == "quote_fallback"
         assert order._audit.get("asset_quote.bid") == 99.0
         assert order._audit.get("asset_quote.ask") == 101.0
+
+    def test_resolve_provider_key_for_asset_prefers_ibkr_class(self):
+        broker = BacktestingBroker.__new__(BacktestingBroker)
+        broker.data_source = type("InteractiveBrokersRESTBacktesting", (), {})()
+        provider = broker._resolve_provider_key_for_asset(Asset("SPY", asset_type="stock"))
+        assert provider == "ibkr"
+
+    def test_should_force_day_fill_timestep_true_for_routed_ibkr_daily_stock(self):
+        broker = BacktestingBroker.__new__(BacktestingBroker)
+
+        class _StubDataSource:
+            _effective_day_mode = True
+            _observed_intraday_cadence = False
+
+            @staticmethod
+            def _provider_spec_for_asset(_asset):
+                return SimpleNamespace(provider="ibkr")
+
+        broker.data_source = _StubDataSource()
+        order = Order(
+            asset=Asset("SPY", asset_type="stock"),
+            quantity=1,
+            side="buy",
+            order_type=Order.OrderType.MARKET,
+            strategy="test",
+        )
+
+        assert broker._should_force_day_fill_timestep(order) is True
+
+    def test_should_force_day_fill_timestep_false_when_intraday_seen(self):
+        broker = BacktestingBroker.__new__(BacktestingBroker)
+
+        class _StubDataSource:
+            _effective_day_mode = True
+            _observed_intraday_cadence = True
+
+            @staticmethod
+            def _provider_spec_for_asset(_asset):
+                return SimpleNamespace(provider="ibkr")
+
+        broker.data_source = _StubDataSource()
+        order = Order(
+            asset=Asset("SPY", asset_type="stock"),
+            quantity=1,
+            side="buy",
+            order_type=Order.OrderType.MARKET,
+            strategy="test",
+        )
+
+        assert broker._should_force_day_fill_timestep(order) is False
+
+    def test_should_force_day_fill_timestep_false_for_options(self):
+        broker = BacktestingBroker.__new__(BacktestingBroker)
+
+        class _StubDataSource:
+            _effective_day_mode = True
+            _observed_intraday_cadence = False
+
+            @staticmethod
+            def _provider_spec_for_asset(_asset):
+                return SimpleNamespace(provider="ibkr")
+
+        broker.data_source = _StubDataSource()
+        order = Order(
+            asset=Asset(
+                symbol="SPY",
+                asset_type="option",
+                expiration=dt(2025, 1, 17),
+                strike=500,
+                right=Asset.OptionRight.CALL,
+            ),
+            quantity=1,
+            side="buy",
+            order_type=Order.OrderType.MARKET,
+            strategy="test",
+        )
+
+        assert broker._should_force_day_fill_timestep(order) is False
 
     def test_trade_event_log_includes_audit_columns_when_enabled(self):
         broker = BacktestingBroker.__new__(BacktestingBroker)

@@ -935,6 +935,26 @@ class StrategyExecutor(Thread):
                 safe_params_to_pass[arg] = self.strategy.parameters[arg]
         self.strategy.initialize(**safe_params_to_pass)
 
+        # Backtesting perf guard:
+        # For daily-cadence strategies (e.g. sleeptime="1D"), prime the data source cadence so
+        # the very first price/quote lookup does not force an expensive minute-history prefetch.
+        #
+        # This is especially important for routed providers (IBKR stock/index paths) where minute
+        # prefetch across long windows can dominate runtime before the strategy requests any daily bars.
+        if self.strategy.is_backtesting:
+            try:
+                sleep_value = str(getattr(self.strategy, "sleeptime", "") or "").strip().lower()
+                if sleep_value.endswith("d"):
+                    data_source = getattr(self.broker, "data_source", None)
+                    if data_source is not None:
+                        setattr(data_source, "_timestep", "day")
+                        if hasattr(data_source, "_effective_day_mode"):
+                            setattr(data_source, "_effective_day_mode", True)
+                        if hasattr(data_source, "_observed_intraday_cadence"):
+                            setattr(data_source, "_observed_intraday_cadence", False)
+            except Exception:
+                pass
+
     @lifecycle_method
     @trace_stats
     def _before_market_opens(self):

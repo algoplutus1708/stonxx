@@ -4,7 +4,7 @@ from decimal import Decimal
 class TradingFee:
     """TradingFee class. Used to define the trading fees for a broker in a strategy/backtesting."""
 
-    def __init__(self, flat_fee=0.0, percent_fee=0.0, maker=True, taker=True):
+    def __init__(self, flat_fee=0.0, percent_fee=0.0, per_contract_fee=0.0, maker=True, taker=True):
         """
         Parameters
         ----------
@@ -12,6 +12,10 @@ class TradingFee:
             Flat fee to pay for each order. This is a fixed fee that is paid for each order in the quote currency.
         percent_fee : Decimal, float, or None
             Percentage fee to pay for each order. This is a percentage of the order value that is paid for each order in the quote currency.
+        per_contract_fee : Decimal, float, or None
+            Fee charged per contract (multiplied by order quantity). Useful for options commissions
+            where brokers charge per contract (e.g., $0.65/contract). For a 40-contract order with
+            per_contract_fee=0.65, the total fee would be $26.00.
         maker : bool
             Whether this fee is a maker fee (applies to limit orders).
             Default is True, which means that this fee will be used on limit orders.
@@ -28,8 +32,9 @@ class TradingFee:
         >>> class MyStrategy(Strategy):
         >>>     pass
         >>>
-        >>> trading_fee_1 = TradingFee(flat_fee=5.2) # $5.20 flat fee
+        >>> trading_fee_1 = TradingFee(flat_fee=5.2) # $5.20 flat fee per order
         >>> trading_fee_2 = TradingFee(percent_fee=0.01) # 1% fee
+        >>> trading_fee_3 = TradingFee(per_contract_fee=0.65) # $0.65 per contract
         >>> backtesting_start = datetime(2022, 1, 1)
         >>> backtesting_end = datetime(2022, 6, 1)
         >>> result = MyStrategy.backtest(
@@ -39,7 +44,8 @@ class TradingFee:
         >>>     buy_trading_fees=[trading_fee_1, trading_fee_2],
         >>> )
         """
-        self.flat_fee = Decimal(flat_fee)
-        self.percent_fee = Decimal(percent_fee)
+        self.flat_fee = Decimal(str(flat_fee))
+        self.percent_fee = Decimal(str(percent_fee))
+        self.per_contract_fee = Decimal(str(per_contract_fee))
         self.maker = maker
         self.taker = taker

@@ -197,6 +197,11 @@ def main() -> int:
         help="Enable backtest profiling (sets BACKTESTING_PROFILE, e.g. 'yappi')",
     )
     parser.add_argument(
+        "--perf-mode",
+        action="store_true",
+        help="Disable plotting/tearsheet/progress for cleaner runtime benchmarking.",
+    )
+    parser.add_argument(
         "--subprocess-log",
         default=None,
         help="Write the child backtest process stdout/stderr to this file (keeps runner output small)",
@@ -219,6 +224,9 @@ def main() -> int:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
+    # Prevent recursive `.env` discovery from loading unrelated files near strategy paths
+    # (for example in Downloads). We inject required vars explicitly below.
+    env["LUMIBOT_DISABLE_DOTENV"] = "1"
 
     # Ensure we use local lumibot source
     lumibot_root = str(Path(args.lumibot_root).resolve())
@@ -231,12 +239,20 @@ def main() -> int:
     env["BACKTESTING_START"] = args.start
     env["BACKTESTING_END"] = args.end
 
-    env["SHOW_PLOT"] = "True"
-    env["SHOW_INDICATORS"] = "True"
-    env["SHOW_TEARSHEET"] = "True"
-    env["SAVE_LOGFILE"] = "true"
-    env["BACKTESTING_QUIET_LOGS"] = "false"
-    env["BACKTESTING_SHOW_PROGRESS_BAR"] = "true"
+    if args.perf_mode:
+        env["SHOW_PLOT"] = "False"
+        env["SHOW_INDICATORS"] = "False"
+        env["SHOW_TEARSHEET"] = "False"
+        env["SAVE_LOGFILE"] = "false"
+        env["BACKTESTING_QUIET_LOGS"] = "true"
+        env["BACKTESTING_SHOW_PROGRESS_BAR"] = "false"
+    else:
+        env["SHOW_PLOT"] = "True"
+        env["SHOW_INDICATORS"] = "True"
+        env["SHOW_TEARSHEET"] = "True"
+        env["SAVE_LOGFILE"] = "true"
+        env["BACKTESTING_QUIET_LOGS"] = "false"
+        env["BACKTESTING_SHOW_PROGRESS_BAR"] = "true"
     # Prevent LumiBot from auto-opening HTML artifacts (tearsheet/trades) in the user's browser.
     # Artifacts are still generated in `logs/`; we just avoid UI spam during repeated perf runs.
     env.setdefault("LUMIBOT_DISABLE_UI", "1")
@@ -318,6 +334,7 @@ def main() -> int:
         print(f"[run] ibkr_history_source={env.get('IBKR_HISTORY_SOURCE')}")
     print(f"[run] audit={_bool_str(args.audit)}")
     print(f"[run] profile={env.get('BACKTESTING_PROFILE')}")
+    print(f"[run] perf_mode={_bool_str(args.perf_mode)}")
 
     subprocess_log = Path(args.subprocess_log) if args.subprocess_log else (workdir / f"subprocess_{label}.log")
     subprocess_log.parent.mkdir(parents=True, exist_ok=True)

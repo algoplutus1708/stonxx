@@ -355,3 +355,13 @@ When old tests and new tests conflict:
 3. Document any judgment calls in the test file with comments
 
 This philosophy applies to ALL projects, not just LumiBot.
+
+---
+
+## North Star Metrics and OKRs (CRITICAL)
+
+**Every project MUST have clearly defined North Star metrics and OKRs.** If metrics don't exist for this project, propose them as your first action. If they exist, reference them when making decisions.
+
+- Track leading indicators weekly. Create dashboards and graphs to visualize progress.
+- When starting any task, check: does this move a North Star metric? If not, question its priority.
+- See `/Users/robertgrzesik/Documents/Development/CLAUDE.md` for the full framework.

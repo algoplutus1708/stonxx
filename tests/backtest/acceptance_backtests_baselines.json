@@ -8,14 +8,14 @@
       "lumibot_version": "4.4.51",
       "max_backtest_time_seconds": 300,
       "metrics_centipercent": {
-        "cagr": 2008,
-        "max_drawdown": -8668,
-        "total_return": 19477
+        "cagr": 997,
+        "max_drawdown": -8745,
+        "total_return": 7537
       },
       "metrics_raw": {
-        "cagr": "20.08%",
-        "max_drawdown": "-86.68%",
-        "total_return": "194.77%"
+        "cagr": "9.97%",
+        "max_drawdown": "-87.45%",
+        "total_return": "75.37%"
       },
       "script_filename": "AAPL Deep Dip Calls (Copy 4).py",
       "settings_backtesting_end": "2025-11-30 23:59:00-05:00",
@@ -32,14 +32,14 @@
       "lumibot_version": "4.4.51",
       "max_backtest_time_seconds": 120,
       "metrics_centipercent": {
-        "cagr": -1632,
-        "max_drawdown": -68,
-        "total_return": -68
+        "cagr": -1476,
+        "max_drawdown": -61,
+        "total_return": -61
       },
       "metrics_raw": {
-        "cagr": "-16.32%",
-        "max_drawdown": "-0.68%",
-        "total_return": "-0.68%"
+        "cagr": "-14.76%",
+        "max_drawdown": "-0.61%",
+        "total_return": "-0.61%"
       },
       "script_filename": "Leaps Buy Hold (Alpha Picks).py",
       "settings_backtesting_end": "2025-10-14 23:59:00-04:00",

@@ -31,6 +31,7 @@ IBKR_HISTORY_MAX_POINTS = 1000
 IBKR_DEFAULT_CRYPTO_VENUE = "ZEROHASH"
 IBKR_DEFAULT_HISTORY_SOURCE = "Trades"
 IBKR_DEFAULT_FUTURES_EXCHANGE_FALLBACK = "CME"
+IBKR_DEFAULT_INDEX_HISTORY_SOURCE = "Midpoint"
 
 IBKR_CONID_NEGATIVE_CACHE_TTL_SECONDS = 24 * 60 * 60  # 24h (persisted via BacktestCacheManager when enabled)
 
@@ -48,6 +49,44 @@ _FUTURES_EXCHANGE_CACHE_LOADED = False
 
 _NEGATIVE_CONID_CACHE: Dict[str, Dict[str, Any]] = {}
 _NEGATIVE_CONID_CACHE_LOADED = False
+_IBKR_EQUITY_ACTIONS_CACHE: Dict[str, pd.DataFrame] = {}
+_RUNTIME_CONID_CACHE: Dict[str, int] = {}
+_DISABLE_CONIDS_REMOTE_UPLOAD = False
+_LOGGED_CONIDS_REMOTE_UPLOAD_DISABLE = False
+_LOGGED_HISTORY_ALIASES: set[str] = set()
+
+
+def _truthy_env(var_name: str, default: str = "false") -> bool:
+    raw = os.environ.get(var_name, default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _is_access_denied_error(exc: Exception) -> bool:
+    msg = str(exc or "").lower()
+    return "access denied" in msg or "accessdenied" in msg
+
+
+def _normalize_asset_type(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if "." in raw:
+        raw = raw.split(".")[-1]
+    return raw
+
+
+def _alias_asset_for_ibkr_history(asset: Asset) -> tuple[Asset, Optional[str]]:
+    """Map known strategy-facing index aliases to IBKR history symbols.
+
+    Some strategy code uses weekly option roots (for example `SPXW`) as the
+    index symbol for convenience. IBKR history resolves the underlying index as
+    `SPX`, not `SPXW`. Keep this mapping local to history requests so option
+    chains/orders are unaffected.
+    """
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
+    symbol = str(getattr(asset, "symbol", "") or "").strip().upper()
+    if asset_type == "index" and symbol == "SPXW":
+        return Asset("SPX", asset_type=Asset.AssetType.INDEX), "SPXW->SPX"
+    return asset, None
+
 
 def _enable_futures_bid_ask_derivation() -> bool:
     """Whether to derive bid/ask quotes for futures from Bid_Ask + Midpoint history.
@@ -299,7 +338,14 @@ def get_price_data(
     start_local = start_utc.astimezone(LUMIBOT_DEFAULT_PYTZ)
     end_local = end_utc.astimezone(LUMIBOT_DEFAULT_PYTZ)
 
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset, history_alias = _alias_asset_for_ibkr_history(asset)
+    if history_alias:
+        alias_key = f"{history_alias}:{timestep}"
+        if alias_key not in _LOGGED_HISTORY_ALIASES:
+            logger.info("IBKR history symbol alias applied: %s", history_alias)
+            _LOGGED_HISTORY_ALIASES.add(alias_key)
+
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     asset_auto_expiry = getattr(asset, "auto_expiry", None)
     if asset_type == "future" and getattr(asset, "expiration", None) is None and not asset_auto_expiry:
         raise ValueError(
@@ -338,6 +384,10 @@ def get_price_data(
 
     source_was_explicit = source is not None or env_source_was_explicit
     history_source = _normalize_history_source(source)
+    # IBKR index history is frequently unavailable with `Trades`. Force midpoint bars for index
+    # requests unless a per-call source was explicitly provided.
+    if source is None and asset_type == "index":
+        history_source = IBKR_DEFAULT_INDEX_HISTORY_SOURCE
 
     # Normalize timestep classification once so callers can pass "day", "1d", "1day", etc.
     try:
@@ -489,13 +539,21 @@ def get_price_data(
         timestep=timestep,
         exchange=effective_exchange,
         source=history_source,
+        include_after_hours=include_after_hours,
     )
     cache_manager = get_backtest_cache()
 
     try:
         cache_manager.ensure_local_file(
             cache_file,
-            payload=_remote_payload(asset, quote, timestep, effective_exchange, history_source),
+            payload=_remote_payload(
+                asset,
+                quote,
+                timestep,
+                effective_exchange,
+                history_source,
+                include_after_hours=include_after_hours,
+            ),
         )
     except Exception:
         pass
@@ -718,6 +776,7 @@ def get_price_data(
                                     timestep=timestep,
                                     exchange=effective_exchange,
                                     source=history_source,
+                                    include_after_hours=include_after_hours,
                                     start_dt=missing_start,
                                     end_dt=seg_end_utc,
                                 )
@@ -769,11 +828,30 @@ def get_price_data(
             _write_cache_frame(cache_file, df_aug)
             df_cache = df_aug
 
+    if asset_type in {"stock", "index"} and str(timestep_component).endswith("day"):
+        # Align cached daily bars to session close BEFORE slicing by [start_local, end_local].
+        # This avoids same-day lookahead at market open when IBKR timestamps day bars near
+        # session open/midnight boundaries.
+        aligned_cache = _align_stock_index_daily_to_session_close(df_cache)
+        if not aligned_cache.index.equals(df_cache.index):
+            _write_cache_frame(cache_file, aligned_cache)
+        df_cache = aligned_cache
+
+    # Enrich daily equity cache with corporate actions so dividend accounting and splits are
+    # consistent with other providers. This is intentionally best-effort.
+    if asset_type == "stock" and str(timestep_component).endswith("day"):
+        enriched_cache, changed = _append_equity_corporate_actions_daily(df_cache, asset)
+        if changed:
+            _write_cache_frame(cache_file, enriched_cache)
+        df_cache = enriched_cache
+
     # Remove placeholder rows from the returned frame (but keep them in cache).
     frame = df_cache.loc[(df_cache.index >= start_local) & (df_cache.index <= end_local)].copy()
     if "missing" in frame.columns:
         frame = frame[~frame["missing"].fillna(False)]
         frame = frame.drop(columns=["missing"], errors="ignore")
+    if asset_type in {"stock", "index"} and str(timestep_component).endswith("day"):
+        frame = _repair_isolated_split_spikes_daily(frame)
     return frame
 
 
@@ -786,6 +864,182 @@ def _frame_has_actionable_bid_ask(df: pd.DataFrame) -> bool:
     ask = pd.to_numeric(df["ask"], errors="coerce")
     spread = ask - bid
     return bool((spread > 0).any())
+
+
+def _align_stock_index_daily_to_session_close(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize IBKR stock/index daily timestamps to the session close.
+
+    Why:
+    - IBKR day bars are often timestamped near UTC midnight, which appears as ~04:00/05:00 ET.
+    - Daily backtests that run at market open can then incorrectly treat the current session's
+      bar as already available.
+    - Re-indexing day bars to 16:00 ET aligns them with end-of-session semantics used by
+      other providers (for example ThetaData day bars at 21:00 UTC in winter).
+    """
+    if df is None or df.empty:
+        return df
+
+    frame = df.sort_index().copy()
+    idx = pd.DatetimeIndex(frame.index)
+    if idx.tz is None:
+        idx = idx.tz_localize(LUMIBOT_DEFAULT_PYTZ)
+    else:
+        idx = idx.tz_convert(LUMIBOT_DEFAULT_PYTZ)
+
+    aligned_idx = idx.normalize() + pd.Timedelta(hours=16)
+    frame.index = aligned_idx
+    frame = frame[~frame.index.duplicated(keep="last")].sort_index()
+    return frame
+
+
+def _repair_isolated_split_spikes_daily(df: pd.DataFrame) -> pd.DataFrame:
+    """Repair isolated split-like spikes in daily stock/index bars.
+
+    Why:
+    - Some IBKR daily stock/index series can contain a one-day bar scaled by a split factor
+      (2x/3x/...) that immediately reverts the next day.
+    - This creates impossible +100%/+200% followed by -50%/-66% portfolio jumps.
+
+    Scope:
+    - Only isolated one-day anomalies are repaired.
+    - Persistent level shifts are left untouched.
+    """
+    if df is None or df.empty or "close" not in df.columns or len(df) < 3:
+        return df
+
+    frame = df.sort_index().copy()
+    candidate_cols = [c for c in ("open", "high", "low", "close", "bid", "ask", "last", "vwap") if c in frame.columns]
+    if not candidate_cols:
+        return frame
+
+    numeric = {col: pd.to_numeric(frame[col], errors="coerce").copy() for col in candidate_cols}
+    close = numeric["close"]
+
+    factors = (2.0, 3.0, 4.0, 5.0, 10.0)
+    factor_tol = 0.25
+    reversion_tol = 0.25
+    adjusted_rows = 0
+
+    def _near(value: float, target: float, rel_tol: float) -> bool:
+        if value <= 0 or target <= 0:
+            return False
+        return abs(value - target) <= abs(target) * rel_tol
+
+    def _row_scales_like(idx: int, factor: float, upward: bool) -> bool:
+        # Require most OHLC fields to indicate the same factor jump.
+        ratios: list[float] = []
+        for col in ("open", "high", "low", "close"):
+            series = numeric.get(col)
+            if series is None:
+                continue
+            prev_val = series.iat[idx - 1]
+            cur_val = series.iat[idx]
+            if pd.isna(prev_val) or pd.isna(cur_val) or prev_val <= 0 or cur_val <= 0:
+                continue
+            ratio = (cur_val / prev_val) if upward else (prev_val / cur_val)
+            ratios.append(float(ratio))
+        if len(ratios) < 2:
+            return False
+        hits = sum(1 for ratio in ratios if _near(ratio, factor, factor_tol))
+        return hits >= max(2, len(ratios) - 1)
+
+    def _trailing_level_stable(last_idx: int) -> bool:
+        # Guard against mutating genuine regime shifts by requiring a stable
+        # trailing level before we adjust a terminal-row spike.
+        start = max(0, last_idx - 6)
+        trailing = close.iloc[start:last_idx].dropna()
+        if len(trailing) < 3:
+            return False
+        ref = float(trailing.median())
+        if ref <= 0:
+            return False
+        return abs(float(close.iat[last_idx - 1]) / ref - 1.0) <= 0.35
+
+    for i in range(1, len(frame) - 1):
+        prev_close = close.iat[i - 1]
+        cur_close = close.iat[i]
+        next_close = close.iat[i + 1]
+        if (
+            pd.isna(prev_close)
+            or pd.isna(cur_close)
+            or pd.isna(next_close)
+            or prev_close <= 0
+            or cur_close <= 0
+            or next_close <= 0
+        ):
+            continue
+
+        action = None
+        for factor in factors:
+            # Upward spike on day i that reverts on day i+1.
+            if (
+                _near(float(cur_close / prev_close), factor, factor_tol)
+                and _near(float(next_close / prev_close), 1.0, reversion_tol)
+                and _row_scales_like(i, factor, upward=True)
+            ):
+                action = ("divide", factor)
+                break
+
+            # Downward spike on day i that reverts on day i+1.
+            if (
+                _near(float(prev_close / cur_close), factor, factor_tol)
+                and _near(float(next_close / prev_close), 1.0, reversion_tol)
+                and _row_scales_like(i, factor, upward=False)
+            ):
+                action = ("multiply", factor)
+                break
+
+        if action is None:
+            continue
+
+        op, factor = action
+        for col, series in numeric.items():
+            val = series.iat[i]
+            if pd.isna(val):
+                continue
+            series.iat[i] = (val / factor) if op == "divide" else (val * factor)
+        close = numeric["close"]
+        adjusted_rows += 1
+
+    # Terminal-row fallback:
+    # In rolling backtests we often evaluate up to the current day only, so the latest row does
+    # not yet have the next-day reversion available. Detect obvious split-factor spikes on that
+    # final row using trailing-level stability as a safety check.
+    last_i = len(frame) - 1
+    if last_i >= 1 and _trailing_level_stable(last_i):
+        prev_close = close.iat[last_i - 1]
+        cur_close = close.iat[last_i]
+        if (
+            not pd.isna(prev_close)
+            and not pd.isna(cur_close)
+            and prev_close > 0
+            and cur_close > 0
+        ):
+            terminal_action = None
+            for factor in factors:
+                if _near(float(cur_close / prev_close), factor, factor_tol) and _row_scales_like(last_i, factor, upward=True):
+                    terminal_action = ("divide", factor)
+                    break
+                if _near(float(prev_close / cur_close), factor, factor_tol) and _row_scales_like(last_i, factor, upward=False):
+                    terminal_action = ("multiply", factor)
+                    break
+
+            if terminal_action is not None:
+                op, factor = terminal_action
+                for col, series in numeric.items():
+                    val = series.iat[last_i]
+                    if pd.isna(val):
+                        continue
+                    series.iat[last_i] = (val / factor) if op == "divide" else (val * factor)
+                close = numeric["close"]
+                adjusted_rows += 1
+
+    if adjusted_rows > 0:
+        for col, series in numeric.items():
+            frame[col] = series
+        logger.warning("IBKR daily split-spike repair adjusted %s row(s).", adjusted_rows)
+
+    return frame
 
 
 def _resolve_cont_future_segments(*, asset: Asset, start_dt: datetime, end_dt: datetime, exchange: Optional[str]) -> list[tuple[Asset, datetime, datetime]]:
@@ -916,12 +1170,26 @@ def _get_cached_bars_for_source(
     end_local = end_utc.astimezone(LUMIBOT_DEFAULT_PYTZ)
 
     history_source = _normalize_history_source(source)
-    cache_file = _cache_file_for(asset=asset, quote=quote, timestep=timestep, exchange=exchange, source=history_source)
+    cache_file = _cache_file_for(
+        asset=asset,
+        quote=quote,
+        timestep=timestep,
+        exchange=exchange,
+        source=history_source,
+        include_after_hours=include_after_hours,
+    )
     cache_manager = get_backtest_cache()
     try:
         cache_manager.ensure_local_file(
             cache_file,
-            payload=_remote_payload(asset, quote, timestep, exchange, history_source),
+            payload=_remote_payload(
+                asset,
+                quote,
+                timestep,
+                exchange,
+                history_source,
+                include_after_hours=include_after_hours,
+            ),
         )
     except Exception:
         pass
@@ -1031,6 +1299,7 @@ def _get_cached_bars_for_source(
                                 timestep=timestep,
                                 exchange=exchange,
                                 source=history_source,
+                                include_after_hours=include_after_hours,
                                 start_dt=missing_start,
                                 end_dt=seg_end_utc,
                             )
@@ -1195,7 +1464,7 @@ def _fetch_history_between_dates(
     conid = _resolve_conid(asset=asset, quote=quote, exchange=exchange)
     bar, bar_seconds, _cache_timestep = _timestep_to_ibkr_bar(timestep)
     period = _max_period_for_bar(bar)
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     # IBKR's `continuous=true` is IBKR-specific roll behavior. For LumiBot `cont_future` assets
     # we prefer our own synthetic roll (explicit contract series per expiration) so parity is
     # stable across data providers. Only request IBKR "continuous" when we truly do not have an
@@ -1222,13 +1491,25 @@ def _fetch_history_between_dates(
         # IBKR typically returns {"data":[...]} (empty list means no data).
         data = payload.get("data") if isinstance(payload, dict) else None
         if not data:
-            # True no-data: write placeholders so we don't hammer IBKR for the same range.
+            # If we already fetched earlier chunks, keep them and stop paging.
+            #
+            # WHY:
+            # - During long backward pagination windows, an occasional empty page can occur due to
+            #   transient gateway behavior even when previous pages were valid.
+            # - Returning an empty frame here would discard all collected bars and can poison the
+            #   cache with a broad missing-window marker.
+            if chunks:
+                break
+
+            # True no-data at the first page: write placeholders so we don't hammer IBKR for the
+            # same fully empty range.
             _record_missing_window(
                 asset=asset,
                 quote=quote,
                 timestep=timestep,
                 exchange=exchange,
                 source=source,
+                include_after_hours=include_after_hours,
                 start_dt=start_dt,
                 end_dt=cursor_end,
             )
@@ -1236,12 +1517,17 @@ def _fetch_history_between_dates(
 
         df = _history_payload_to_frame(data, source_was_explicit=source_was_explicit)
         if df.empty:
+            # Same rationale as above: preserve already-fetched chunks when a later page is empty.
+            if chunks:
+                break
+
             _record_missing_window(
                 asset=asset,
                 quote=quote,
                 timestep=timestep,
                 exchange=exchange,
                 source=source,
+                include_after_hours=include_after_hours,
                 start_dt=start_dt,
                 end_dt=cursor_end,
             )
@@ -1448,14 +1734,32 @@ def _record_missing_window(
     timestep: str,
     exchange: Optional[str],
     source: str,
+    include_after_hours: bool,
     start_dt: datetime,
     end_dt: datetime,
 ) -> None:
     # Add a bracketing placeholder window (two rows) to cache.
-    cache_file = _cache_file_for(asset=asset, quote=quote, timestep=timestep, exchange=exchange, source=source)
+    cache_file = _cache_file_for(
+        asset=asset,
+        quote=quote,
+        timestep=timestep,
+        exchange=exchange,
+        source=source,
+        include_after_hours=include_after_hours,
+    )
     cache_manager = get_backtest_cache()
     try:
-        cache_manager.ensure_local_file(cache_file, payload=_remote_payload(asset, quote, timestep, exchange, source))
+        cache_manager.ensure_local_file(
+            cache_file,
+            payload=_remote_payload(
+                asset,
+                quote,
+                timestep,
+                exchange,
+                source,
+                include_after_hours=include_after_hours,
+            ),
+        )
     except Exception:
         pass
 
@@ -1573,8 +1877,25 @@ def _get_crypto_daily_bars(
     # IMPORTANT: keep derived daily bars in a separate cache namespace so we don't mix them with
     # legacy `bar=1d` results (which have different semantics and timestamps).
     derived_source = f"{source}_DERIVED_DAILY"
-    cache_file = _cache_file_for(asset=asset, quote=quote, timestep="day", exchange=exch, source=derived_source)
-    cache = ParquetSeriesCache(cache_file, remote_payload=_remote_payload(asset, quote, "day", exch, derived_source))
+    cache_file = _cache_file_for(
+        asset=asset,
+        quote=quote,
+        timestep="day",
+        exchange=exch,
+        source=derived_source,
+        include_after_hours=include_after_hours,
+    )
+    cache = ParquetSeriesCache(
+        cache_file,
+        remote_payload=_remote_payload(
+            asset,
+            quote,
+            "day",
+            exch,
+            derived_source,
+            include_after_hours=include_after_hours,
+        ),
+    )
     cache.hydrate_remote()
     df_cache = cache.read()
 
@@ -1632,7 +1953,17 @@ def _get_crypto_daily_bars(
                 daily.loc[day_start, "missing"] = False
 
         merged = ParquetSeriesCache.merge(df_cache, daily)
-        cache.write(merged, remote_payload=_remote_payload(asset, quote, "day", exch, derived_source))
+        cache.write(
+            merged,
+            remote_payload=_remote_payload(
+                asset,
+                quote,
+                "day",
+                exch,
+                derived_source,
+                include_after_hours=include_after_hours,
+            ),
+        )
         df_cache = merged
 
     if df_cache.empty:
@@ -1790,8 +2121,32 @@ def _get_futures_daily_bars(
 
 
 def _resolve_conid(*, asset: Asset, quote: Optional[Asset], exchange: Optional[str]) -> int:
+    global _RUNTIME_CONID_CACHE
+
     cache_file = Path(LUMIBOT_CACHE_FOLDER) / CACHE_SUBFOLDER / "conids.json"
     cache_manager = get_backtest_cache()
+
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
+    effective_exchange = exchange
+    if asset_type in {"future", "cont_future"} and not effective_exchange:
+        effective_exchange = _resolve_futures_exchange(getattr(asset, "symbol", ""))
+
+    # Fast path: avoid repeated secdef/conid resolution in tight loops (for example minute-index
+    # strategies repeatedly requesting SPX bars). For equivalent key variants, mirror historical
+    # cache compatibility behavior.
+    primary = _conid_key(asset=asset, quote=quote, exchange=effective_exchange)
+    candidates = [primary.to_key()]
+    if asset_type in {"future", "cont_future"}:
+        if primary.quote_symbol:
+            candidates.append(IbkrConidKey(primary.asset_type, primary.symbol, "", primary.exchange, primary.expiration).to_key())
+        else:
+            candidates.append(IbkrConidKey(primary.asset_type, primary.symbol, "USD", primary.exchange, primary.expiration).to_key())
+
+    for key in candidates:
+        cached_runtime = _RUNTIME_CONID_CACHE.get(key)
+        if isinstance(cached_runtime, int) and cached_runtime > 0:
+            return int(cached_runtime)
+
     try:
         cache_manager.ensure_local_file(cache_file, payload={"provider": "ibkr", "type": "conids"})
     except Exception:
@@ -1854,25 +2209,14 @@ def _resolve_conid(*, asset: Asset, quote: Optional[Asset], exchange: Optional[s
                 except Exception:
                     pass
 
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
-    effective_exchange = exchange
-    if asset_type in {"future", "cont_future"} and not effective_exchange:
-        effective_exchange = _resolve_futures_exchange(getattr(asset, "symbol", ""))
-
     # Conid keying is not fully uniform across historical caches (some runs key futures with
     # quote_symbol="USD", others omit it). For robustness (and to avoid unnecessary remote
     # lookups), try a small set of equivalent keys before falling back to the downloader.
-    primary = _conid_key(asset=asset, quote=quote, exchange=effective_exchange)
-    candidates = [primary.to_key()]
-    if asset_type in {"future", "cont_future"}:
-        if primary.quote_symbol:
-            candidates.append(IbkrConidKey(primary.asset_type, primary.symbol, "", primary.exchange, primary.expiration).to_key())
-        else:
-            candidates.append(IbkrConidKey(primary.asset_type, primary.symbol, "USD", primary.exchange, primary.expiration).to_key())
 
     for key in candidates:
         cached = mapping.get(key)
         if isinstance(cached, int) and cached > 0:
+            _RUNTIME_CONID_CACHE[key] = int(cached)
             return cached
 
     keys_added: set[str] = set()
@@ -1882,6 +2226,7 @@ def _resolve_conid(*, asset: Asset, quote: Optional[Asset], exchange: Optional[s
     conid_int = int(conid)
     prior_primary = mapping.get(primary_key)
     mapping[primary_key] = conid_int
+    _RUNTIME_CONID_CACHE[primary_key] = conid_int
     if prior_primary != conid_int:
         keys_added.add(primary_key)
     if asset_type in {"future", "cont_future"}:
@@ -1893,6 +2238,7 @@ def _resolve_conid(*, asset: Asset, quote: Optional[Asset], exchange: Optional[s
             alt_key = IbkrConidKey(primary.asset_type, primary.symbol, "USD", primary.exchange, primary.expiration).to_key()
         prior_alt = mapping.get(alt_key)
         mapping[alt_key] = conid_int
+        _RUNTIME_CONID_CACHE[alt_key] = conid_int
         if prior_alt != conid_int:
             keys_added.add(alt_key)
 
@@ -1969,6 +2315,11 @@ def _merge_upload_conids_json(
     max_attempts: int = 3,
 ) -> None:
     """Upload `ibkr/conids.json` with a merge-before-upload retry to reduce lost updates."""
+    global _DISABLE_CONIDS_REMOTE_UPLOAD, _LOGGED_CONIDS_REMOTE_UPLOAD_DISABLE
+
+    if _DISABLE_CONIDS_REMOTE_UPLOAD:
+        return
+
     if not cache_manager.enabled or cache_manager.mode != CacheMode.S3_READWRITE:
         cache_manager.on_local_update(local_path, payload={"provider": "ibkr", "type": "conids"})
         return
@@ -1999,7 +2350,16 @@ def _merge_upload_conids_json(
 
     # If this update didn't add anything new, a plain upload is fine.
     if not required_keys:
-        s3.upload_file(str(local_path), bucket, remote_key)
+        try:
+            s3.upload_file(str(local_path), bucket, remote_key)
+        except Exception as exc:
+            if _is_access_denied_error(exc):
+                _DISABLE_CONIDS_REMOTE_UPLOAD = True
+                if not _LOGGED_CONIDS_REMOTE_UPLOAD_DISABLE:
+                    logger.warning("Disabling remote conids.json uploads due to AccessDenied: %s", exc)
+                    _LOGGED_CONIDS_REMOTE_UPLOAD_DISABLE = True
+                return
+            raise
         _persist_s3_marker(local_path=local_path, remote_key=remote_key)
         return
 
@@ -2034,6 +2394,12 @@ def _merge_upload_conids_json(
             time.sleep(0.15 * (attempt + 1))
         except Exception as exc:
             last_exc = exc
+            if _is_access_denied_error(exc):
+                _DISABLE_CONIDS_REMOTE_UPLOAD = True
+                if not _LOGGED_CONIDS_REMOTE_UPLOAD_DISABLE:
+                    logger.warning("Disabling remote conids.json uploads due to AccessDenied: %s", exc)
+                    _LOGGED_CONIDS_REMOTE_UPLOAD_DISABLE = True
+                return
             time.sleep(0.15 * (attempt + 1))
 
     if last_exc is not None:
@@ -2048,7 +2414,7 @@ def _lookup_conid_remote(
     mapping: Optional[Dict[str, int]] = None,
     keys_added: Optional[set[str]] = None,
 ) -> int:
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     if asset_type in {"future", "cont_future"}:
         if getattr(asset, "expiration", None) is None and asset_type != "cont_future" and not getattr(asset, "auto_expiry", None):
             raise ValueError(
@@ -2249,6 +2615,7 @@ def _cache_file_for(
     timestep: str,
     exchange: Optional[str],
     source: str,
+    include_after_hours: bool,
 ) -> Path:
     provider_root = Path(LUMIBOT_CACHE_FOLDER) / CACHE_SUBFOLDER
     asset_folder = _asset_folder(asset)
@@ -2259,13 +2626,17 @@ def _cache_file_for(
     expiration = getattr(asset, "expiration", None)
     exp_component = expiration.strftime("%Y%m%d") if expiration else ""
     source_component = _safe_component(source)
+    session_component = "AHR" if bool(include_after_hours) else "RTH"
     suffix = f"_{exp_component}" if exp_component else ""
-    filename = f"{asset_folder}_{symbol}_{quote_symbol}_{timestep_component}_{exch}_{source_component}{suffix}.parquet"
+    filename = (
+        f"{asset_folder}_{symbol}_{quote_symbol}_{timestep_component}_{exch}_{source_component}_{session_component}"
+        f"{suffix}.parquet"
+    )
     return provider_root / asset_folder / timestep_component / "bars" / filename
 
 
 def _asset_folder(asset: Asset) -> str:
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     if asset_type in {"crypto"}:
         return "crypto"
     if asset_type in {"future", "cont_future"}:
@@ -2340,6 +2711,124 @@ def _normalize_history_source(source: Optional[str]) -> str:
     if normalized in {"bid_ask", "bidask"}:
         return "Bid_Ask"
     raise ValueError(f"Unsupported IBKR history source '{source}'. Expected Trades, Midpoint, or Bid_Ask.")
+
+
+def _get_cached_equity_actions(symbol: str, last_needed_datetime: Optional[datetime] = None) -> pd.DataFrame:
+    """Return cached split/dividend actions for an equity symbol (best effort)."""
+    key = str(symbol or "").strip().upper()
+    if not key:
+        return pd.DataFrame(columns=["Dividends", "Stock Splits"])
+    cache_key = key
+    if isinstance(last_needed_datetime, datetime):
+        try:
+            # Bucket by date to maximize in-process reuse while keeping "needed coverage" stable.
+            cache_key = f"{key}:{last_needed_datetime.date().isoformat()}"
+        except Exception:
+            cache_key = key
+
+    cached = _IBKR_EQUITY_ACTIONS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    actions = pd.DataFrame(columns=["Dividends", "Stock Splits"])
+    try:
+        from lumibot.tools.yahoo_helper import YahooHelper
+
+        history = YahooHelper.get_symbol_data(
+            key,
+            interval="1d",
+            caching=True,
+            auto_adjust=False,
+            last_needed_datetime=last_needed_datetime,
+        )
+        if history is not None and not history.empty:
+            raw = history[["Dividends", "Stock Splits"]]
+            raw = raw[(raw != 0).any(axis=1)].fillna(0)
+        else:
+            raw = None
+
+        if raw is not None and not raw.empty:
+            actions = raw.copy()
+            actions.index = pd.to_datetime(actions.index, errors="coerce")
+            actions = actions[~actions.index.isna()]
+            if actions.index.tz is None:
+                actions.index = actions.index.tz_localize(LUMIBOT_DEFAULT_PYTZ)
+            else:
+                actions.index = actions.index.tz_convert(LUMIBOT_DEFAULT_PYTZ)
+            actions = actions.sort_index()
+    except Exception as exc:
+        logger.debug("IBKR equity corporate actions unavailable for %s: %s", key, exc)
+
+    _IBKR_EQUITY_ACTIONS_CACHE[cache_key] = actions
+    if cache_key != key and key not in _IBKR_EQUITY_ACTIONS_CACHE:
+        _IBKR_EQUITY_ACTIONS_CACHE[key] = actions
+    return actions
+
+
+def _append_equity_corporate_actions_daily(frame: pd.DataFrame, asset: Asset) -> tuple[pd.DataFrame, bool]:
+    """Append `dividend` + `stock_splits` columns to daily equity bars.
+
+    WHY:
+    - IBKR day bars do not include corporate actions in the history payload.
+    - LumiBot dividend accounting reads these columns when present.
+    - We enrich only stock/day bars, using Yahoo actions as a free, cached corporate-action
+      source until a first-party IBKR corporate-actions endpoint is added to the downloader.
+    """
+    if frame is None or frame.empty:
+        return frame, False
+    if not _truthy_env("LUMIBOT_IBKR_ENRICH_EQUITY_CORPORATE_ACTIONS", "true"):
+        return frame, False
+
+    symbol = str(getattr(asset, "symbol", "") or "").strip().upper()
+    if not symbol:
+        return frame, False
+
+    out = frame
+    changed = False
+    if "dividend" not in out.columns or "stock_splits" not in out.columns:
+        out = out.copy()
+        if "dividend" not in out.columns:
+            out["dividend"] = 0.0
+        if "stock_splits" not in out.columns:
+            out["stock_splits"] = 0.0
+        changed = True
+
+    last_needed_datetime: Optional[datetime] = None
+    try:
+        if len(out.index):
+            last_idx = pd.to_datetime(out.index, errors="coerce")
+            if isinstance(last_idx, pd.DatetimeIndex) and len(last_idx) > 0 and not pd.isna(last_idx.max()):
+                last_needed_datetime = last_idx.max().to_pydatetime()
+    except Exception:
+        last_needed_datetime = None
+
+    actions = _get_cached_equity_actions(symbol, last_needed_datetime=last_needed_datetime)
+    if actions.empty:
+        return out, changed
+
+    idx = pd.DatetimeIndex(out.index)
+    if idx.tz is None:
+        idx = idx.tz_localize(LUMIBOT_DEFAULT_PYTZ)
+    else:
+        idx = idx.tz_convert(LUMIBOT_DEFAULT_PYTZ)
+    idx_dates = idx.date
+
+    div_map: Dict[Any, float] = {}
+    split_map: Dict[Any, float] = {}
+    if "Dividends" in actions.columns:
+        div_series = pd.to_numeric(actions["Dividends"], errors="coerce").fillna(0.0)
+        div_map = div_series.groupby(actions.index.date).sum().to_dict()
+    if "Stock Splits" in actions.columns:
+        split_series = pd.to_numeric(actions["Stock Splits"], errors="coerce").fillna(0.0)
+        split_map = split_series.groupby(actions.index.date).sum().to_dict()
+
+    if div_map or split_map:
+        out = out.copy()
+        out["dividend"] = [float(div_map.get(day, 0.0)) for day in idx_dates]
+        out["stock_splits"] = [float(split_map.get(day, 0.0)) for day in idx_dates]
+        changed = True
+
+    return out, changed
 
 
 def _max_period_for_bar(bar: str) -> str:
@@ -2435,7 +2924,7 @@ def _fetch_contract_info(conid: int) -> Dict[str, Any]:
 
 def _maybe_apply_future_contract_metadata(*, asset: Asset, exchange: Optional[str]) -> None:
     """Best-effort: populate futures multiplier + min_tick for accurate PnL and tick rounding."""
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     if asset_type not in {"future", "cont_future"}:
         return
 
@@ -2492,6 +2981,7 @@ def _remote_payload(
     timestep: str,
     exchange: Optional[str],
     source: str,
+    include_after_hours: bool,
 ) -> Dict[str, object]:
     return {
         "provider": "ibkr",
@@ -2501,6 +2991,7 @@ def _remote_payload(
         "timestep": timestep,
         "exchange": exchange,
         "source": source,
+        "include_after_hours": bool(include_after_hours),
         "expiration": getattr(asset, "expiration", None).isoformat() if getattr(asset, "expiration", None) else None,
     }
 
@@ -2510,7 +3001,7 @@ def _remote_payload_from_path(path: Path) -> Dict[str, object]:
 
 
 def _conid_key(asset: Asset, quote: Optional[Asset], exchange: Optional[str]) -> IbkrConidKey:
-    asset_type = str(getattr(asset, "asset_type", "") or "").lower()
+    asset_type = _normalize_asset_type(getattr(asset, "asset_type", ""))
     symbol = str(getattr(asset, "symbol", "") or "")
     quote_symbol = str(getattr(quote, "symbol", "") or "") if quote else ""
     exch = (exchange or "").strip().upper()

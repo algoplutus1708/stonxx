@@ -1,6 +1,57 @@
 # Changelog
 
-## 4.4.51 - Unreleased
+## 4.4.54 - 2026-03-08
+
+### Added
+- `TradingFee` now supports `per_contract_fee` for broker-style option commissions charged per contract.
+- Regression tests for `per_contract_fee` initialization and trade-cost calculations in backtesting.
+
+### Changed
+- `TradingFee` fee fields now coerce through `Decimal(str(...))` for stable decimal handling across float inputs.
+
+### Fixed
+- Backtesting trade-cost calculations now apply `per_contract_fee * quantity` for taker and maker fee paths (`market`, `stop`, `limit`, `stop_limit`, `smart_limit`).
+
+## 4.4.53 - 2026-03-06
+
+### Added
+- Regression tests for daily-cadence datasource seeding in `StrategyExecutor`, routed `1D` timestep normalization, put-delta normalization/model-path strike selection, and IBKR equity corporate-action cache reuse.
+- Regression tests for IBKR paged-history retention when later pages are empty, plus option valuation fallback coverage for off-session stale mark scenarios.
+
+### Changed
+- Daily-cadence backtests now seed datasource cadence to `day` during strategy initialization to avoid first-lookup minute prefetch blowups.
+- `Strategy.get_last_price()` now consistently prefers daily bars for stock/index assets in daily backtest cadence, including routed IBKR stock/index paths.
+- Routed backtesting now treats day-like timestep aliases (`1D`, `1day`, etc.) as daily cadence for non-Theta last-price/quote reads.
+- ThetaData daily option fetches now prefetch forward in bounded chunks (capped by expiration/end) to reduce repeated downloader round-trips during long runs.
+- Option helper strike selection now normalizes absolute delta inputs by option side and uses a fast model-based strike pick for Theta daily option backtests.
+- IBKR equity corporate-action enrichment now uses Yahoo history with coverage hints (`last_needed_datetime`) and date-bucket cache keys for stable reuse.
+- Backtest artifact export now always writes CSV/parquet outputs for trades/stats/indicators/trade-events regardless of `show_plot` mode.
+
+### Fixed
+- Guarded option MTM valuation against off-session stale marks that could cause transient portfolio-value drops in backtests.
+- Fixed IBKR history pagination to preserve already-fetched chunks when a subsequent page returns empty.
+- Refreshed acceptance baseline metrics for `aapl_deep_dip_calls` and `leaps_alpha_picks_short` to match current deterministic CI outputs.
+- Updated `test_classic_60_40` drift-rebalancer expectations to the corrected daily-cadence fill quantities.
+
+## 4.4.52 - 2026-03-03
+
+### Added
+- Regression tests for Yahoo corporate-actions helpers (`get_symbol_actions`, `get_symbols_actions`) and IBKR daily equity action enrichment.
+- Regression test for routed IBKR daily stock prefetch to guarantee full lookback warmup coverage.
+
+### Changed
+- Production-readiness harness (`scripts/ibkr_theta_prod_readiness.py`) now defaults SPX stress windows to 3 months (`2025-01-01` through `2025-03-31`) with a longer timeout.
+- Prod-like runner (`scripts/run_backtest_prodlike.py`) now supports `--perf-mode` for cleaner runtime benchmarking without plot/indicator/progress noise.
+- Routed IBKR daily stock/index prefetch now uses the computed bar lookback window (`start_datetime`) instead of a short calendar cap from backtest start.
+- Acceptance performance history records were refreshed for ongoing regression tracking.
+- Deployment runbook now documents local-timeout fallback and explicit review of local-only commit ranges before release.
+
+### Fixed
+- Yahoo helper typo in corporate-actions paths (`get_symbol_actions` / `get_symbols_actions`) that prevented IBKR equity split/dividend enrichment from loading actions.
+- Acceptance gate hardening: apply a bounded, case-scoped tolerance override for `ibkr_crypto_acceptance_btc_usd` metric jitter (CI/provider-data drift) to reduce false negatives.
+- Router benchmark stats now prefer routed datasource bars for stock benchmarks and only fall back to Yahoo on router fetch failure (removes flaky Yahoo-first behavior in CI).
+
+## 4.4.51 - 2026-02-26
 
 ### Added
 - Option lifecycle event support in backtesting for option expiration outcomes: `assigned`, `exercised`, and `expired` (in addition to `cash_settled`).

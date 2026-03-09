@@ -769,6 +769,25 @@ class _Strategy:
             if not hasattr(self, '_last_known_prices'):
                 self._last_known_prices = {}
 
+            # Option quotes are frequently sparse/unreliable outside regular session hours.
+            # For backtests, avoid ingesting off-session option marks into portfolio valuation,
+            # which can otherwise poison forward-fill with stale placeholder values.
+            option_mark_time_local = None
+            broker_dt = getattr(self.broker, "datetime", None)
+            if isinstance(broker_dt, datetime.datetime):
+                try:
+                    if broker_dt.tzinfo is None:
+                        option_mark_time_local = LUMIBOT_DEFAULT_PYTZ.localize(broker_dt)
+                    else:
+                        option_mark_time_local = broker_dt.astimezone(LUMIBOT_DEFAULT_PYTZ)
+                except Exception:
+                    option_mark_time_local = None
+
+            option_marking_allowed = True
+            if option_mark_time_local is not None:
+                t_local = option_mark_time_local.time()
+                option_marking_allowed = (t_local >= datetime.time(9, 30)) and (t_local <= datetime.time(16, 0))
+
             # Used for traditional brokers, for crypto this could be 0
             portfolio_value = self.cash
 
@@ -778,6 +797,10 @@ class _Strategy:
             # Set the base currency for crypto valuations.
 
             prices = {}
+            if not hasattr(self, "_forward_fill_warning_cache"):
+                # Throttle repetitive backtest forward-fill warnings (asset, day) to keep
+                # valuation logs informative without dominating runtime.
+                self._forward_fill_warning_cache = set()
             for asset in assets_original:
                 if asset != self._quote_asset:
                     asset_is_option = False
@@ -801,6 +824,7 @@ class _Strategy:
                 )
                 quantity = position.quantity
                 price = prices.get(asset)
+                is_option_asset = isinstance(asset, Asset) and asset.asset_type == "option"
 
                 # If the asset is the quote asset, then we already have included it from cash
                 # Eg. if we have a position of USDT and USDT is the quote_asset then we already consider it as cash
@@ -826,6 +850,10 @@ class _Strategy:
                         else:
                             price = price_float
 
+                # For backtests, ignore option marks outside regular options hours.
+                if self.is_backtesting and is_option_asset and not option_marking_allowed:
+                    price = None
+
                 # Track valid prices for forward-fill fallback
                 if price is not None:
                     self._last_known_prices[asset] = price
@@ -837,10 +865,16 @@ class _Strategy:
                         price = self._last_known_prices[asset]
                         base_asset = asset[0] if isinstance(asset, tuple) else asset
                         asset_symbol = getattr(base_asset, 'symbol', str(base_asset))
-                        self.logger.warning(
-                            "Using forward-filled price %.4f for %s at %s (no current price available).",
-                            price, asset_symbol, self.broker.datetime,
-                        )
+                        # Throttle noisy forward-fill warnings to once per contract/symbol per run.
+                        # Daily option strategies can otherwise emit thousands of lines that materially
+                        # slow long backtests and bloat logs.
+                        warn_key = str(base_asset)
+                        if warn_key not in self._forward_fill_warning_cache:
+                            self._forward_fill_warning_cache.add(warn_key)
+                            self.logger.warning(
+                                "Using forward-filled price %.4f for %s at %s (no current price available).",
+                                price, asset_symbol, self.broker.datetime,
+                            )
                     else:
                         # No price history - must skip this position
                         if isinstance(asset, Asset):
@@ -1476,29 +1510,13 @@ class _Strategy:
             # - For equity benchmarks (e.g., SPY), prefer Yahoo to avoid IBKR history flakiness impacting
             #   tearsheet generation (benchmark is cosmetic; strategy stats are authoritative).
             elif str(getattr(self.broker.data_source, "SOURCE", "") or "").upper() == "INTERACTIVEBROKERSREST":
-                def _fallback_benchmark_from_strategy() -> None:
-                    """Fallback: use the strategy equity curve as a benchmark so tearsheets remain available."""
-                    try:
-                        if self._strategy_returns_df is None or self._strategy_returns_df.empty:
-                            return
-                        if "portfolio_value" not in self._strategy_returns_df.columns:
-                            return
-                        series = self._strategy_returns_df["portfolio_value"].astype(float).copy()
-                        first = float(series.dropna().iloc[0]) if not series.dropna().empty else None
-                        if first is None or first == 0:
-                            return
-                        bench = pd.DataFrame(index=self._strategy_returns_df.index)
-                        # Match the shape expected by plotting + tearsheet code:
-                        # - `plot_returns()` expects a `return` column
-                        # - tearsheets typically consume `symbol_cumprod`
-                        bench["return"] = series.pct_change(fill_method=None)
-                        bench["symbol_cumprod"] = (1 + bench["return"]).cumprod()
-                        self._benchmark_returns_df = bench
-                        self.logger.warning(
-                            "IBKR benchmark bars unavailable; using strategy equity curve as benchmark for tearsheet generation."
-                        )
-                    except Exception:
-                        return
+                def _fallback_benchmark() -> None:
+                    """Avoid benchmark contamination by leaving benchmark empty on fetch failure."""
+                    self.logger.warning(
+                        "IBKR benchmark bars unavailable; leaving benchmark empty (no strategy-equity fallback)."
+                    )
+                    self._benchmark_returns_df = None
+                    return
 
                 benchmark_asset = self._benchmark_asset
                 if isinstance(benchmark_asset, str):
@@ -1516,7 +1534,7 @@ class _Strategy:
                                 backtesting_end_adjusted,
                             )
                         except Exception:
-                            _fallback_benchmark_from_strategy()
+                            _fallback_benchmark()
                         return
                 elif isinstance(benchmark_asset, Asset) and str(getattr(benchmark_asset, "asset_type", "")).lower() == "stock":
                     try:
@@ -1526,7 +1544,7 @@ class _Strategy:
                             backtesting_end_adjusted,
                         )
                     except Exception:
-                        _fallback_benchmark_from_strategy()
+                        _fallback_benchmark()
                     return
 
                 timestep = "minute"
@@ -1542,12 +1560,12 @@ class _Strategy:
                 )
                 if bars is None or getattr(bars, "df", None) is None:
                     self.logger.error(f"Couldn't get benchmark bars from IBKR data source: {benchmark_asset}")
-                    _fallback_benchmark_from_strategy()
+                    _fallback_benchmark()
                     return
                 df = bars.df
                 if df is None or df.empty or "close" not in df.columns:
                     self.logger.error(f"IBKR benchmark bars empty/invalid: {benchmark_asset}")
-                    _fallback_benchmark_from_strategy()
+                    _fallback_benchmark()
                     return
                 df = df.copy()
                 df["return"] = df["close"].pct_change(fill_method=None)
@@ -1558,26 +1576,47 @@ class _Strategy:
             # Prefer the routed data source over Yahoo so benchmarks remain cacheable and don't
             # require external network access (Yahoo can be rate-limited and slow).
             elif RoutedBacktestingPandas is not None and isinstance(self.broker.data_source, RoutedBacktestingPandas):
-                def _fallback_benchmark_from_strategy() -> None:
-                    """Fallback: use the strategy equity curve as a benchmark so tearsheets remain available."""
-                    try:
-                        if self._strategy_returns_df is None or self._strategy_returns_df.empty:
-                            return
-                        if "portfolio_value" not in self._strategy_returns_df.columns:
-                            return
-                        series = self._strategy_returns_df["portfolio_value"].astype(float).copy()
-                        first = float(series.dropna().iloc[0]) if not series.dropna().empty else None
-                        if first is None or first == 0:
-                            return
-                        bench = pd.DataFrame(index=self._strategy_returns_df.index)
-                        bench["return"] = series.pct_change(fill_method=None)
-                        bench["symbol_cumprod"] = (1 + bench["return"]).cumprod()
-                        self._benchmark_returns_df = bench
-                        self.logger.warning(
-                            "Router benchmark bars unavailable; using strategy equity curve as benchmark for tearsheet generation."
-                        )
-                    except Exception:
-                        return
+                def _fallback_benchmark(local_benchmark_asset) -> None:
+                    """Fallback for router benchmark failures without using strategy-equity returns.
+
+                    Why:
+                    - Router benchmark fetches can fail transiently for symbols like SPY.
+                    - Using strategy-equity as a benchmark contaminates tearsheet metrics.
+                    - A Yahoo stock benchmark fallback keeps benchmark reporting available while
+                      preserving strategy metric integrity.
+                    """
+                    fallback_symbol = None
+                    if isinstance(local_benchmark_asset, str):
+                        parts = [p.strip() for p in local_benchmark_asset.split("/") if p.strip()]
+                        if len(parts) == 1:
+                            fallback_symbol = parts[0]
+                    elif (
+                        isinstance(local_benchmark_asset, Asset)
+                        and str(getattr(local_benchmark_asset, "asset_type", "")).lower() == "stock"
+                    ):
+                        fallback_symbol = local_benchmark_asset.symbol
+
+                    if fallback_symbol:
+                        try:
+                            self._benchmark_returns_df = get_symbol_returns(
+                                fallback_symbol,
+                                self._backtesting_start,
+                                backtesting_end_adjusted,
+                            )
+                            if self._benchmark_returns_df is not None and not self._benchmark_returns_df.empty:
+                                self.logger.warning(
+                                    "Router benchmark bars unavailable for %s; using Yahoo fallback.",
+                                    fallback_symbol,
+                                )
+                                return
+                        except Exception:
+                            pass
+
+                    self.logger.warning(
+                        "Router benchmark bars unavailable; leaving benchmark empty (no strategy-equity fallback)."
+                    )
+                    self._benchmark_returns_df = None
+                    return
 
                 benchmark_asset = self._benchmark_asset
                 if isinstance(benchmark_asset, str):
@@ -1607,12 +1646,12 @@ class _Strategy:
 
                 if bars is None or getattr(bars, "df", None) is None:
                     self.logger.error(f"Couldn't get benchmark bars from Router data source: {benchmark_asset}")
-                    _fallback_benchmark_from_strategy()
+                    _fallback_benchmark(benchmark_asset)
                     return
                 df = bars.df
                 if df is None or df.empty or "close" not in df.columns:
                     self.logger.error(f"Router benchmark bars empty/invalid: {benchmark_asset}")
-                    _fallback_benchmark_from_strategy()
+                    _fallback_benchmark(benchmark_asset)
                     return
                 df = df.copy()
                 df["return"] = df["close"].pct_change(fill_method=None)
@@ -1664,9 +1703,7 @@ class _Strategy:
         trades_df=None,
         show_plot=True,
     ):
-        if not show_plot:
-            return
-        elif self._strategy_returns_df is None:
+        if self._strategy_returns_df is None:
             self.logger.warning("Cannot plot returns because the strategy returns are missing")
         elif self._benchmark_returns_df is None:
             self.logger.warning("Cannot plot returns because the benchmark returns are missing")
@@ -2354,8 +2391,10 @@ class _Strategy:
 
         backtesting_broker = self.broker
         backtesting_broker.export_trade_events_to_csv(trade_events_file)
-        # Preserve legacy behavior: if plots are disabled, the simplified `_trades.csv` won't be
-        # generated by `plot_returns()`, so export the events there too.
+        # Legacy fallback: export trade events to the trades CSV path as well when plots
+        # are disabled, in case downstream tooling reads the events-style format.
+        # Note: plot_returns() now always writes the simplified trades CSV/parquet
+        # regardless of show_plot, so this is a secondary export for compatibility.
         if not show_plot:
             backtesting_broker.export_trade_events_to_csv(trades_file)
         self.plot_returns_vs_benchmark(

@@ -1055,6 +1055,18 @@ class ThetaDataBacktestingPandas(PandasData):
         expiration_dt = self._option_expiration_end(asset_separated)
         if expiration_dt is not None and end_requirement is not None and expiration_dt < end_requirement:
             end_requirement = expiration_dt
+        end_for_fetch = end_requirement
+        # Perf: daily option mark-to-market paths can otherwise extend cache one trading day at a time,
+        # causing one downloader call per day per open contract in long runs.
+        # Fetch forward in chunks (capped to expiration) so subsequent days hit warm cache.
+        if is_option_asset and ts_unit == "day" and end_for_fetch is not None:
+            prefetch_horizon = end_for_fetch + timedelta(days=45)
+            if expiration_dt is not None:
+                end_for_fetch = min(prefetch_horizon, expiration_dt)
+            else:
+                end_for_fetch = prefetch_horizon
+            if self.datetime_end is not None and end_for_fetch is not None and end_for_fetch > self.datetime_end:
+                end_for_fetch = self.datetime_end
 
         canonical_key, legacy_key = self._build_dataset_keys(asset_separated, quote_asset, ts_unit)
         dataset_key = canonical_key
@@ -1813,7 +1825,7 @@ class ThetaDataBacktestingPandas(PandasData):
             frame = thetadata_helper.get_price_data(
                 fetch_asset,
                 start_for_fetch,
-                end_requirement,
+                end_for_fetch,
                 timespan=ts_unit,
                 quote_asset=quote_asset,
                 dt=date_time_now,
@@ -1839,7 +1851,7 @@ class ThetaDataBacktestingPandas(PandasData):
             frame = thetadata_helper.get_price_data(
                 fetch_asset,
                 start_for_fetch,
-                end_requirement,
+                end_for_fetch,
                 timespan=ts_unit,
                 quote_asset=quote_asset,
                 dt=date_time_now,
@@ -3268,6 +3280,13 @@ class ThetaDataBacktestingPandas(PandasData):
         if dt is None:
             return
 
+        # Daily-cadence strategies can legitimately invoke multiple lifecycle callbacks per session
+        # (for example 08:30, 09:30, and 16:00). Treat those as daily, not intraday.
+        if str(getattr(self, "_timestep", "") or "").lower() == "day":
+            self._effective_day_mode = True
+            self._cadence_last_dt = dt
+            return
+
         try:
             if isinstance(dt, pd.Timestamp):
                 dt = dt.to_pydatetime()
@@ -3279,6 +3298,24 @@ class ThetaDataBacktestingPandas(PandasData):
             try:
                 if isinstance(last_dt, pd.Timestamp):
                     last_dt = last_dt.to_pydatetime()
+            except Exception:
+                pass
+
+            try:
+                # Daily lifecycle cadence in backtests typically advances through:
+                # 08:30 -> 09:30 -> 16:00 (same day), then 16:00 -> 08:30 (next trading day).
+                # Treat these transitions as daily cadence even if timestamps are < 6h apart.
+                last_pair = (int(last_dt.hour), int(last_dt.minute))
+                cur_pair = (int(dt.hour), int(dt.minute))
+                same_day = dt.date() == last_dt.date()
+                is_daily_lifecycle_step = (
+                    (same_day and (last_pair, cur_pair) in {((8, 30), (9, 30)), ((9, 30), (16, 0))})
+                    or ((not same_day) and last_pair == (16, 0) and cur_pair == (8, 30))
+                )
+                if is_daily_lifecycle_step:
+                    self._effective_day_mode = True
+                    self._cadence_last_dt = dt
+                    return
             except Exception:
                 pass
 
