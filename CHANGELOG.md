@@ -1,6 +1,16 @@
 # Changelog
 
-## 4.4.54 - Unreleased
+## 4.4.54 - 2026-03-08
+
+### Added
+- `TradingFee` now supports `per_contract_fee` for broker-style option commissions charged per contract.
+- Regression tests for `per_contract_fee` initialization and trade-cost calculations in backtesting.
+
+### Changed
+- `TradingFee` fee fields now coerce through `Decimal(str(...))` for stable decimal handling across float inputs.
+
+### Fixed
+- Backtesting trade-cost calculations now apply `per_contract_fee * quantity` for taker and maker fee paths (`market`, `stop`, `limit`, `stop_limit`, `smart_limit`).
 
 ## 4.4.53 - 2026-03-06
 
