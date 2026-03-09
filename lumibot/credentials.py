@@ -102,6 +102,32 @@ if backtesting_end:
 # Get the backtesting data source
 BACKTESTING_DATA_SOURCE = os.environ.get("BACKTESTING_DATA_SOURCE", "ThetaData")
 
+# Get backtesting parameters override (JSON string -> dict)
+# Allows injecting strategy parameters via environment variable without code changes.
+# Example: BACKTESTING_PARAMETERS='{"symbol": "AAPL", "quantity": 10}'
+BACKTESTING_PARAMETERS = None
+_bt_params_raw = os.environ.get("BACKTESTING_PARAMETERS")
+if _bt_params_raw is not None:
+    _bt_params_raw = _bt_params_raw.strip()
+    if _bt_params_raw and _bt_params_raw.lower() not in ("none", "null", "{}"):
+        try:
+            import json as _json
+            _parsed_params = _json.loads(_bt_params_raw)
+            if isinstance(_parsed_params, dict):
+                BACKTESTING_PARAMETERS = _parsed_params
+            else:
+                colored_message = termcolor.colored(
+                    f"BACKTESTING_PARAMETERS must be a JSON object/dict, got {type(_parsed_params).__name__}. Ignoring.",
+                    "yellow",
+                )
+                logger.warning(colored_message)
+        except Exception as _e:
+            colored_message = termcolor.colored(
+                f"Failed to parse BACKTESTING_PARAMETERS: {_e}. Expected valid JSON dict. Ignoring.",
+                "yellow",
+            )
+            logger.warning(colored_message)
+
 # Check if we should hide trades
 hide_trades = os.environ.get("HIDE_TRADES")
 if not hide_trades or hide_trades.lower() == "false":

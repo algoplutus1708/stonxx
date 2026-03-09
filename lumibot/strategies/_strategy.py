@@ -579,6 +579,17 @@ class _Strategy:
         if parameters is not None and isinstance(self.parameters, dict):
             self.parameters = {**self.parameters, **parameters}
 
+        # Apply BACKTESTING_PARAMETERS env var override (highest priority, wins over code-level params)
+        from lumibot.credentials import BACKTESTING_PARAMETERS
+        if BACKTESTING_PARAMETERS is not None and isinstance(BACKTESTING_PARAMETERS, dict):
+            self.parameters = {**self.parameters, **BACKTESTING_PARAMETERS}
+            self.logger.info(
+                colored(
+                    f"Applied BACKTESTING_PARAMETERS override: {list(BACKTESTING_PARAMETERS.keys())}",
+                    "green",
+                )
+            )
+
         self._strategy_returns_df = None
         self._benchmark_returns_df = None
 
