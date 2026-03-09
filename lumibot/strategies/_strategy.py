@@ -1735,6 +1735,7 @@ class _Strategy:
         save_tearsheet=True,
         tearsheet_file=None,
         show_tearsheet=True,
+        metrics_json_file=None,
     ):
         if not save_tearsheet and not show_tearsheet:
             return None
@@ -1814,6 +1815,7 @@ class _Strategy:
                 lumibot_version=lumibot_version,
                 backtesting_data_sources=backtesting_data_sources,
                 backtest_time_seconds=backtest_time_seconds,
+                metrics_json_file=metrics_json_file,
             )
 
             return result
@@ -2360,6 +2362,7 @@ class _Strategy:
         settings_file=None,
         indicators_file=None,
         tearsheet_csv_file=None,
+        metrics_json_file=None,
         base_filename=None
     ):
         if not self._analyze_backtest:
@@ -2389,6 +2392,8 @@ class _Strategy:
             indicators_file = f"{logdir}/{base_filename}_indicators.html"
         if not tearsheet_csv_file:
             tearsheet_csv_file = f"{logdir}/{base_filename}_tearsheet.csv"
+        if not metrics_json_file:
+            metrics_json_file = f"{logdir}/{base_filename}_metrics.json"
 
         try:
             start_ts = getattr(self, "_backtest_time_start_monotonic", None)
@@ -2435,6 +2440,7 @@ class _Strategy:
             save_tearsheet=save_tearsheet,
             tearsheet_file=tearsheet_file,
             show_tearsheet=show_tearsheet,
+            metrics_json_file=metrics_json_file,
         )
 
         # Save the result to a csv file

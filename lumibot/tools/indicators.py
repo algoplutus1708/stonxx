@@ -1328,6 +1328,7 @@ def create_tearsheet(
     backtesting_data_source: str | None = None,
     backtesting_data_sources: str | None = None,
     backtest_time_seconds: float | None = None,
+    metrics_json_file: str | None = None,
 ):
     # If show tearsheet is False, then we don't want to open the tearsheet in the browser
     # IMS create the tearsheet even if we are not showinbg it
@@ -1569,6 +1570,20 @@ def create_tearsheet(
                     result.at[idx, benchmark_col] = _fmt_percent(pair[1])
     except Exception:  # pragma: no cover
         pass
+
+    # Generate machine-readable metrics JSON alongside the HTML tearsheet.
+    if metrics_json_file:
+        try:
+            with open(os.devnull, "w") as f, contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
+                qs.reports.metrics_json(
+                    df_final["strategy"],
+                    df_final["benchmark"],
+                    rf=risk_free_rate,
+                    output=metrics_json_file,
+                )
+            logger.info("Metrics JSON saved to %s", metrics_json_file)
+        except Exception as exc:
+            logger.warning("Failed to generate metrics JSON: %s", exc)
 
     disable_ui = _env_flag_enabled("LUMIBOT_DISABLE_UI", default=False) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
