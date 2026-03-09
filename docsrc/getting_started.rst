@@ -221,9 +221,11 @@ If you want to add trading fees to your backtesting, you can do so by setting up
     from lumibot.backtesting import YahooDataBacktesting
     from lumibot.entities import TradingFee
 
-    # Create two trading fees, one that is a percentage and one that is a flat fee
-    trading_fee_1 = TradingFee(flat_fee=5)  # $5 flat fee
+    # Create trading fees: flat (per order), percent (of order value), or per-contract
+    trading_fee_1 = TradingFee(flat_fee=5)  # $5 flat fee per order
     trading_fee_2 = TradingFee(percent_fee=0.01)  # 1% trading fee
+    # For options/futures, use per_contract_fee instead:
+    # trading_fee = TradingFee(per_contract_fee=0.65)  # $0.65 per contract
 
     backtesting_start = datetime(2020, 1, 1)
     backtesting_end = datetime(2020, 12, 31)

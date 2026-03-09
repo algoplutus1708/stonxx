@@ -301,9 +301,9 @@ Only DataBento supports futures:
 
     from lumibot.backtesting import DataBentoDataBacktesting
 
-    # Use flat fees for futures (typical: $0.50 per contract)
+    # Use per-contract fees for futures (typical: $0.85 per standard contract, $0.50 for micros)
     from lumibot.entities import TradingFee
-    trading_fee = TradingFee(flat_fee=0.50)
+    trading_fee = TradingFee(per_contract_fee=0.85)
 
 Why does my minute-level backtest fail with "no data"?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

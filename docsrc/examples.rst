@@ -723,8 +723,8 @@ Futures Backtesting
 
     if __name__ == "__main__":
         if IS_BACKTESTING:
-            # Use flat fees for futures (typical: $0.50 per contract)
-            trading_fee = TradingFee(flat_fee=0.50)
+            # Use per-contract fees for futures (typical: $0.85 per standard contract, $0.50 for micros)
+            trading_fee = TradingFee(per_contract_fee=0.85)
 
             results = FuturesStrategy.backtest(
                 DataBentoDataBacktesting,
@@ -732,6 +732,32 @@ Futures Backtesting
                 buy_trading_fees=[trading_fee],
                 sell_trading_fees=[trading_fee]
             )
+
+Options Backtesting Fees
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+For options strategies, use ``per_contract_fee`` instead of ``flat_fee``. ``per_contract_fee`` is multiplied
+by the number of contracts in each order, which correctly models broker commissions like IBKR's $0.65/contract.
+
+.. code-block:: python
+
+    from lumibot.entities import TradingFee
+
+    # IBKR charges $0.65 per contract per leg
+    # For a 40-contract spread, that's $26.00 per leg
+    trading_fee = TradingFee(per_contract_fee=0.65)
+
+    result = OptionsStrategy.backtest(
+        ThetaDataBacktesting,
+        benchmark_asset=Asset("SPY", Asset.AssetType.STOCK),
+        buy_trading_fees=[trading_fee],
+        sell_trading_fees=[trading_fee],
+    )
+
+.. note::
+    Do NOT use ``flat_fee`` for options or futures commissions. ``flat_fee`` is a fixed amount per order
+    regardless of contract count. For example, ``TradingFee(flat_fee=0.65)`` charges only $0.65 total on a
+    40-contract order, while ``TradingFee(per_contract_fee=0.65)`` correctly charges $26.00 (40 x $0.65).
 
 Multiple Futures Contracts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
