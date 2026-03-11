@@ -1023,7 +1023,13 @@ class Tradier(Broker):
 
         # Set the side that we will return
         side = order.side
+
         if order.asset.asset_type == Asset.AssetType.STOCK:
+            # Map extended side values to for Tradier API
+            if side in ("buy_to_cover", "buy_to_close"):
+                side = "buy_to_cover"
+            elif side in ("sell_to_open", "sell_short"):
+                side = "sell_short"
             return side
 
         # Convert the side to the Tradier side for options orders if necessary
