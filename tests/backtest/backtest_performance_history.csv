@@ -7433,3 +7433,7 @@ timestamp,test_name,data_source,trading_days,execution_time_seconds,git_commit,l
 2026-03-03T01:03:29.285602,test_acceptance_ibkr_crypto_btc_usd,unknown,,6.083,d59a5bc5,4.4.52,,,,,Auto-tracked from test_acceptance_backtests_ci
 2026-03-06T14:13:53.655937,test_acceptance_aapl_deep_dip_calls,unknown,,55.513,,4.4.53,,,,,Auto-tracked from test_acceptance_backtests_ci
 2026-03-06T14:14:05.355109,test_acceptance_leaps_alpha_picks,unknown,,11.555,,4.4.53,,,,,Auto-tracked from test_acceptance_backtests_ci
+2026-03-09T23:14:54.548281,test_ibkr_stale_end_marks_missing_window_to_avoid_repeated_history_fetches,unknown,,0.778,a9985330,4.4.55,,,,,Auto-tracked from test_ibkr_helper_stale_end_negative_cache
+2026-03-09T23:14:54.907514,test_ibkr_placeholder_window_suppresses_subwindow_refetch_after_restart,unknown,,0.233,a9985330,4.4.55,,,,,Auto-tracked from test_ibkr_helper_stale_end_negative_cache
+2026-03-12T16:40:38.751134,test_ibkr_stale_end_marks_missing_window_to_avoid_repeated_history_fetches,unknown,,1.437,a9985330,4.4.55,,,,,Auto-tracked from test_ibkr_helper_stale_end_negative_cache
+2026-03-12T16:40:39.235922,test_ibkr_placeholder_window_suppresses_subwindow_refetch_after_restart,unknown,,0.371,a9985330,4.4.55,,,,,Auto-tracked from test_ibkr_helper_stale_end_negative_cache
