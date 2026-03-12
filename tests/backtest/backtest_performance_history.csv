@@ -7440,3 +7440,5 @@ timestamp,test_name,data_source,trading_days,execution_time_seconds,git_commit,l
 2026-03-12T16:42:41.594474,test_intraday_daterange,Polygon,,0.445,7791928a,4.4.55,,,,,Auto-tracked from test_polygon
 2026-03-12T16:43:12.347366,test_ibkr_stale_end_marks_missing_window_to_avoid_repeated_history_fetches,unknown,,1.114,7791928a,4.4.55,,,,,Auto-tracked from test_ibkr_helper_stale_end_negative_cache
 2026-03-12T16:43:12.892823,test_ibkr_placeholder_window_suppresses_subwindow_refetch_after_restart,unknown,,0.428,7791928a,4.4.55,,,,,Auto-tracked from test_ibkr_helper_stale_end_negative_cache
+2026-03-12T16:45:41.155737,test_ibkr_stale_end_marks_missing_window_to_avoid_repeated_history_fetches,unknown,,1.034,fa2678f6,4.4.55,,,,,Auto-tracked from test_ibkr_helper_stale_end_negative_cache
+2026-03-12T16:45:41.699685,test_ibkr_placeholder_window_suppresses_subwindow_refetch_after_restart,unknown,,0.437,fa2678f6,4.4.55,,,,,Auto-tracked from test_ibkr_helper_stale_end_negative_cache

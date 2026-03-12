@@ -56,6 +56,20 @@ def test_find_asset_in_data_store_allows_stock_minute_data_for_day_by_default():
     assert ds.find_asset_in_data_store(base, quote=quote, timestep="day") == (base, quote)
 
 
+def test_find_asset_in_data_store_stock_15minute_then_day_reuses_minute_dataset():
+    base = Asset("AAPL", asset_type=Asset.AssetType.STOCK)
+    quote = Asset("USD", asset_type=Asset.AssetType.FOREX)
+    minute = Data(base, _minute_df(), timestep="minute", quote=quote)
+
+    ds = PandasData.__new__(PandasData)
+    ds._data_store = {(base, quote): minute}  # type: ignore[attr-defined]
+    ds._find_asset_in_data_store_cache = {}  # type: ignore[attr-defined]
+
+    # Simulate multi-timeframe strategy order: first 15m bars, then daily bars.
+    assert ds.find_asset_in_data_store(base, quote=quote, timestep="15minute") == (base, quote)
+    assert ds.find_asset_in_data_store(base, quote=quote, timestep="day") == (base, quote)
+
+
 def test_find_asset_in_data_store_blocks_stock_minute_data_when_native_day_preferred():
     base = Asset("AAPL", asset_type=Asset.AssetType.STOCK)
     quote = Asset("USD", asset_type=Asset.AssetType.FOREX)
