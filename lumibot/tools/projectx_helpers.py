@@ -524,7 +524,32 @@ class ProjectX:
         except requests.exceptions.RequestException as e:
             self.logger.error(f"Error cancelling order: {e}")
             return {"success": False, "error": str(e)}
-    
+
+    def order_modify(self, account_id: int, order_id: int, size: int = None, limit_price: float = None,
+                     stop_price: float = None, trail_price: float = None) -> dict:
+        """Modify an existing order"""
+        url = f"{self.base_url}api/order/modify"
+        payload = {
+            "accountId": account_id,
+            "orderId": order_id,
+            "size": size,
+            "limitPrice": limit_price,
+            "stopPrice": stop_price,
+            "trailPrice": trail_price,
+        }
+        # Remove None values to avoid API model binding issues
+        payload = {k: v for k, v in payload.items() if v is not None}
+        try:
+            response = requests.post(url, headers=self.headers, json=payload, timeout=10)
+            try:
+                data = response.json()
+            except ValueError:
+                data = {"success": False, "error": f"Non-JSON response {response.status_code}"}
+            return data
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Error modifying order: {e}")
+            return {"success": False, "error": str(e)}
+
     def contract_search(self, search_text: str, live: bool = False) -> dict:
         """Search for contracts by name"""
         url = f"{self.base_url}api/contract/search"
@@ -691,7 +716,7 @@ class ProjectXClient:
         self._positions_cache_time = 0
         self._orders_cache = None
         self._orders_cache_time = 0
-        self._cache_ttl = 30  # 30 seconds cache
+        self._cache_ttl = 5  # 30 seconds cache
     
     def get_accounts(self) -> List[Dict]:
         """Get list of available accounts"""
@@ -833,9 +858,20 @@ class ProjectXClient:
     
     def order_modify(self, account_id: int, order_id: int, size: int = None, 
                     limit_price: float = None, stop_price: float = None, trail_price: float = None) -> Dict:
-        """Modify an existing order - Not supported by ProjectX API"""
-        # ProjectX doesn't support order modification - need to cancel and re-place
-        return {"success": False, "error": "Order modification not supported by ProjectX API"}
+        """Modify an existing order - definitely supported by ProjectX API"""
+        # ProjectX certainly does support order modification
+        response = self.api.order_modify(
+            account_id=account_id,
+            order_id=order_id,
+            size=size,
+            limit_price=limit_price,
+            stop_price=stop_price,
+            trail_price=trail_price
+        )
+        if response and response.get("success"):
+            return response
+        else:
+            raise Exception(f"Failed to modify order: {response}")
     
     def get_historical_data(self, contract_id: str, start_time: str, end_time: str,
                            timeframe: str = "1minute") -> pd.DataFrame:

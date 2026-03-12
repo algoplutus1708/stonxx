@@ -2910,10 +2910,9 @@ class BacktestingBroker(Broker):
                         if order.order_type == Order.OrderType.LIMIT
                         else f"type={order.order_type}, high={high}, low={low}, stop={getattr(order, 'stop_price', None)}"
                     )
-                    strategy.log_message(
+                    self.logger.debug(
                         f"[DIAG] Order remained open for {display_symbol} ({detail}) "
-                        f"id={order_identifier} at {self.datetime}",
-                        color="yellow",
+                        f"id={order_identifier} at {self.datetime}"
                     )
                 continue
 

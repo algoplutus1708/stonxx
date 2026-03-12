@@ -1000,8 +1000,9 @@ class Schwab(Broker):
 
                 # Set the status and timestamps
                 order.status = status
-                order.created_at = entered_time
-                order.updated_at = close_time if close_time else entered_time
+                order.broker_create_date = entered_time
+                order.created_at = order.broker_create_date
+                order.broker_update_date = close_time if close_time else entered_time
 
                 order_objects.append(order)
 
