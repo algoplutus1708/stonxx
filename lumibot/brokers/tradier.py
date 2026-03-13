@@ -654,7 +654,7 @@ class Tradier(Broker):
                 # Place the order
                 order_response = self.tradier.orders.order(
                     symbol,
-                    elf._lumi_side2tradier(order),
+                    self._lumi_side2tradier(order),
                     order.quantity,
                     order_type=order.order_type,
                     duration=order.time_in_force,
