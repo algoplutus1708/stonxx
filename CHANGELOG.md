@@ -18,6 +18,8 @@
 - IBKR stale no-data cache reuse now forces refresh when requested windows extend beyond cached coverage.
 - ProjectX order processing race-condition and tracking hardening merged from `dev`.
 
+Deploy marker: `15e8e268` ("deploy 4.4.55")
+
 ## 4.4.54 - 2026-03-08
 
 ### Added
