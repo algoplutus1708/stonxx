@@ -43,6 +43,17 @@ BACKTESTING_BUDGET
   - When set, this value is preferred over any ``budget=`` passed in strategy code, so it can be controlled per-run via injected environment variables.
   - Default (when unset and no code budget is provided): ``100000``.
 
+BACKTESTING_PARAMETERS
+^^^^^^^^^^^^^^^^^^^^^^
+
+- Purpose: Override or inject strategy parameters via environment variable, without modifying strategy code.
+- Format: JSON string representing a dictionary. Example: ``{"symbol": "AAPL", "quantity": 10}``
+- Notes:
+  - When set, the parsed dict is merged on top of the strategy's existing ``parameters`` dict with highest priority (wins over both class-level defaults and code-level overrides).
+  - Useful for parameter sweeps: run the same strategy code with different parameter sets per backtest.
+  - Nested dicts are supported (e.g. ``{"ALLOCATION": {"SPY": 0.50, "IWM": 0.50}}``).
+  - Invalid JSON or non-dict values are ignored with a warning.
+
 BACKTESTING_DATA_SOURCE
 ^^^^^^^^^^^^^^^^^^^^^^^
 

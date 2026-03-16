@@ -23,6 +23,7 @@ When building strategies, lifecycle methods needs to be overloaded. Trading logi
    lifecycle_methods.on_abrupt_closing
    lifecycle_methods.on_bot_crash
    lifecycle_methods.trace_stats
+   lifecycle_methods.tearsheet_custom_metrics
    lifecycle_methods.on_new_order
    lifecycle_methods.on_partially_filled_order
    lifecycle_methods.on_filled_order

@@ -28,6 +28,7 @@ class InteractiveBrokersRESTBacktesting(PandasData):
     MIN_TIMESTEP = "minute"
     ALLOW_DAILY_TIMESTEP = True
     SOURCE = "InteractiveBrokersREST"
+    PREFER_NATIVE_DAY_BARS_FOR_STOCK_INDEX = True
 
     def __init__(
         self,

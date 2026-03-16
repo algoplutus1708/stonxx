@@ -815,6 +815,21 @@ class QueueClient:
 
                 # Check terminal states
                 if status in ("completed", "failed"):
+                    # IBKR may leave result endpoint in 202 for failed history jobs while status
+                    # already reports a terminal server-side error. Fast-fail these explicit
+                    # no-data failures to avoid multi-minute dead loops.
+                    if status == "failed":
+                        err_text = str(info.error or "").lower()
+                        if (
+                            "ibkr/iserver/marketdata/history" in str(info.path or "")
+                            and "chart data unavailable" in err_text
+                            and int(info.attempts or 0) >= 3
+                        ):
+                            with self._lock:
+                                if info.correlation_id in self._pending_requests:
+                                    self._pending_requests[info.correlation_id].status = "dead"
+                            raise Exception(f"Request {request_id} permanently failed: {info.error}")
+
                     # IMPORTANT: The downloader may surface "no data" (ThetaData 472) or other
                     # non-200 terminal outcomes as status=failed. We must treat those as terminal
                     # once the result endpoint is available, otherwise callers can stall until a timeout

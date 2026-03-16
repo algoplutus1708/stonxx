@@ -20,6 +20,12 @@ class PandasData(DataSourceBacktesting):
     """
 
     SOURCE = "PANDAS"
+    # Provider-specific day-bar policy:
+    #
+    # Some providers (IBKR stock/index) require native day bars for correctness because provider-
+    # specific day normalization/repairs are applied before storage. Others (e.g., Polygon) rely on
+    # minute->day resampling and should continue to allow minute datasets to satisfy day requests.
+    PREFER_NATIVE_DAY_BARS_FOR_STOCK_INDEX = False
     TIMESTEP_MAPPING = [
         {"timestep": "day", "representations": ["1D", "day"]},
         {"timestep": "minute", "representations": ["1M", "minute"]},
@@ -415,13 +421,12 @@ class PandasData(DataSourceBacktesting):
                 return data_ts in {"hour", "minute"}
             if requested_unit == "day":
                 # IMPORTANT:
-                # Keep explicit day requests pinned to native day datasets.
-                #
-                # Allowing minute datasets to satisfy day requests can silently bypass provider-
-                # specific day-bar normalization (for example split-spike repair/timestamp
-                # alignment in IBKR helpers), and can trigger expensive minute fetch churn in
-                # daily-cadence backtests.
-                if requested_asset_type in {"stock", "index"}:
+                # Keep day requests pinned to native day datasets only for providers that opt into
+                # this behavior (IBKR stock/index correctness path).
+                if (
+                    requested_asset_type in {"stock", "index"}
+                    and bool(getattr(self, "PREFER_NATIVE_DAY_BARS_FOR_STOCK_INDEX", False))
+                ):
                     return data_ts == "day"
                 return data_ts in {"day", "minute"}
             # Fallback: require exact match for other timesteps.

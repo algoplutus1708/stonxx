@@ -19,6 +19,16 @@ These metrics are accompanied by various graphs such as:
 - **Cumulative Returns vs Benchmark:** Shows the strategy's cumulative returns compared to a benchmark.
 - **Cumulative Returns (Log Scaled):** A log-scaled version of cumulative returns for better visualization of exponential growth.
 
+Machine-readable tearsheet metrics
+----------------------------------
+
+Alongside ``*_tearsheet.html``, LumiBot also writes ``*_tearsheet_metrics.json``.
+
+- This JSON contains summary tearsheet metrics in a machine-readable structure.
+- It is intended for downstream automation (agents, dashboards, APIs).
+- You can append strategy-specific metrics by implementing
+  ``Strategy.tearsheet_custom_metrics(...)``.
+
 .. figure:: _html/images/tearsheet_condor_martingale.png
    :alt: Tearsheet example 1
    :width: 600px
