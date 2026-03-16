@@ -1730,12 +1730,104 @@ class _Strategy:
                 initial_budget=self._initial_budget,
             )
 
+    @staticmethod
+    def _extract_returns_series(frame, returns_col: str = "return", value_col: str | None = None) -> pd.Series:
+        """Extract a clean returns series from a strategy/benchmark dataframe."""
+        if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+            return pd.Series(dtype=float)
+
+        if returns_col in frame.columns:
+            series = pd.to_numeric(frame[returns_col], errors="coerce")
+        elif value_col and value_col in frame.columns:
+            values = pd.to_numeric(frame[value_col], errors="coerce")
+            series = values.pct_change(fill_method=None)
+        else:
+            return pd.Series(dtype=float)
+
+        series = series.dropna()
+        if series.empty:
+            return pd.Series(dtype=float)
+
+        try:
+            idx = pd.to_datetime(series.index)
+            if getattr(idx, "tz", None) is not None:
+                idx = idx.tz_localize(None)
+            series.index = idx
+        except Exception:
+            pass
+
+        return series
+
+    @staticmethod
+    def _build_drawdown_inputs(strategy_returns: pd.Series) -> tuple[pd.Series, pd.DataFrame]:
+        """Build drawdown series/details passed to custom tearsheet metric hooks."""
+        if strategy_returns is None or strategy_returns.empty:
+            return pd.Series(dtype=float), pd.DataFrame()
+
+        growth = (1.0 + strategy_returns.fillna(0.0)).cumprod()
+        high_water_mark = growth.cummax()
+        drawdown = (growth / high_water_mark) - 1.0
+        drawdown.name = "drawdown"
+
+        drawdown_details = pd.DataFrame()
+        try:
+            import quantstats_lumi as _qs
+
+            drawdown_details = _qs.stats.drawdown_details(drawdown)
+        except Exception:
+            drawdown_details = pd.DataFrame()
+
+        return drawdown, drawdown_details
+
+    def _collect_custom_tearsheet_metrics(self) -> dict:
+        """Invoke Strategy.tearsheet_custom_metrics() if implemented."""
+        hook = getattr(self, "tearsheet_custom_metrics", None)
+        if not callable(hook):
+            return {}
+
+        stats_df = self._stats.copy(deep=True) if isinstance(self._stats, pd.DataFrame) else None
+        strategy_returns = self._extract_returns_series(
+            self._strategy_returns_df,
+            returns_col="return",
+            value_col="portfolio_value",
+        )
+        benchmark_returns = self._extract_returns_series(
+            self._benchmark_returns_df,
+            returns_col="return",
+            value_col="symbol_cumprod",
+        )
+        drawdown, drawdown_details = self._build_drawdown_inputs(strategy_returns)
+
+        try:
+            custom_metrics = hook(
+                stats_df=stats_df,
+                strategy_returns=strategy_returns,
+                benchmark_returns=benchmark_returns if not benchmark_returns.empty else None,
+                drawdown=drawdown,
+                drawdown_details=drawdown_details,
+                risk_free_rate=self.risk_free_rate,
+            )
+        except Exception as exc:
+            self.logger.warning("tearsheet_custom_metrics() failed; continuing without custom metrics: %s", exc)
+            return {}
+
+        if custom_metrics is None:
+            return {}
+        if not isinstance(custom_metrics, dict):
+            self.logger.warning(
+                "tearsheet_custom_metrics() must return a dict, got %s; ignoring custom metrics.",
+                type(custom_metrics).__name__,
+            )
+            return {}
+
+        return custom_metrics
+
     def tearsheet(
         self,
         save_tearsheet=True,
         tearsheet_file=None,
         show_tearsheet=True,
-        metrics_json_file=None,
+        tearsheet_metrics_file=None,
     ):
         if not save_tearsheet and not show_tearsheet:
             return None
@@ -1802,6 +1894,8 @@ class _Strategy:
             except Exception:
                 pass
 
+            custom_metrics = self._collect_custom_tearsheet_metrics()
+
             result = create_tearsheet(
                 self._strategy_returns_df,
                 strat_name,
@@ -1815,7 +1909,8 @@ class _Strategy:
                 lumibot_version=lumibot_version,
                 backtesting_data_sources=backtesting_data_sources,
                 backtest_time_seconds=backtest_time_seconds,
-                metrics_json_file=metrics_json_file,
+                tearsheet_metrics_file=tearsheet_metrics_file,
+                custom_metrics=custom_metrics,
             )
 
             return result
@@ -1846,6 +1941,7 @@ class _Strategy:
         starting_positions = None,
         show_plot = None,
         tearsheet_file = None,
+        tearsheet_metrics_file = None,
         save_tearsheet = True,
         show_tearsheet = None,
         parameters = {},
@@ -2330,6 +2426,7 @@ class _Strategy:
             save_tearsheet=save_tearsheet,
             show_indicators=show_indicators,
             tearsheet_file=tearsheet_file,
+            tearsheet_metrics_file=tearsheet_metrics_file,
             base_filename=base_filename,
         )
 
@@ -2362,7 +2459,7 @@ class _Strategy:
         settings_file=None,
         indicators_file=None,
         tearsheet_csv_file=None,
-        metrics_json_file=None,
+        tearsheet_metrics_file=None,
         base_filename=None
     ):
         if not self._analyze_backtest:
@@ -2392,8 +2489,8 @@ class _Strategy:
             indicators_file = f"{logdir}/{base_filename}_indicators.html"
         if not tearsheet_csv_file:
             tearsheet_csv_file = f"{logdir}/{base_filename}_tearsheet.csv"
-        if not metrics_json_file:
-            metrics_json_file = f"{logdir}/{base_filename}_metrics.json"
+        if not tearsheet_metrics_file:
+            tearsheet_metrics_file = f"{logdir}/{base_filename}_tearsheet_metrics.json"
 
         try:
             start_ts = getattr(self, "_backtest_time_start_monotonic", None)
@@ -2440,7 +2537,7 @@ class _Strategy:
             save_tearsheet=save_tearsheet,
             tearsheet_file=tearsheet_file,
             show_tearsheet=show_tearsheet,
-            metrics_json_file=metrics_json_file,
+            tearsheet_metrics_file=tearsheet_metrics_file,
         )
 
         # Save the result to a csv file

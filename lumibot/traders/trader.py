@@ -82,6 +82,7 @@ class Trader:
             save_tearsheet=True, 
             show_indicators=True, 
             tearsheet_file=None,
+            tearsheet_metrics_file=None,
             base_filename=None,
             ):
         """
@@ -106,6 +107,9 @@ class Trader:
 
         tearsheet_file: str
             The path to save the tearsheet. This is only used for backtesting.
+
+        tearsheet_metrics_file: str
+            The path to save machine-readable tearsheet summary metrics JSON. This is only used for backtesting.
 
         base_filename: str
             The base filename to save the tearsheet, plot, indicators, etc. This is only used for backtesting.
@@ -198,6 +202,7 @@ class Trader:
                         save_tearsheet=save_tearsheet,
                         show_indicators=show_indicators,
                         tearsheet_file=tearsheet_file,
+                        tearsheet_metrics_file=tearsheet_metrics_file,
                         base_filename=base_filename,
                     )
 

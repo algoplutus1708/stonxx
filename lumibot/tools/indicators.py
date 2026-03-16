@@ -1,4 +1,5 @@
 import contextlib
+import json
 import math
 import os
 import webbrowser
@@ -1328,7 +1329,8 @@ def create_tearsheet(
     backtesting_data_source: str | None = None,
     backtesting_data_sources: str | None = None,
     backtest_time_seconds: float | None = None,
-    metrics_json_file: str | None = None,
+    tearsheet_metrics_file: str | None = None,
+    custom_metrics: dict | None = None,
 ):
     # If show tearsheet is False, then we don't want to open the tearsheet in the browser
     # IMS create the tearsheet even if we are not showinbg it
@@ -1359,11 +1361,34 @@ def create_tearsheet(
         except Exception as exc:  # pragma: no cover
             logger.warning("Failed to write placeholder tearsheet to %s: %s", tearsheet_file, exc)
 
+    def _write_tearsheet_metrics_json(reason: str, scalar_metrics: dict | None = None) -> None:
+        """Write a minimal machine-readable tearsheet metrics artifact."""
+        if not tearsheet_metrics_file:
+            return
+        payload = {
+            "metadata": {
+                "summary_only": True,
+                "status": "unavailable",
+                "reason": reason,
+            },
+            "scalar_metrics": scalar_metrics or {},
+        }
+        try:
+            with open(str(tearsheet_metrics_file), "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+        except Exception as exc:  # pragma: no cover
+            logger.warning(
+                "Failed to write placeholder tearsheet metrics JSON to %s: %s",
+                tearsheet_metrics_file,
+                exc,
+            )
+
     df_final = _prepare_tearsheet_returns(strategy_df, benchmark_df)
 
     if df_final is None:
         logger.warning("No data to create tearsheet; writing placeholder and skipping QuantStats.")
         _write_placeholder_tearsheet("Insufficient data to compute strategy/benchmark return series for this window.")
+        _write_tearsheet_metrics_json("insufficient_data")
         return
 
     # Uncomment for debugging
@@ -1387,6 +1412,7 @@ def create_tearsheet(
             int(benchmark_returns.nunique()) if not benchmark_returns.empty else 0,
         )
         _write_placeholder_tearsheet("Return series is flat/degenerate (often caused by zero trades).")
+        _write_tearsheet_metrics_json("degenerate_returns")
         return
 
     '''
@@ -1418,6 +1444,7 @@ def create_tearsheet(
                 backtesting_data_source=backtesting_data_source,
                 backtesting_data_sources=backtesting_data_sources,
                 backtest_time_seconds=backtest_time_seconds,
+                custom_metrics=custom_metrics,
             )
     except Exception as exc:
         # QuantStats can fail on short windows when seaborn tries to fit a KDE on
@@ -1494,6 +1521,7 @@ def create_tearsheet(
                         backtesting_data_source=backtesting_data_source,
                         backtesting_data_sources=backtesting_data_sources,
                         backtest_time_seconds=backtest_time_seconds,
+                        custom_metrics=custom_metrics,
                     )
                 retried = True
             except Exception as retry_exc:
@@ -1501,6 +1529,7 @@ def create_tearsheet(
 
         if not retried:
             _write_placeholder_tearsheet(f"QuantStats error: {exc}")
+            _write_tearsheet_metrics_json(f"quantstats_error: {exc}")
             return
 
     # QuantStats occasionally emits malformed or low-precision percent cells
@@ -1571,19 +1600,22 @@ def create_tearsheet(
     except Exception:  # pragma: no cover
         pass
 
-    # Generate machine-readable metrics JSON alongside the HTML tearsheet.
-    if metrics_json_file:
+    # Generate machine-readable tearsheet metrics JSON alongside the HTML tearsheet.
+    if tearsheet_metrics_file:
         try:
             with open(os.devnull, "w") as f, contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
                 qs.reports.metrics_json(
                     df_final["strategy"],
                     df_final["benchmark"],
                     rf=risk_free_rate,
-                    output=metrics_json_file,
+                    output=tearsheet_metrics_file,
+                    summary_only=True,
+                    custom_metrics=custom_metrics,
                 )
-            logger.info("Metrics JSON saved to %s", metrics_json_file)
+            logger.info("Tearsheet metrics JSON saved to %s", tearsheet_metrics_file)
         except Exception as exc:
-            logger.warning("Failed to generate metrics JSON: %s", exc)
+            logger.warning("Failed to generate tearsheet metrics JSON: %s", exc)
+            _write_tearsheet_metrics_json(f"metrics_json_error: {exc}")
 
     disable_ui = _env_flag_enabled("LUMIBOT_DISABLE_UI", default=False) or bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
