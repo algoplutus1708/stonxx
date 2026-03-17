@@ -2,6 +2,12 @@
 
 ## 4.4.56 - Unreleased
 
+### Changed
+- Bump minimum `quantstats-lumi` dependency to `>=1.1.1` to pick up tearsheet scalar-metric normalization and contract-test coverage.
+
+### Fixed
+- Tearsheet summary artifact compatibility with `quantstats-lumi` machine-readable metric contract (typed scalar values, no `%` string leakage in JSON scalar values).
+
 ## 4.4.55 - 2026-03-15
 
 ### Added
