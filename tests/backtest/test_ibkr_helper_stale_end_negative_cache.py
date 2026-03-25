@@ -121,3 +121,87 @@ def test_ibkr_stale_end_marks_missing_window_to_avoid_repeated_history_fetches(m
         assert bool(cached.loc[end, "missing"]) is True
     finally:
         shutil.rmtree(cache_root, ignore_errors=True)
+
+
+def test_ibkr_placeholder_window_suppresses_subwindow_refetch_after_restart(monkeypatch):
+    import lumibot.tools.backtest_cache as backtest_cache
+    import lumibot.tools.ibkr_helper as ibkr_helper
+
+    cache_root = Path(__file__).resolve().parent / "_tmp_ibkr_cache" / uuid.uuid4().hex
+    cache_root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        monkeypatch.setenv("LUMIBOT_CACHE_BACKEND", "local")
+        monkeypatch.setenv("LUMIBOT_CACHE_MODE", "disabled")
+        backtest_cache.reset_backtest_cache_manager(for_testing=True)
+
+        monkeypatch.setattr(ibkr_helper, "LUMIBOT_CACHE_FOLDER", str(cache_root))
+        monkeypatch.setattr(backtest_cache, "LUMIBOT_CACHE_FOLDER", str(cache_root))
+        # Simulate a fresh process where only persisted parquet markers exist.
+        monkeypatch.setattr(ibkr_helper, "_RUNTIME_HISTORY_NO_DATA_WINDOWS", {})
+
+        monkeypatch.setattr(ibkr_helper, "_resolve_conid", lambda *args, **kwargs: 123)
+
+        asset = Asset("RAPT", asset_type=Asset.AssetType.STOCK)
+        quote = Asset("USD", asset_type=Asset.AssetType.FOREX)
+
+        missing_start = LUMIBOT_DEFAULT_PYTZ.localize(datetime(2026, 2, 3, 9, 30))
+        missing_end = LUMIBOT_DEFAULT_PYTZ.localize(datetime(2026, 2, 3, 16, 0))
+        req_start = LUMIBOT_DEFAULT_PYTZ.localize(datetime(2026, 2, 3, 11, 0))
+        req_end = LUMIBOT_DEFAULT_PYTZ.localize(datetime(2026, 2, 3, 12, 0))
+
+        timestep = "1minute"
+        source = "Trades"
+
+        cache_file = ibkr_helper._cache_file_for(  # type: ignore[attr-defined]
+            asset=asset,
+            quote=quote,
+            timestep=timestep,
+            exchange=None,
+            source=source,
+            include_after_hours=True,
+        )
+
+        df_seed = pd.DataFrame(
+            {
+                "open": [pd.NA, pd.NA],
+                "high": [pd.NA, pd.NA],
+                "low": [pd.NA, pd.NA],
+                "close": [pd.NA, pd.NA],
+                "volume": [pd.NA, pd.NA],
+                "missing": [True, True],
+            },
+            index=pd.DatetimeIndex([missing_start, missing_end]),
+        )
+        ibkr_helper._write_cache_frame(cache_file, df_seed)  # type: ignore[attr-defined]
+
+        calls: list[dict] = []
+
+        def fake_queue_request(*, url, querystring, headers=None, timeout=None):
+            calls.append({"url": url, "querystring": dict(querystring or {})})
+            return {"error": "unexpected network request"}
+
+        monkeypatch.setattr(ibkr_helper, "queue_request", fake_queue_request)
+
+        frame = ibkr_helper.get_price_data(
+            asset=asset,
+            quote=quote,
+            timestep=timestep,
+            start_dt=req_start,
+            end_dt=req_end,
+            exchange=None,
+            include_after_hours=True,
+            source=source,
+        )
+
+        history_calls = [c for c in calls if "/ibkr/iserver/marketdata/history" in c["url"]]
+        assert len(history_calls) == 0
+        assert frame.empty
+
+        cached = pd.read_parquet(cache_file)
+        assert missing_start in cached.index
+        assert missing_end in cached.index
+        assert bool(cached.loc[missing_start, "missing"]) is True
+        assert bool(cached.loc[missing_end, "missing"]) is True
+    finally:
+        shutil.rmtree(cache_root, ignore_errors=True)

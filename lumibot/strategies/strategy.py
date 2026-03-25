@@ -1396,8 +1396,13 @@ class Strategy(_Strategy):
         self.log_message("Warning: get_tracked_orders() is deprecated, please use get_orders() instead.")
         return self.get_orders()
 
-    def get_orders(self):
+    def get_orders(self, identifiers: list[str] = None):
         """Get all the current open orders.
+
+        Parameters
+        ----------
+        identifiers : list of str
+            A list of order identifiers to filter the orders by. If None, returns all tracked orders for the strategy.
 
         Returns
         -------
@@ -1423,7 +1428,11 @@ class Strategy(_Strategy):
         >>>         self.cancel_order(order)
 
         """
-        return self.broker.get_tracked_orders(self.name)
+        all_orders = self.broker.get_tracked_orders(self.name)
+        if identifiers:
+            filtered_orders = [order for order in all_orders if order.identifier in identifiers]
+            return filtered_orders
+        return all_orders
 
     def get_tracked_assets(self):
         """Get the list of assets for positions
@@ -4892,6 +4901,59 @@ class Strategy(_Strategy):
         """
         return {}
 
+    def tearsheet_custom_metrics(
+        self,
+        stats_df: pd.DataFrame | None,
+        strategy_returns: pd.Series,
+        benchmark_returns: pd.Series | None,
+        drawdown: pd.Series,
+        drawdown_details: pd.DataFrame,
+        risk_free_rate: float,
+    ):
+        """Lifecycle hook to append strategy-defined metrics to the tearsheet.
+
+        This hook runs during backtest analysis immediately before the tearsheet HTML and
+        ``*_tearsheet_metrics.json`` artifacts are generated.
+
+        Parameters
+        ----------
+        stats_df : pd.DataFrame or None
+            Full backtest stats DataFrame (same data used for ``*_stats.csv/parquet``).
+        strategy_returns : pd.Series
+            Strategy return series used for QuantStats metrics.
+        benchmark_returns : pd.Series or None
+            Benchmark return series if a benchmark is available.
+        drawdown : pd.Series
+            Drawdown series computed from ``strategy_returns``.
+        drawdown_details : pd.DataFrame
+            Drawdown period table (start/end/valley/days/max drawdown when available).
+        risk_free_rate : float
+            Effective risk-free rate used for tearsheet calculations.
+
+        Returns
+        -------
+        dict
+            Mapping of metric name to value.
+            Supported values:
+            - ``{"My Metric": 1.23}``
+            - ``{"My Metric": {"strategy": 1.23, "benchmark": 0.87}}``
+
+        Example
+        -------
+        >>> def tearsheet_custom_metrics(
+        >>>     self,
+        >>>     stats_df,
+        >>>     strategy_returns,
+        >>>     benchmark_returns,
+        >>>     drawdown,
+        >>>     drawdown_details,
+        >>>     risk_free_rate,
+        >>> ):
+        >>>     avg_abs_return = float(strategy_returns.abs().mean()) if not strategy_returns.empty else 0.0
+        >>>     return {"Avg Absolute Daily Return %": avg_abs_return * 100.0}
+        """
+        return {}
+
     def before_market_closes(self):
         """Use this lifecycle method to execute code before the market closes. You can use self.minutes_before_closing to set the number of minutes before closing
 
@@ -5186,6 +5248,7 @@ class Strategy(_Strategy):
         starting_positions: dict = None,
         show_plot: bool | None = None,
         tearsheet_file: str = None,
+        tearsheet_metrics_file: str = None,
         save_tearsheet: bool = True,
         show_tearsheet: bool | None = None,
         parameters: dict = {},
@@ -5259,6 +5322,10 @@ class Strategy(_Strategy):
             would pass in starting_positions={'SPY': 100, 'AAPL': 200}.
         show_plot : bool
             Whether to show the plot.
+        tearsheet_file : str
+            The file to write the tearsheet HTML to.
+        tearsheet_metrics_file : str
+            The file to write machine-readable tearsheet summary metrics JSON to.
         show_tearsheet : bool
             Whether to show the tearsheet.
         save_tearsheet : bool
@@ -5354,6 +5421,7 @@ class Strategy(_Strategy):
             starting_positions=starting_positions,
             show_plot=show_plot,
             tearsheet_file=tearsheet_file,
+            tearsheet_metrics_file=tearsheet_metrics_file,
             save_tearsheet=save_tearsheet,
             show_tearsheet=show_tearsheet,
             parameters=parameters,

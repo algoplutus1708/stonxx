@@ -157,7 +157,7 @@ class TestProjectXBroker:
         # Test order conversion  
         order = projectx_broker._convert_broker_order_to_lumibot_order(broker_order)
 
-        assert order.id == "11517491"
+        assert order.identifier == "11517491"
         assert order.asset.symbol == "MES"
         assert order.quantity == 1
         assert order.side == "buy"

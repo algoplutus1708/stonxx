@@ -51,6 +51,7 @@ _NEGATIVE_CONID_CACHE: Dict[str, Dict[str, Any]] = {}
 _NEGATIVE_CONID_CACHE_LOADED = False
 _IBKR_EQUITY_ACTIONS_CACHE: Dict[str, pd.DataFrame] = {}
 _RUNTIME_CONID_CACHE: Dict[str, int] = {}
+_RUNTIME_HISTORY_NO_DATA_WINDOWS: Dict[str, Tuple[datetime, datetime]] = {}
 _DISABLE_CONIDS_REMOTE_UPLOAD = False
 _LOGGED_CONIDS_REMOTE_UPLOAD_DISABLE = False
 _LOGGED_HISTORY_ALIASES: set[str] = set()
@@ -541,6 +542,7 @@ def get_price_data(
         source=history_source,
         include_after_hours=include_after_hours,
     )
+    runtime_no_data_key = str(cache_file)
     cache_manager = get_backtest_cache()
 
     try:
@@ -701,6 +703,18 @@ def get_price_data(
             and (end_tolerance <= timedelta(0) or (end_local - coverage_end) > end_tolerance)
         )
     )
+    blocked_window = _RUNTIME_HISTORY_NO_DATA_WINDOWS.get(runtime_no_data_key)
+    if blocked_window is not None:
+        blocked_start, blocked_end = blocked_window
+        if start_utc >= blocked_start and end_utc <= blocked_end:
+            needs_fetch = False
+    # Persisted no-data suppression:
+    #
+    # `_record_missing_window()` writes placeholder markers to parquet so we can skip repeated
+    # no-data fetches across runs (not only within this process). If the requested window is fully
+    # bracketed by placeholder markers and contains no real bars, treat it as a cache hit.
+    if needs_fetch and _window_is_placeholder_covered(df_cache, start_local=start_local, end_local=end_local):
+        needs_fetch = False
 
     if needs_fetch:
         segments: list[tuple[datetime, datetime]] = []
@@ -750,7 +764,42 @@ def get_price_data(
                     history_source,
                     exc,
                 )
+                terminal_no_data = _is_terminal_no_data_error(exc)
+                # If IBKR explicitly reports a terminal no-data condition (for example
+                # "Chart data unavailable"), record the missing window so we don't hammer the same
+                # request on every subsequent iteration.
+                if terminal_no_data:
+                    try:
+                        # Suppress repeat fetches for the same cached series within this process.
+                        existing_block = _RUNTIME_HISTORY_NO_DATA_WINDOWS.get(runtime_no_data_key)
+                        if existing_block is None:
+                            _RUNTIME_HISTORY_NO_DATA_WINDOWS[runtime_no_data_key] = (start_utc, end_utc)
+                        else:
+                            _RUNTIME_HISTORY_NO_DATA_WINDOWS[runtime_no_data_key] = (
+                                min(existing_block[0], start_utc),
+                                max(existing_block[1], end_utc),
+                            )
+                        _record_missing_window(
+                            asset=asset,
+                            quote=quote,
+                            timestep=timestep,
+                            exchange=effective_exchange,
+                            source=history_source,
+                            include_after_hours=include_after_hours,
+                            # Mark the whole requested window for this get_price_data call so
+                            # subsequent iterations don't re-submit near-identical failing slices.
+                            start_dt=_to_utc(start_utc),
+                            end_dt=_to_utc(end_utc),
+                        )
+                        # Reload to include the newly written missing markers.
+                        df_cache = _read_cache_frame(cache_file)
+                    except Exception:
+                        pass
                 fetched = pd.DataFrame()
+                if terminal_no_data:
+                    # No-data terminal errors are not recoverable by trying more segments in the
+                    # same iteration/window.
+                    break
             if fetched is not None and not fetched.empty:
                 merged = _merge_frames(df_cache, fetched)
                 _write_cache_frame(cache_file, merged)
@@ -1607,6 +1656,20 @@ def _ibkr_history_request(
     if result is None:
         return {}
     if isinstance(result, dict) and result.get("error"):
+        err = str(result.get("error") or "")
+        # IBKR occasionally rejects large day windows (e.g. 1000d) with "Chart data unavailable"
+        # for symbols that do return data over shorter periods. Fall back to smaller windows before
+        # surfacing a hard failure.
+        if "chart data unavailable" in err.lower() and str(bar).lower().endswith("d"):
+            for fallback_period in ("1y", "6m", "3m", "1m"):
+                fallback_query = dict(query)
+                fallback_query["period"] = fallback_period
+                fallback_result = queue_request(url=url, querystring=fallback_query, headers=None, timeout=None)
+                if fallback_result is None:
+                    continue
+                if isinstance(fallback_result, dict) and fallback_result.get("error"):
+                    continue
+                return fallback_result
         # Do not treat entitlement errors as NO_DATA; surface them to the caller.
         raise RuntimeError(f"IBKR history error: {result.get('error')}")
     return result
@@ -1725,6 +1788,53 @@ def _merge_frames(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFram
     if "missing" in merged.columns:
         merged["missing"] = merged["missing"].fillna(False)
     return merged
+
+
+def _window_is_placeholder_covered(
+    df_cache: pd.DataFrame,
+    *,
+    start_local: datetime,
+    end_local: datetime,
+) -> bool:
+    """Return True when [start_local, end_local] is fully covered by placeholder markers.
+
+    IBKR uses `_record_missing_window()` to write `missing=True` marker rows at the start/end of a
+    known no-data interval. On a fresh process, we should still honor those persisted markers and
+    avoid re-submitting identical history requests for sub-windows inside that interval.
+    """
+    if df_cache is None or df_cache.empty or "missing" not in df_cache.columns:
+        return False
+
+    try:
+        missing_mask = df_cache["missing"].fillna(False).astype(bool)
+    except Exception:
+        return False
+
+    if not bool(missing_mask.any()):
+        return False
+
+    missing_index = pd.DatetimeIndex(df_cache.index[missing_mask]).sort_values()
+    if len(missing_index) < 2:
+        return False
+
+    left_candidates = missing_index[missing_index <= start_local]
+    right_candidates = missing_index[missing_index >= end_local]
+    if len(left_candidates) == 0 or len(right_candidates) == 0:
+        return False
+
+    left = left_candidates.max()
+    right = right_candidates.min()
+    if left > right:
+        return False
+
+    between = df_cache.loc[(df_cache.index >= left) & (df_cache.index <= right)]
+    if between.empty or "missing" not in between.columns:
+        return False
+
+    try:
+        return bool(between["missing"].fillna(False).astype(bool).all())
+    except Exception:
+        return False
 
 
 def _record_missing_window(
@@ -2260,6 +2370,19 @@ def _is_not_found_error(cache_manager, exc: Exception) -> bool:
         pass
     msg = str(exc).lower()
     return any(token in msg for token in ("nosuchkey", "not found", "404", "no such key"))
+
+
+def _is_terminal_no_data_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "chart data unavailable",
+            "no data available",
+            "does not have data",
+            "asset does not exist",
+        )
+    )
 
 
 def _download_remote_conids_json(cache_manager, *, bucket: str, key: str) -> Dict[str, int]:

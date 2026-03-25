@@ -122,6 +122,24 @@ class MyStrategy(Strategy):
             self.submit_order(order)
 ```
 
+### Trading Fees
+```python
+# Stocks: use percent_fee (percentage of order value)
+TradingFee(percent_fee=0.001)  # 0.1% of order value
+
+# Options: use per_contract_fee (multiplied by number of contracts)
+TradingFee(per_contract_fee=0.65)  # $0.65 per contract (IBKR standard)
+
+# Futures: use per_contract_fee
+TradingFee(per_contract_fee=0.85)  # $0.85 per standard contract
+
+# Flat fee: fixed amount per ORDER regardless of quantity
+TradingFee(flat_fee=5.00)  # $5 per order
+
+# Pass to backtest:
+result = MyStrategy.backtest(datasource, buy_trading_fees=[fee], sell_trading_fees=[fee])
+```
+
 ## Backtesting Data Sources
 - `YahooDataBacktesting` - Free, good for stocks
 - `PolygonDataBacktesting` - Crypto and stocks (requires API key)

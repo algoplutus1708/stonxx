@@ -1,5 +1,33 @@
 # Changelog
 
+## 4.4.56 - Unreleased
+
+### Changed
+- Bump minimum `quantstats-lumi` dependency to `>=1.1.1` to pick up tearsheet scalar-metric normalization and contract-test coverage.
+
+### Fixed
+- Tearsheet summary artifact compatibility with `quantstats-lumi` machine-readable metric contract (typed scalar values, no `%` string leakage in JSON scalar values).
+
+## 4.4.55 - 2026-03-15
+
+### Added
+- `BACKTESTING_PARAMETERS` environment variable support for parameter injection in backtest runs.
+- Machine-readable `*_tearsheet_metrics.json` artifacts (summary-first) with placeholder output on insufficient/degenerate returns.
+- New strategy lifecycle hook `tearsheet_custom_metrics(...)` for appending custom metrics to tearsheet HTML and JSON artifacts.
+- Regression coverage for multi-timeframe day-timestep stock lookup and tearsheet metrics/custom-hook passthrough.
+
+### Changed
+- Backtest analysis and trader APIs now accept `tearsheet_metrics_file`; default output filename is `*_tearsheet_metrics.json`.
+- QuantStats `metrics_json` generation now runs in `summary_only` mode and forwards custom metrics to both HTML and JSON outputs.
+- Documentation updates for tearsheet metrics/lifecycle hooks and TradingFee guidance (`per_contract_fee` usage).
+
+### Fixed
+- Day-timestep asset lookup regression for multi-timeframe stock/index backtests (including minute->day fallback paths where appropriate).
+- IBKR stale no-data cache reuse now forces refresh when requested windows extend beyond cached coverage.
+- ProjectX order processing race-condition and tracking hardening merged from `dev`.
+
+Deploy marker: `15e8e268` ("deploy 4.4.55")
+
 ## 4.4.54 - 2026-03-08
 
 ### Added
