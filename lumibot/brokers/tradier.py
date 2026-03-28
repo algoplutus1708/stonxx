@@ -654,7 +654,7 @@ class Tradier(Broker):
                 # Place the order
                 order_response = self.tradier.orders.order(
                     symbol,
-                    order.side,
+                    self._lumi_side2tradier(order),
                     order.quantity,
                     order_type=order.order_type,
                     duration=order.time_in_force,
@@ -1023,7 +1023,17 @@ class Tradier(Broker):
 
         # Set the side that we will return
         side = order.side
+
         if order.asset.asset_type == Asset.AssetType.STOCK:
+            # Map extended side values to for Tradier API
+            if side in ("buy_to_open"):
+                side = "buy"
+            elif side in ("sell_to_close"):
+                side = "sell"
+            elif side in ("buy_to_cover", "buy_to_close"):
+                side = "buy_to_cover"
+            elif side in ("sell_to_open", "sell_short"):
+                side = "sell_short"
             return side
 
         # Convert the side to the Tradier side for options orders if necessary
