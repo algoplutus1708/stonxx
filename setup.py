@@ -43,7 +43,7 @@ theta_jar_path = PROJECT_ROOT / "lumibot" / "resources" / "ThetaTerminal.jar"
 
 setuptools.setup(
     name="lumibot",
-    version="4.4.56",
+    version="4.4.57",
     author="Robert Grzesik",
     author_email="rob@lumiwealth.com",
     description="Backtesting and Trading Library, Made by Lumiwealth",
@@ -74,7 +74,7 @@ setuptools.setup(
         "yappi>=1.6.0",
         # SciPy 1.14.0+ supports NumPy 2.x
         "scipy>=1.14.0",
-        "quantstats-lumi>=1.1.1",
+        "quantstats-lumi>=1.1.3,<1.2.0",
         "python-dotenv",  # Secret Storage
         "ccxt>=4.4.80",
         "termcolor",
@@ -95,11 +95,16 @@ setuptools.setup(
         "holidays",
         "psutil",
         "openai",
+        "google-adk>=1.19.0",
+        "google-genai>=1.68.0",
+        "anyio>=4.10.0",
+        "mcp>=1.26.0",
         "schwab-py>=1.5.0",
         "Flask>=2.3",
         "free-proxy",
         "requests-oauthlib",
         "boto3>=1.40.64",
+        "httpx",
     ],
     # Include configuration files, and only include ThetaTerminal.jar if present
     package_data={

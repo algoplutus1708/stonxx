@@ -371,6 +371,26 @@ class TestWaitForResult:
         assert result is None
         assert status_code == 472
 
+    def test_wait_for_result_terminal_result_fetch_error_raises_timeout_for_recovery(self):
+        client = QueueClient("http://test:8080", "test-key")
+        client._pending_requests["test-corr"] = QueuedRequestInfo(
+            request_id="req-123",
+            correlation_id="test-corr",
+            path="ibkr/iserver/marketdata/history",
+            status="completed",
+            error="read timed out",
+        )
+        client._request_id_to_correlation["req-123"] = "test-corr"
+
+        info = client._pending_requests["test-corr"]
+        with patch.object(client, "_refresh_status", return_value=info):
+            with patch.object(client, "get_result", return_value=(None, 0, "error")):
+                with patch.object(client, "_invalidate_sessions") as mocked_invalidate:
+                    with pytest.raises(TimeoutError, match="Failed to fetch terminal result"):
+                        client.wait_for_result("req-123", timeout=1.0, poll_interval=0.0)
+
+        mocked_invalidate.assert_called_once_with("terminal result fetch failures")
+
     @patch.object(requests.Session, 'get')
     def test_wait_for_result_timeout(self, mock_get):
         """Test wait_for_result raises TimeoutError."""
