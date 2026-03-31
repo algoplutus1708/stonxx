@@ -3,10 +3,24 @@
 ## 4.4.56 - Unreleased
 
 ### Changed
-- Bump minimum `quantstats-lumi` dependency to `>=1.1.1` to pick up tearsheet scalar-metric normalization and contract-test coverage.
+- Bump `quantstats-lumi` dependency to `>=1.1.3,<1.2.0` so tearsheet consumers require the renamed `Worst 1-Month Return` row and the latest machine-readable contract.
 
 ### Fixed
 - Tearsheet summary artifact compatibility with `quantstats-lumi` machine-readable metric contract (typed scalar values, no `%` string leakage in JSON scalar values).
+- Removed the duplicate `cash_financing_rates()` strategy hook so cash financing now uses a single public interface centered on `set_cash_financing_rates(...)`.
+- Backtest stats, plots, and tearsheet inputs now subtract external cashflows from returns, so deposits and withdrawals no longer distort `total_return`, CAGR, or other performance metrics.
+- Backtest runners now honor caller-provided `plot_file_html` and `trades_file` paths instead of silently writing trade artifacts to the default `logs/` directory.
+
+### Added
+- End-to-end tearsheet custom-metrics proof coverage for real backtest runs that generate both `tearsheet.html` and `tearsheet_metrics.json`.
+- Backtest cash-accounting coverage for `adjust_cash`, `deposit_cash`, `withdraw_cash`, and strategy-managed financing-rate updates.
+- Normalized `cash_events` live payload support in LumiBot for Alpaca and Tradier, including stable event IDs, retry-safe pending emission, and bounded payload serialization.
+- Period-delta cash columns in `stats.csv` (`cash_*_period`) for manual inspection of deposits, withdrawals, financing accruals, and cashflow-adjusted return math.
+- Cash-event rows in `trades.csv` / parquet and cash-event markers in `trades.html`, including deposits, withdrawals, and financing credits/debits.
+
+### Docs
+- Expanded public documentation for `tearsheet_custom_metrics(...)`, including parameter structure, full examples, literal-scalar unit behavior, and release-order guidance for QuantStats/LumiBot metric changes.
+- Added public documentation for strategy cash accounting, financing lifecycle usage, broker cash-event normalization, and broker-specific limitations for Alpaca and Tradier.
 
 ## 4.4.55 - 2026-03-15
 

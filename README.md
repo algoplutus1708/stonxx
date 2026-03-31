@@ -33,6 +33,25 @@ To get started with Lumibot, you can check out our documentation below.
 
 **Check out the documentation for the project here: 👉 <http://lumibot.lumiwealth.com/> 👈**
 
+## AI Trading Agents and Agentic Backtesting
+
+Lumibot now includes a built-in AI trading agent runtime for strategies. You can create an agent with `self.agents.create(...)`, run it from `initialize()`, `on_trading_iteration()`, `on_filled_order()`, or any other lifecycle method, and reuse the same strategy in both backtests and live trading.
+
+- Build an **AI trading agent** directly inside a LumiBot strategy
+- Use **DuckDB** as the query surface for time-series analysis instead of dumping raw bars into prompts
+- Replay identical agent decisions in **backtests** without paying for another model call
+- Mount external **MCP servers** for news, macro, filings, or any other domain-specific tools
+- Use LumiBot's internal runtime prompt plus your own system prompt, with structured traces and default per-run summaries for debugging
+- Keep the strategy in charge of timing, risk rules, and execution
+
+Start here:
+
+- Sphinx docs: <https://lumibot.lumiwealth.com/agents.html>
+- Backtesting docs: <https://lumibot.lumiwealth.com/backtesting.html>
+- Stock example: [lumibot/example_strategies/agent_stock_backtest.py](https://github.com/Lumiwealth/lumibot/blob/dev/lumibot/example_strategies/agent_stock_backtest.py)
+- Option example: [lumibot/example_strategies/agent_option_backtest.py](https://github.com/Lumiwealth/lumibot/blob/dev/lumibot/example_strategies/agent_option_backtest.py)
+- Repo guide: [docs/AI_TRADING_AGENTS.md](https://github.com/Lumiwealth/lumibot/blob/dev/docs/AI_TRADING_AGENTS.md)
+
 ## Build Trading Bots with AI
 
 Want to build trading bots without code? Check out our new platform [BotSpot](https://botspot.trade/sales?utm_source=lumibot+docs&utm_medium=documentation&utm_campaign=GitHub+Readme) where you can create and deploy trading strategies using AI! BotSpot allows you to:
@@ -61,7 +80,17 @@ python -m lumibot.example_strategies.stock_buy_and_hold
 
 ## Backtesting data sources (env override)
 
-You can select a backtesting data source via the `BACKTESTING_DATA_SOURCE` environment variable (this overrides any explicit `datasource_class` in code):
+You can select a backtesting data source via the `BACKTESTING_DATA_SOURCE` environment variable (this overrides any explicit `datasource_class` in code). When your environment already chooses the provider, call `Strategy.backtest(...)` or `Strategy.run_backtest(...)` with `datasource_class=None`:
+
+```python
+MyStrategy.backtest(
+    datasource_class=None,
+    backtesting_start=None,
+    backtesting_end=None,
+)
+```
+
+Environment-driven routing still works the same way:
 
 ```bash
 # Single-provider backtesting (examples)
