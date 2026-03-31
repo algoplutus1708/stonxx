@@ -318,6 +318,27 @@ Publishing is **tag-driven** via `.github/workflows/release.yml`.
   - Tradier’s sandbox environment does not behave like a full live account for certain order lifecycle endpoints;
     design smoke tests to skip appropriately.
 
+## Automation in place
+
+- **Auto-create next version branch**: After the release workflow publishes to PyPI, a `start-next-version`
+  job automatically creates `version/X.Y.(Z+1)` from `dev`, bumps `setup.py`, and pushes. This prevents
+  the "forgot to create the next branch" problem that blocked development after v4.4.56.
+- **Version logged at startup**: `LumiBot v{version} starting` is logged via `logger.info` when the
+  package is imported, making it visible in CloudWatch, backtest logs, and live trading logs.
+- **Version in backtest artifacts**: `settings.json` includes `lumibot_version` for every backtest,
+  enabling post-deploy verification without log parsing.
+
+## Future improvements (not yet implemented)
+
+- **Post-deploy canary in BotManager CI**: After the BotManager deploy workflow finishes, a final job
+  should trigger a short canary backtest via the API, wait for completion, and assert that
+  `settings.json → lumibot_version` matches the deployed version. This catches stale Docker images
+  and PyPI propagation lag automatically. Implementation lives in bot_manager's CI workflows and
+  should be done carefully since a flaky canary would block production deploys.
+- **Automated version assertion in `scheduled_test_backtest.py`**: The existing Lambda that runs
+  canary backtests on a schedule (`bot_manager/lambda/scheduled_test_backtest.py`) should check
+  `lumibot_version` in the result and alert if it doesn't match the pinned `LUMIBOT_VERSION` variable.
+
 ## Notes
 
 - Avoid destructive git operations (`git checkout`, `git reset --hard`, `git stash`).
