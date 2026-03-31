@@ -42,6 +42,7 @@ from ..backtesting import (
     ThetaDataBacktestingPandas,
     YahooDataBacktesting,
 )
+from ..components.agents import AgentManager
 from ..credentials import (
     BACKTESTING_END,
     BACKTESTING_QUIET_LOGS,
@@ -77,7 +78,6 @@ from ..tools import (
     stats_summary,
     to_datetime_aware,
 )
-from ..components.agents import AgentManager
 from ..traders import Trader
 from .strategy_executor import StrategyExecutor
 
