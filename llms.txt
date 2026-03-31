@@ -2,7 +2,6 @@
 
 > Python trading and backtesting framework for stocks, options, crypto, and futures.
 > Supports Alpaca, Interactive Brokers, Tradier, Schwab, ThetaData, Yahoo Finance, and Polygon.
-> Includes built-in AI trading agents, agentic backtesting, DuckDB query tools, replay caching, and external MCP tool support.
 
 ## Critical Rules for Code Generation
 
@@ -15,48 +14,10 @@
 - Access portfolio with `self.portfolio_value`, `self.cash`, `self.positions`
 - Implement `on_trading_iteration()` for main strategy logic - runs once per bar/iteration
 - For options: Use `self.create_asset(symbol, asset_type=Asset.AssetType.OPTION, expiration=date, strike=price, right='call'|'put')`
-- AI agents live on `self.agents` and should be created in `initialize()`
-- Use DuckDB for agent time-series analysis instead of pasting large historical bar payloads into prompts
 
 ## Full Documentation
 
 For complete API documentation with all method signatures, parameters, return types, and examples, see **llms-full.txt** in this repository.
-
-## Backtesting Architecture and Performance
-
-- Single backtests are **serial/path-dependent** by design; use process-level parallelism for independent sweeps or many-run throughput.
-- Internal engineering docs for speed work:
-  - `docs/BACKTESTING_ARCHITECTURE.md`
-  - `docs/BACKTESTING_PERFORMANCE.md`
-  - `docs/investigations/2026-03-28_BACKTEST_PARALLELISM_ASSESSMENT.md`
-
-## AI Trading Agents -- Backtest AI Agents with Real External Tools
-
-LumiBot is the **only production framework** that lets an AI agent reason, call external MCP tools, and make trading decisions **on every bar during a backtest** -- then run the exact same code live. This is real agentic backtesting, not an LLM bolted onto the side of a backtest engine.
-
-**Why this is different from everything else:**
-- **QuantConnect MCP:** LLM is external to the backtest loop. Cannot reason per bar with point-in-time data.
-- **CrewAI / AutoGen / LangGraph:** Agent frameworks with no trading backtesting capability.
-- **Hobby GPT trading scripts:** No MCP support, no replay cache, no DuckDB, no production observability.
-
-**LumiBot combines:**
-- LLM in the loop on every bar during backtesting and live trading
-- 20,000+ external MCP servers connected via URL (no local installs, no npm)
-- Replay caching for deterministic backtest reruns (warm reruns in seconds)
-- DuckDB time-series SQL queries inside the agent loop
-- Any LLM provider (OpenAI, Anthropic, Google Gemini)
-- Same strategy code for backtest and live -- write once, deploy anywhere
-- Built-in tools included by default (positions, portfolio, prices, orders, DuckDB, docs)
-
-**Keywords:** backtest AI trading agent, agentic backtesting framework, AI agent backtesting, MCP trading tools, LLM trading bot backtest, AI-driven trading strategy backtest, external MCP server trading
-
-- Create agents with `self.agents.create(...)` in `initialize()`
-- Run agents from `on_trading_iteration()`, `on_filled_order()`, and other lifecycle methods
-- Connect external MCP servers with a URL: `MCPServer(url="https://...", exposed_tools=[...])`
-- Main docs: `https://lumibot.lumiwealth.com/agents.html`
-- Quick start: `https://lumibot.lumiwealth.com/agents_quickstart.html`
-- Canonical demos: `https://lumibot.lumiwealth.com/agents_canonical_demos.html`
-- GitHub guide: `https://github.com/Lumiwealth/lumibot/blob/dev/docs/AI_TRADING_AGENTS.md`
 
 ## Quick Reference
 
@@ -161,6 +122,24 @@ class MyStrategy(Strategy):
             self.submit_order(order)
 ```
 
+### Trading Fees
+```python
+# Stocks: use percent_fee (percentage of order value)
+TradingFee(percent_fee=0.001)  # 0.1% of order value
+
+# Options: use per_contract_fee (multiplied by number of contracts)
+TradingFee(per_contract_fee=0.65)  # $0.65 per contract (IBKR standard)
+
+# Futures: use per_contract_fee
+TradingFee(per_contract_fee=0.85)  # $0.85 per standard contract
+
+# Flat fee: fixed amount per ORDER regardless of quantity
+TradingFee(flat_fee=5.00)  # $5 per order
+
+# Pass to backtest:
+result = MyStrategy.backtest(datasource, buy_trading_fees=[fee], sell_trading_fees=[fee])
+```
+
 ## Backtesting Data Sources
 - `YahooDataBacktesting` - Free, good for stocks
 - `PolygonDataBacktesting` - Crypto and stocks (requires API key)
@@ -168,4 +147,4 @@ class MyStrategy(Strategy):
 
 Set via environment variable: `BACKTESTING_DATA_SOURCE=yahoo|polygon|thetadata`
 
-# Generated: 2026-03-25T06:41:01Z
+# Generated: 2026-01-05T06:59:12Z

@@ -1,17 +1,20 @@
 # Changelog
 
-## 4.4.56 - Unreleased
+## 4.4.57 - 2026-03-30
 
 ### Changed
 - Bump `quantstats-lumi` dependency to `>=1.1.3,<1.2.0` so tearsheet consumers require the renamed `Worst 1-Month Return` row and the latest machine-readable contract.
 
 ### Fixed
+- Backtest console print settings no longer get silently overwritten when `lumibot_logger` re-applies log levels during a backtest run. (PR #981 — @davidlatte)
 - Tearsheet summary artifact compatibility with `quantstats-lumi` machine-readable metric contract (typed scalar values, no `%` string leakage in JSON scalar values).
 - Removed the duplicate `cash_financing_rates()` strategy hook so cash financing now uses a single public interface centered on `set_cash_financing_rates(...)`.
 - Backtest stats, plots, and tearsheet inputs now subtract external cashflows from returns, so deposits and withdrawals no longer distort `total_return`, CAGR, or other performance metrics.
 - Backtest runners now honor caller-provided `plot_file_html` and `trades_file` paths instead of silently writing trade artifacts to the default `logs/` directory.
 
 ### Added
+- Tradier stock shorting support: `sell_short` and `buy_to_cover` order sides now map correctly so short-selling equities works on Tradier. (PR #976 — @brettelliot)
+- AI trading agent framework: `self.agents.create(...)` inside strategies with DuckDB query tools, agentic backtesting with replay cache, and external MCP server mounting. New modules under `lumibot/components/agents/`.
 - End-to-end tearsheet custom-metrics proof coverage for real backtest runs that generate both `tearsheet.html` and `tearsheet_metrics.json`.
 - Backtest cash-accounting coverage for `adjust_cash`, `deposit_cash`, `withdraw_cash`, and strategy-managed financing-rate updates.
 - Normalized `cash_events` live payload support in LumiBot for Alpaca and Tradier, including stable event IDs, retry-safe pending emission, and bounded payload serialization.
