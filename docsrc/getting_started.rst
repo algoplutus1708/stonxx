@@ -5,6 +5,13 @@ Lumibot is a Python library that allows you to create trading strategies and bac
 
 Lumibot is designed to be easy to use, but also powerful. It is designed to be used by both beginners and advanced users. It is also designed to be flexible, so you can use it to create any kind of trading strategy you want. It is also designed to be fast, so you can backtest your strategies quickly.
 
+Build AI Trading Agents
+=======================
+
+Lumibot now supports **AI trading agents** inside the ``Strategy`` class. If you want an **agentic trading** workflow, you can create an agent in ``initialize()``, run it from ``on_trading_iteration()`` or ``on_filled_order()``, query time-series data with DuckDB, and replay the same agent decisions during backtests.
+
+Read :doc:`agents` for the full guide.
+
 Need Help Building Strategies?
 ==============================
 
@@ -300,4 +307,3 @@ This will open a web browser with a visualization of the profiling results.
 .. note::
 
    **Profiling can be complex**, so it is recommended to read the `yappi documentation <https://yappi.readthedocs.io/en/latest/>`__.
-

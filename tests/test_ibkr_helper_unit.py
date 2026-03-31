@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+import pytest
 
 from lumibot.entities import Asset
 
@@ -134,3 +135,144 @@ def test_ibkr_helper_persists_fetched_bars_even_when_requested_window_has_no_ove
     assert len(cached) == 2
     assert calls["history"] >= 1
     assert calls["secdef"] == 1
+
+
+def test_ibkr_fetch_history_between_dates_raises_on_later_empty_page(monkeypatch):
+    import lumibot.tools.ibkr_helper as ibkr_helper
+
+    asset = Asset(symbol="TSLA", asset_type=Asset.AssetType.STOCK)
+    quote = Asset(symbol="USD", asset_type=Asset.AssetType.FOREX)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 3, 2, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(ibkr_helper, "_resolve_conid", lambda **kwargs: 76792991)
+    page_one = {
+        "data": [
+            {
+                "t": int(ts.value // 1_000_000),
+                "o": 400.0 + i,
+                "h": 401.0 + i,
+                "l": 399.0 + i,
+                "c": 400.5 + i,
+                "v": 100 + i,
+            }
+            for i, ts in enumerate(pd.date_range(end=end, periods=7, freq="B", tz=timezone.utc))
+        ]
+    }
+    calls = {"count": 0}
+
+    def _fake_history_request(**kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return page_one
+        return {"data": []}
+
+    monkeypatch.setattr(ibkr_helper, "_ibkr_history_request", _fake_history_request)
+
+    with pytest.raises(RuntimeError, match="pagination returned empty data before covering the requested window"):
+        ibkr_helper._fetch_history_between_dates(
+            asset=asset,
+            quote=quote,
+            timestep="day",
+            start_dt=start,
+            end_dt=end,
+            exchange=None,
+            include_after_hours=False,
+            source="Trades",
+            source_was_explicit=True,
+        )
+
+    assert calls["count"] == 2
+
+
+def test_ibkr_frame_covers_requested_window_rejects_underfilled_daily_series_and_allows_flat_series():
+    import lumibot.tools.ibkr_helper as ibkr_helper
+
+    asset = Asset(symbol="TSLA", asset_type=Asset.AssetType.STOCK)
+    start = datetime(2026, 2, 20, tzinfo=timezone.utc)
+    end = datetime(2026, 3, 13, tzinfo=timezone.utc)
+
+    underfilled_end = pd.Timestamp(end).tz_convert("America/New_York") - pd.Timedelta(days=10)
+    underfilled_idx = pd.date_range(end=underfilled_end, periods=5, freq="B")
+    underfilled = pd.DataFrame(
+        {
+            "open": [400, 401, 402, 403, 404],
+            "high": [401, 402, 403, 404, 405],
+            "low": [399, 400, 401, 402, 403],
+            "close": [400.5, 401.5, 402.5, 403.5, 404.5],
+            "volume": [100, 101, 102, 103, 104],
+        },
+        index=underfilled_idx,
+    )
+
+    flat_start = pd.Timestamp(start).tz_convert("America/New_York")
+    flat_idx = pd.date_range(start=flat_start, periods=7, freq="B")
+    flat = pd.DataFrame(
+        {
+            "open": [405.18] * 7,
+            "high": [406.50] * 7,
+            "low": [394.65] * 7,
+            "close": [395.01] * 7,
+            "volume": [0] * 7,
+        },
+        index=flat_idx,
+    )
+
+    assert (
+        ibkr_helper.frame_covers_requested_window(
+            underfilled,
+            asset=asset,
+            timestep="day",
+            start_dt=start,
+            end_dt=end,
+        )
+        is False
+    )
+    assert (
+        ibkr_helper.frame_covers_requested_window(
+            flat,
+            asset=asset,
+            timestep="day",
+            start_dt=start,
+            end_dt=flat_idx[-1].to_pydatetime(),
+        )
+        is True
+    )
+
+
+def test_ibkr_downloader_payload_contract_accepts_complete_and_explicit_no_data():
+    import lumibot.tools.ibkr_helper as ibkr_helper
+
+    ibkr_helper._ensure_cacheable_downloader_history_payload(
+        {
+            "_botspot_meta": {
+                "provider": "ibkr",
+                "classification": "complete",
+                "cache_write_policy": "allow",
+            }
+        }
+    )
+    ibkr_helper._ensure_cacheable_downloader_history_payload(
+        {
+            "_botspot_meta": {
+                "provider": "ibkr",
+                "classification": "explicit_no_data",
+                "cache_write_policy": "negative_only",
+            }
+        }
+    )
+
+
+def test_ibkr_downloader_payload_contract_rejects_partial_or_uncacheable_history():
+    import lumibot.tools.ibkr_helper as ibkr_helper
+
+    with pytest.raises(RuntimeError, match="non-cacheable history payload"):
+        ibkr_helper._ensure_cacheable_downloader_history_payload(
+            {
+                "_botspot_meta": {
+                    "provider": "ibkr",
+                    "classification": "partial",
+                    "cache_write_policy": "deny",
+                }
+            }
+        )
