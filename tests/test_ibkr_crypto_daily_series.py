@@ -115,8 +115,10 @@ def test_ibkr_fetch_history_between_dates_keeps_prior_chunks_when_later_page_is_
     def _fake_history_request(**kwargs):
         calls["history"] += 1
         if calls["history"] == 1:
+            # Return data covering the full requested window so the function
+            # does not raise on insufficient coverage.
             idx = pd.date_range(
-                start=end.astimezone(timezone.utc) - timedelta(hours=2),
+                start=start.astimezone(timezone.utc),
                 end=end.astimezone(timezone.utc),
                 freq="1h",
                 tz="UTC",
