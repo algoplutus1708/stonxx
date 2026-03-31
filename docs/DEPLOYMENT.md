@@ -252,6 +252,23 @@ Publishing is **tag-driven** via `.github/workflows/release.yml`.
      gh run list -R Lumiwealth/bot_manager -L 10
      ```
 
+8) **Post-deployment verification (REQUIRED)**
+   - After BotManager deploys finish, verify the new version is actually running in production.
+   - **Backtest smoke test**: Run a short backtest via BotSpot MCP or the API, then check that
+     `settings.json` → `lumibot_version` matches the version you just deployed.
+     - Use `get_backtest_artifact` with `label=settings.json` — the `lumibot_version` field in the
+       JSON content shows exactly which version the ECS task ran.
+     - If it shows the OLD version, the Docker image cache may be stale — re-trigger BotManager
+       deploy with `force_rebuild_images=true`.
+   - **Live trading check** (if applicable): Confirm active bots restarted cleanly by checking
+     deployment logs via `get_deployment_logs` or the BotSpot dashboard.
+   - **Version mismatch troubleshooting**:
+     - BotManager bakes `lumibot==${LUMIBOT_VERSION}` into Docker dependency images.
+     - If the variable was updated but `force_rebuild_images=false`, the cached image might still
+       have the old wheel. Rebuild with `force_rebuild_images=true` to force a fresh pip install.
+     - PyPI CDN propagation can lag a few minutes after publish — if the deploy ran immediately
+       after tagging, it may have installed the old version from cache. Wait and re-deploy.
+
 ---
 
 ## Common pitfalls (learned the hard way)
