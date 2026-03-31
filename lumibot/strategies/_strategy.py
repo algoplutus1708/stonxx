@@ -77,9 +77,9 @@ from ..tools import (
     stats_summary,
     to_datetime_aware,
 )
+from ..components.agents import AgentManager
 from ..traders import Trader
 from .strategy_executor import StrategyExecutor
-from ..components.agents import AgentManager
 
 # Set the stats table name for when storing stats in a database, defined by db_connection_str
 STATS_TABLE_NAME = "strategy_tracker"
