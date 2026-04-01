@@ -276,3 +276,57 @@ def test_ibkr_downloader_payload_contract_rejects_partial_or_uncacheable_history
                 }
             }
         )
+
+
+def test_ibkr_get_price_data_fails_closed_when_cached_window_stays_underfilled_after_refresh_error(monkeypatch, tmp_path):
+    import lumibot.tools.ibkr_helper as ibkr_helper
+
+    monkeypatch.setattr(ibkr_helper, "LUMIBOT_CACHE_FOLDER", tmp_path.as_posix())
+
+    asset = Asset(symbol="VIX", asset_type=Asset.AssetType.INDEX)
+    quote = Asset(symbol="USD", asset_type=Asset.AssetType.FOREX)
+    start = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 3, 20, tzinfo=timezone.utc)
+
+    cache_file = ibkr_helper._cache_file_for(
+        asset=asset,
+        quote=quote,
+        timestep="day",
+        exchange=None,
+        source=ibkr_helper.IBKR_DEFAULT_INDEX_HISTORY_SOURCE,
+        include_after_hours=True,
+    )
+    stale_idx = pd.date_range(
+        end=pd.Timestamp(end).tz_convert("America/New_York") - pd.Timedelta(days=10),
+        periods=5,
+        freq="B",
+    )
+    stale = pd.DataFrame(
+        {
+            "open": [20.0, 21.0, 22.0, 23.0, 24.0],
+            "high": [21.0, 22.0, 23.0, 24.0, 25.0],
+            "low": [19.0, 20.0, 21.0, 22.0, 23.0],
+            "close": [20.5, 21.5, 22.5, 23.5, 24.5],
+            "volume": [0, 0, 0, 0, 0],
+            "missing": [False, False, False, False, False],
+        },
+        index=stale_idx,
+    )
+    ibkr_helper._write_cache_frame(cache_file, stale)
+
+    def _raise_fetch_error(**kwargs):
+        raise RuntimeError("submit timed out")
+
+    monkeypatch.setattr(ibkr_helper, "_fetch_history_between_dates", _raise_fetch_error)
+
+    df = ibkr_helper.get_price_data(
+        asset=asset,
+        quote=quote,
+        timestep="day",
+        start_dt=start,
+        end_dt=end,
+        exchange=None,
+        include_after_hours=True,
+    )
+
+    assert df.empty

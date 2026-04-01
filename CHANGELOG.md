@@ -2,6 +2,10 @@
 
 ## 4.4.59 - Unreleased
 
+### Fixed
+- Data Downloader queue client now uses a dedicated configurable connect-timeout budget instead of a hardcoded `5s`, which prevents IBKR/VIX history refreshes from failing closed on slow downloader connections.
+- IBKR history loading now fails closed when a refresh leaves the requested window underfilled, so stale cached slices are no longer returned as if they were complete history.
+
 ## 4.4.58 - 2026-04-01
 
 ### Added

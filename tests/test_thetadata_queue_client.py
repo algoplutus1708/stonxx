@@ -17,7 +17,10 @@ import pytest
 import requests
 
 from lumibot.tools.data_downloader_queue_client import (
+    QUEUE_CONNECT_HTTP_TIMEOUT,
     QUEUE_POLL_INTERVAL,
+    QUEUE_STATUS_HTTP_TIMEOUT,
+    QUEUE_SUBMIT_HTTP_TIMEOUT,
     QUEUE_TIMEOUT,
     QueueClient,
     QueuedRequestInfo,
@@ -436,6 +439,8 @@ class TestServerStats:
 
         assert stats["pending_count"] == 5
         assert stats["processing_count"] == 2
+        _, kwargs = mock_get.call_args
+        assert kwargs["timeout"] == (QUEUE_CONNECT_HTTP_TIMEOUT, QUEUE_STATUS_HTTP_TIMEOUT)
 
     @patch.object(requests.Session, 'get')
     def test_fetch_server_queue_stats_error(self, mock_get):
@@ -601,8 +606,8 @@ class TestSubmitNetworkTimeout:
         _, first_kwargs = mock_post.call_args_list[0]
         assert "timeout" in first_kwargs
         connect_timeout, read_timeout = first_kwargs["timeout"]
-        assert connect_timeout > 0
-        assert read_timeout > 0
+        assert connect_timeout == QUEUE_CONNECT_HTTP_TIMEOUT
+        assert read_timeout == QUEUE_SUBMIT_HTTP_TIMEOUT
 
 
 class TestStatusRefreshRecovery:
