@@ -2687,8 +2687,8 @@ class _Strategy:
         backtesting_start, backtesting_end = self.verify_backtest_inputs(backtesting_start, backtesting_end)
 
         quiet_logs_env = os.environ.get("BACKTESTING_QUIET_LOGS")
-        if quiet_logs_env is not None and BACKTESTING_QUIET_LOGS is not None:
-            quiet_logs = BACKTESTING_QUIET_LOGS
+        if quiet_logs_env is not None:
+            quiet_logs = quiet_logs_env.strip().lower() in ("true", "1", "yes", "on")
 
         show_progress_env = os.environ.get("BACKTESTING_SHOW_PROGRESS_BAR")
         if show_progress_env is not None:

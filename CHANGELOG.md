@@ -1,5 +1,26 @@
 # Changelog
 
+## 4.4.58 - 2026-04-01
+
+### Added
+- `@agent_tool` decorator now auto-includes function source code in tool descriptions, giving AI agents full visibility into parameters, defaults, and implementation details without manual documentation.
+- `AgentHandle` now always merges built-in tools with custom user tools (previously custom tools replaced built-ins).
+- Four new canonical agent demo strategies: M2 Liquidity (FRED data), Macro Risk (Alpaca bars), Momentum Allocator (Alpaca bars + news), and News Sentiment (Alpaca news). These replace the previous stress-test examples with production-quality patterns.
+- Version logged at startup (`LumiBot v{version} starting`) via `logger.info` for CloudWatch/backtest/live log visibility.
+- Version included in backtest `settings.json` artifacts (`lumibot_version` field) for post-deploy verification.
+- Auto-create next version branch job in release workflow to prevent team-blocking delays after a release.
+- Post-deployment verification steps documented in `DEPLOYMENT.md`.
+
+### Changed
+- Improved lookahead-bias guardrails in agent system prompts: agents must now explicitly set end-date bounds on ALL temporal tool parameters, not just known ones.
+- Major documentation refresh: agents quickstart, canonical demos, observability, FAQ, getting started page with agent framework introduction.
+
+### Fixed
+- `BACKTESTING_QUIET_LOGS` env var parsing was broken (comparing string to `None`); now correctly parses boolean-like strings (`true`, `1`, `yes`, `on`).
+- Removed contradictory `set_console_log_level("ERROR")` call when `quiet_logs=False` in `trader.py`.
+- IBKR pagination test assertions updated to match current behavior.
+- `.gitignore` fix for deployment reliability.
+
 ## 4.4.57 - 2026-03-30
 
 ### Changed

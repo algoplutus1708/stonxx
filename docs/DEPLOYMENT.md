@@ -252,6 +252,23 @@ Publishing is **tag-driven** via `.github/workflows/release.yml`.
      gh run list -R Lumiwealth/bot_manager -L 10
      ```
 
+8) **Post-deployment verification (REQUIRED)**
+   - After BotManager deploys finish, verify the new version is actually running in production.
+   - **Backtest smoke test**: Run a short backtest via BotSpot MCP or the API, then check that
+     `settings.json` → `lumibot_version` matches the version you just deployed.
+     - Use `get_backtest_artifact` with `label=settings.json` — the `lumibot_version` field in the
+       JSON content shows exactly which version the ECS task ran.
+     - If it shows the OLD version, the Docker image cache may be stale — re-trigger BotManager
+       deploy with `force_rebuild_images=true`.
+   - **Live trading check** (if applicable): Confirm active bots restarted cleanly by checking
+     deployment logs via `get_deployment_logs` or the BotSpot dashboard.
+   - **Version mismatch troubleshooting**:
+     - BotManager bakes `lumibot==${LUMIBOT_VERSION}` into Docker dependency images.
+     - If the variable was updated but `force_rebuild_images=false`, the cached image might still
+       have the old wheel. Rebuild with `force_rebuild_images=true` to force a fresh pip install.
+     - PyPI CDN propagation can lag a few minutes after publish — if the deploy ran immediately
+       after tagging, it may have installed the old version from cache. Wait and re-deploy.
+
 ---
 
 ## Common pitfalls (learned the hard way)
@@ -300,6 +317,27 @@ Publishing is **tag-driven** via `.github/workflows/release.yml`.
   - Run with `pytest -m apitest …` and expect skips when the market is closed.
   - Tradier’s sandbox environment does not behave like a full live account for certain order lifecycle endpoints;
     design smoke tests to skip appropriately.
+
+## Automation in place
+
+- **Auto-create next version branch**: After the release workflow publishes to PyPI, a `start-next-version`
+  job automatically creates `version/X.Y.(Z+1)` from `dev`, bumps `setup.py`, and pushes. This prevents
+  the "forgot to create the next branch" problem that blocked development after v4.4.56.
+- **Version logged at startup**: `LumiBot v{version} starting` is logged via `logger.info` when the
+  package is imported, making it visible in CloudWatch, backtest logs, and live trading logs.
+- **Version in backtest artifacts**: `settings.json` includes `lumibot_version` for every backtest,
+  enabling post-deploy verification without log parsing.
+
+## Future improvements (not yet implemented)
+
+- **Post-deploy canary in BotManager CI**: After the BotManager deploy workflow finishes, a final job
+  should trigger a short canary backtest via the API, wait for completion, and assert that
+  `settings.json → lumibot_version` matches the deployed version. This catches stale Docker images
+  and PyPI propagation lag automatically. Implementation lives in bot_manager's CI workflows and
+  should be done carefully since a flaky canary would block production deploys.
+- **Automated version assertion in `scheduled_test_backtest.py`**: The existing Lambda that runs
+  canary backtests on a schedule (`bot_manager/lambda/scheduled_test_backtest.py`) should check
+  `lumibot_version` in the result and alert if it doesn't match the pinned `LUMIBOT_VERSION` variable.
 
 ## Notes
 
