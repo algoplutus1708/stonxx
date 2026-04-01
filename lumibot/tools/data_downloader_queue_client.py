@@ -127,6 +127,7 @@ QUEUE_POLL_INTERVAL = float(os.environ.get("THETADATA_QUEUE_POLL_INTERVAL", "0.2
 # or via env var if they truly want infinite waits.
 QUEUE_TIMEOUT = float(os.environ.get("THETADATA_QUEUE_TIMEOUT", "600"))
 MAX_CONCURRENT_REQUESTS = int(os.environ.get("THETADATA_MAX_CONCURRENT", "8"))  # Max requests in flight
+QUEUE_CONNECT_HTTP_TIMEOUT = float(os.environ.get("THETADATA_QUEUE_CONNECT_HTTP_TIMEOUT", "15"))
 QUEUE_SUBMIT_HTTP_TIMEOUT = float(os.environ.get("THETADATA_QUEUE_SUBMIT_HTTP_TIMEOUT", "120"))
 QUEUE_STATUS_HTTP_TIMEOUT = float(os.environ.get("THETADATA_QUEUE_STATUS_HTTP_TIMEOUT", "10"))
 QUEUE_RESULT_HTTP_TIMEOUT = float(os.environ.get("THETADATA_QUEUE_RESULT_HTTP_TIMEOUT", "120"))
@@ -380,7 +381,7 @@ class QueueClient:
             resp = self._get_session().get(
                 f"{self.base_url}/queue/stats",
                 headers={self.api_key_header: self.api_key},
-                timeout=(5, QUEUE_STATUS_HTTP_TIMEOUT),
+                timeout=(QUEUE_CONNECT_HTTP_TIMEOUT, QUEUE_STATUS_HTTP_TIMEOUT),
             )
             resp.raise_for_status()
             return resp.json()
@@ -512,7 +513,7 @@ class QueueClient:
                     submit_url,
                     json=payload,
                     headers={self.api_key_header: self.api_key},
-                    timeout=(5, QUEUE_SUBMIT_HTTP_TIMEOUT),
+                    timeout=(QUEUE_CONNECT_HTTP_TIMEOUT, QUEUE_SUBMIT_HTTP_TIMEOUT),
                 )
             except (
                 requests_exceptions.ReadTimeout,
@@ -645,7 +646,7 @@ class QueueClient:
             resp = self._get_session().get(
                 f"{self.base_url}/queue/status/{request_id}",
                 headers={self.api_key_header: self.api_key},
-                timeout=(5, QUEUE_STATUS_HTTP_TIMEOUT),
+                timeout=(QUEUE_CONNECT_HTTP_TIMEOUT, QUEUE_STATUS_HTTP_TIMEOUT),
             )
             if resp.status_code == 404:
                 # Request not found, remove from tracking
@@ -704,7 +705,7 @@ class QueueClient:
             resp = self._get_session().get(
                 f"{self.base_url}/queue/{request_id}/result",
                 headers={self.api_key_header: self.api_key},
-                timeout=(5, QUEUE_RESULT_HTTP_TIMEOUT),
+                timeout=(QUEUE_CONNECT_HTTP_TIMEOUT, QUEUE_RESULT_HTTP_TIMEOUT),
             )
             data = resp.json()
             status_code = resp.status_code

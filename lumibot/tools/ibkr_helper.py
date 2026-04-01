@@ -902,6 +902,32 @@ def get_price_data(
         frame = frame.drop(columns=["missing"], errors="ignore")
     if asset_type in {"stock", "index"} and str(timestep_component).endswith("day"):
         frame = _repair_isolated_split_spikes_daily(frame)
+    placeholder_covered = _window_is_placeholder_covered(df_cache, start_local=start_local, end_local=end_local)
+    if not frame.empty:
+        try:
+            covers_requested_window = frame_covers_requested_window(
+                frame,
+                asset=asset,
+                timestep=timestep,
+                start_dt=start_utc,
+                end_dt=end_utc,
+            )
+        except Exception:
+            covers_requested_window = False
+        if not covers_requested_window:
+            logger.warning(
+                "IBKR cached history remained underfilled after refresh for %s/%s timestep=%s exchange=%s source=%s; "
+                "returning empty frame (placeholder_covered=%s)",
+                getattr(asset, "symbol", None),
+                getattr(quote, "symbol", None) if quote else None,
+                timestep,
+                effective_exchange,
+                history_source,
+                placeholder_covered,
+            )
+            return frame.iloc[0:0].copy()
+    elif placeholder_covered:
+        return frame
     return frame
 
 

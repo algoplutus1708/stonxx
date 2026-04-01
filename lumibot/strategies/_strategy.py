@@ -45,7 +45,6 @@ from ..backtesting import (
 from ..components.agents import AgentManager
 from ..credentials import (
     BACKTESTING_END,
-    BACKTESTING_QUIET_LOGS,
     BACKTESTING_SHOW_PROGRESS_BAR,
     BACKTESTING_START,
     BROKER,
