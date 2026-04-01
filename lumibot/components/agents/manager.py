@@ -231,11 +231,13 @@ class AgentHandle:
         self.name = name
         self.system_prompt = system_prompt
         self.default_model = default_model
+        from .builtins import BuiltinTools
+        builtin_tools = BuiltinTools.all()
         if tools is None:
-            from .builtins import BuiltinTools
-            self._tool_inputs = BuiltinTools.all()
+            self._tool_inputs = builtin_tools
         else:
-            self._tool_inputs = tools
+            # Always include built-in tools, plus any custom tools the user added
+            self._tool_inputs = builtin_tools + list(tools)
         self._mcp_servers = mcp_servers or []
         self._runtime = runtime or GoogleADKRuntime(mcp_servers=self._mcp_servers)
         self._bound_tools: list[BoundTool] | None = None
@@ -372,9 +374,11 @@ class AgentHandle:
                     "Incorrect example: using a headline published at 14:00 ET, a later macro revision, a later SEC filing, or knowledge of the close when the simulated time is still the morning.",
                     "Incorrect example: saying 'the market later sold off' or 'inflation kept rising after this' unless that fact is explicitly visible in current tool output at or before the simulated datetime.",
                     "Incorrect example: relying on what you remember happened historically when that information is not yet present in the runtime context or tool results.",
-                    "When an external tool accepts explicit date or time bounds, you must pass the current simulated cutoff into that tool call. Do not rely on the tool defaulting to a safe date range.",
-                    "Correct example: if the runtime context gives you a current simulated date of 2024-01-22 and a macro tool accepts observation_end or realtime_end, pass 2024-01-22 explicitly in those fields.",
-                    "Incorrect example: calling a macro, news, or filing tool without its available date bounds and then trusting whatever future records come back by default.",
+                    "CRITICAL: When calling ANY external tool, if the tool has ANY parameter that controls a time range, date filter, or temporal bound, you MUST set it so that no data after the current simulated datetime can be returned.",
+                    "This applies regardless of what the parameter is named. Common names include: end, end_date, time_to, observation_end, before, until, to, date, timestamp, coed, realtime_end - but ANY parameter that limits the time range must be set.",
+                    "If a tool has a start/end date range and you only set start without setting end, the tool will likely return data up to today, which is in the future. ALWAYS set the end bound.",
+                    "Correct example: if the current simulated date is 2024-01-22 and a tool accepts end, end_date, time_to, or observation_end, pass 2024-01-22 (or the current simulated datetime) in that field.",
+                    "Incorrect example: calling a news, macro, or data tool with only a start parameter and no end parameter, allowing it to return future data by default.",
                     "If a tool response seems to include future timestamps, treat that as suspicious. Do not rely on those records without calling out the risk in your reasoning.",
                     "If you are unsure whether information was available yet, say the evidence is insufficient and do nothing.",
                     "Backtesting accuracy is more important than being clever. A cautious no-trade is better than a future-biased trade.",
