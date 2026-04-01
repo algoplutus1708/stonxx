@@ -91,9 +91,11 @@ def test_ibkr_stale_end_marks_missing_window_to_avoid_repeated_history_fetches(m
         )
         history_calls = [c for c in calls if "/ibkr/iserver/marketdata/history" in c["url"]]
         assert len(history_calls) == 1
-        assert not df1.empty
-        assert df1.index.max() == last_bar
+        # Underfilled windows now fail closed: the real bar remains in cache, but the returned
+        # frame is empty because the requested bound was not fully covered after refresh.
+        assert df1.empty
         cached_mid = pd.read_parquet(cache_file)
+        assert last_bar in cached_mid.index
         assert end in cached_mid.index
 
         # Second call should not re-fetch history; the stale-end negative cache should satisfy the
@@ -110,8 +112,7 @@ def test_ibkr_stale_end_marks_missing_window_to_avoid_repeated_history_fetches(m
         )
         history_calls = [c for c in calls if "/ibkr/iserver/marketdata/history" in c["url"]]
         assert len(history_calls) == 1
-        assert not df2.empty
-        assert df2.index.max() == last_bar
+        assert df2.empty
 
         cached = pd.read_parquet(cache_file)
         # Placeholder rows are used only to extend coverage; they must not replace the real bar.
