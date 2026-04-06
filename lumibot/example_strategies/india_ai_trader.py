@@ -46,7 +46,9 @@ import time
 from datetime import datetime, timedelta
 from typing import Optional
 
+import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
 
 from lumibot.components.agents import agent_tool
 from lumibot.entities import Asset, TradingFee
@@ -155,6 +157,11 @@ class IndiaAITrader(Strategy):
         # Quote asset — Indian Rupee
         self.set_market("NSE_INDIA")
 
+        # ML Models ensemble state (lazy trained)
+        self._ml_models = {}
+        self._ml_retrain_interval_bars = 4 * 15  # retrain roughly once a day for 15-min bars
+        self._ml_last_trained_bar = {}
+
         # AI Agent
         model = os.getenv("GOOGLE_MODEL", google_model)
         self._google_model = model
@@ -169,6 +176,7 @@ class IndiaAITrader(Strategy):
                 self.get_india_market_news,
                 self.get_technical_signals,
                 self.get_portfolio_stats,
+                self.get_ml_prediction,
             ],
         )
 
@@ -196,12 +204,15 @@ YOUR OBJECTIVE:
 3. Size trades so each risks ~{self.risk_per_trade_pct}% of portfolio value (ATR-based or momentum-based stop).
 4. Indian equities often move on sector rotation, FII flows, and global cues — factor these in.
 
+Your job is to ENSEMBLE your qualitative reasoning with the strict quantitative output of the Machine Learning model.
+
 EXECUTION RULES:
-- Place BUY orders for bullish setups, SELL orders to close or short (if allowed).
+- ALWAYS check current positions and cash before placing new orders.
+- ALWAYS call `get_ml_prediction` before buying. The ML model outputs a strict statistical probability.
+- DUAL CONFIRMATION: Only place a BUY order if the ML model probability is > 60% AND your assessment of the news/technical signals is bullish.
+- Place SELL orders to close or take profit if the ML probability drops below 45% or technicals breakdown.
 - Use limit orders near the current bid/ask to avoid slippage.
 - Never invest more than 20% of portfolio in a single stock.
-- Always check current positions and cash before placing new orders.
-- If no clear edge is found, do nothing. Dry powder is valid.
 
 KEY INDIA-SPECIFIC CONSIDERATIONS:
 - Market opens with a pre-open auction 09:00–09:15 IST; first 5 min can be erratic.
@@ -505,6 +516,127 @@ END EVERY RUN WITH: RESULT: <brief summary of decisions made and reasoning>
             result["rsi_error"] = str(exc)
 
         return result
+
+    # ----------------------------------------------------------------
+    # ML Ensemble Tools
+    # ----------------------------------------------------------------
+
+    def _train_ml_model(self, asset: Asset, symbol: str):
+        """Train a lightweight Random Forest model on technical features."""
+        try:
+            # Fetch 150 days of daily data for training
+            bars = self.get_historical_prices(asset, 150, timestep="day")
+            if bars is None or len(bars.df) < 50:
+                return False
+
+            df = bars.df.copy()
+            
+            # --- Feature Engineering ---
+            df["returns"] = df["close"].pct_change()
+            
+            # 1. RSI
+            delta = df["close"].diff()
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            rs = gain / loss.replace(0, np.nan)
+            df["rsi"] = 100 - (100 / (1 + rs))
+            
+            # 2. Moving Averages
+            df["ma_10"] = df["close"].rolling(10).mean()
+            df["ma_20"] = df["close"].rolling(20).mean()
+            df["ma_ratio"] = df["ma_10"] / df["ma_20"]
+            
+            # 3. Volatility
+            df["volatility_10"] = df["returns"].rolling(10).std()
+            
+            # --- Target Variable ---
+            # Predict if the price will be higher 3 days from now
+            df["future_return"] = df["close"].shift(-3) / df["close"] - 1
+            df["target"] = (df["future_return"] > 0).astype(int)
+            
+            # Drop NaN rows efficiently
+            df = df.dropna()
+            
+            if len(df) < 30:
+                return False
+                
+            features = ["rsi", "ma_ratio", "volatility_10", "returns"]
+            X = df[features]
+            y = df["target"]
+            
+            model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42)
+            model.fit(X, y)
+            
+            self._ml_models[symbol] = model
+            self._ml_last_trained_bar[symbol] = self.vars.bar_count
+            return True
+        except Exception as exc:
+            self.log_message(f"[ML Training Error] {symbol}: {exc}", color="red")
+            return False
+
+    @agent_tool(
+        name="get_ml_prediction",
+        description=(
+            "Get the strict statistical probability of an upward price move from the ML model. "
+            "ALWAYS call this before making a BUY or SELL decision. "
+            "Returns a probability between 0.00 and 1.00 (e.g., 0.65 = 65% chance of going up). "
+            "Combine this hard probability with your qualitative news/technical analysis."
+        ),
+    )
+    def get_ml_prediction(self, symbol: str) -> dict:
+        """Fetch the latest quantitative prediction from the Random Forest model."""
+        symbol = str(symbol).strip().upper()
+        asset = Asset(symbol=symbol, asset_type="stock")
+        
+        # Check if we need to train or retrain
+        last_train = self._ml_last_trained_bar.get(symbol, -9999)
+        needs_training = (
+            symbol not in self._ml_models 
+            or (self.vars.bar_count - last_train) > self._ml_retrain_interval_bars
+        )
+        
+        if needs_training:
+            success = self._train_ml_model(asset, symbol)
+            if not success:
+                return {"symbol": symbol, "error": "Insufficient data to train ML model."}
+
+        model = self._ml_models.get(symbol)
+        if not model:
+            return {"symbol": symbol, "error": "Model not available."}
+
+        try:
+            # Fetch latest data for inference
+            bars = self.get_historical_prices(asset, 30, timestep="day")
+            if bars is None or len(bars.df) < 25:
+                return {"symbol": symbol, "error": "Insufficient data for inference."}
+                
+            df = bars.df.copy()
+            df["returns"] = df["close"].pct_change()
+            
+            delta = df["close"].diff()
+            gain = delta.clip(lower=0).rolling(14).mean()
+            loss = (-delta.clip(upper=0)).rolling(14).mean()
+            rs = gain / loss.replace(0, np.nan)
+            df["rsi"] = 100 - (100 / (1 + rs))
+            
+            df["ma_10"] = df["close"].rolling(10).mean()
+            df["ma_20"] = df["close"].rolling(20).mean()
+            df["ma_ratio"] = df["ma_10"] / df["ma_20"]
+            df["volatility_10"] = df["returns"].rolling(10).std()
+            
+            latest_features = df[["rsi", "ma_ratio", "volatility_10", "returns"]].iloc[-1:]
+            
+            # Predict probability of class 1 (UP)
+            prob_up = model.predict_proba(latest_features)[0][1]
+            
+            return {
+                "symbol": symbol,
+                "ml_probability_upward_move": round(float(prob_up), 2),
+                "prediction": "BULLISH" if prob_up > 0.60 else ("BEARISH" if prob_up < 0.45 else "NEUTRAL"),
+                "model_type": "RandomForestClassifier",
+            }
+        except Exception as exc:
+            return {"symbol": symbol, "error": f"Inference failed: {exc}"}
 
     @agent_tool(
         name="get_portfolio_stats",
