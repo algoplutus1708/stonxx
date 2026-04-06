@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timedelta
-from dhanhq import DhanContext, dhanhq as DhanAPI
+from dhanhq import dhanhq as DhanAPI
 from lumibot.data_sources import DataSourceBacktesting
 from lumibot.data_sources.yahoo_data import YahooData
 from lumibot.entities import Asset, Bars
@@ -13,18 +13,28 @@ class DhanData(DataSourceBacktesting):
     
     SOURCE = "DHAN"
     
-    def __init__(self, client_id, access_token, use_yfinance_historical=True, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, client_id, access_token, use_yfinance_historical=True, datetime_start=None, datetime_end=None, **kwargs):
+        # Set default date range if not provided (matches YahooData pattern)
+        if datetime_start is None:
+            datetime_start = datetime.now() - timedelta(days=365)
+        if datetime_end is None:
+            datetime_end = datetime.now()
+
+        super().__init__(datetime_start=datetime_start, datetime_end=datetime_end, **kwargs)
         self.client_id = client_id
         self.access_token = access_token
         self.use_yfinance_historical = use_yfinance_historical
         
-        self.dhan_context = DhanContext(client_id, access_token)
-        self.api = DhanAPI(self.dhan_context)
+        # Necessary for Strategy initialization
+        self._data_store = {}
+        self._last_price_cache = {}
+        self._last_price_cache_datetime = None
+        
+        self.api = DhanAPI(client_id, access_token)
         
         # Initialize Yahoo fallback if needed
         if self.use_yfinance_historical:
-            self.yahoo = YahooData(**kwargs)
+            self.yahoo = YahooData(datetime_start=datetime_start, datetime_end=datetime_end, **kwargs)
         else:
             self.yahoo = None
 
@@ -34,7 +44,15 @@ class DhanData(DataSourceBacktesting):
         """
         if self.use_yfinance_historical:
             # Map Dhan symbol to Yahoo symbol (e.g., RELIANCE -> RELIANCE.NS)
-            yahoo_symbol = f"{asset.symbol}.NS" # Default to NSE
+            symbol_upper = asset.symbol.upper()
+            if symbol_upper.endswith(".NS") or symbol_upper.endswith(".BO"):
+                yahoo_symbol = symbol_upper
+            else:
+                # Default to NSE if no suffix and exchange is not BSE
+                exchange = getattr(asset, "exchange", "NSE")
+                suffix = ".BO" if exchange == "BSE" else ".NS"
+                yahoo_symbol = f"{symbol_upper}{suffix}"
+
             yahoo_asset = Asset(symbol=yahoo_symbol, asset_type=asset.asset_type)
             return self.yahoo.get_historical_prices(yahoo_asset, length, timestep, **kwargs)
         
@@ -64,3 +82,18 @@ class DhanData(DataSourceBacktesting):
                 "volume": data.get('v', 0)
             }
         return None
+
+    def get_last_price(self, asset):
+        """
+        Get the last price of an asset.
+        """
+        quote = self.get_quote(asset)
+        if quote:
+            return quote.get("close")
+        return None
+
+    def get_chains(self, asset):
+        """
+        Get option chains for an asset. (Not yet implemented for Dhan)
+        """
+        return {}

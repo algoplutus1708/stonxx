@@ -1,8 +1,7 @@
 import logging
-from dhanhq import DhanContext, dhanhq as DhanAPI
+from dhanhq import dhanhq as DhanAPI
 from lumibot.brokers.broker import Broker
 from lumibot.entities import Order, Position
-from lumibot.constants import BrokerConstants
 
 class Dhan(Broker):
     """
@@ -34,8 +33,7 @@ class Dhan(Broker):
         super().__init__(name=name, **kwargs)
         self.client_id = client_id
         self.access_token = access_token
-        self.dhan_context = DhanContext(client_id, access_token)
-        self.api = DhanAPI(self.dhan_context)
+        self.api = DhanAPI(client_id, access_token)
         
     def get_positions(self):
         """
@@ -60,28 +58,75 @@ class Dhan(Broker):
         """
         response = self.api.get_order_by_id(order_id)
         if response and response.get('status') == 'success':
-            return self._parse_dhan_order(response.get('data', {}))
+            data = response.get('data', {})
+            return self._parse_dhan_order(data)
         return None
 
+    def get_orders(self, strategy_name=None):
+        """
+        Get all orders from Dhan.
+        """
+        response = self.api.get_order_list()
+        orders = []
+        if response and response.get('status') == 'success':
+            for d_order in response.get('data', []):
+                order = self._parse_dhan_order(d_order)
+                if strategy_name is None or order.strategy_name == strategy_name:
+                    orders.append(order)
+        return orders
+
     def _parse_dhan_order(self, dhan_order):
-        # Implementation of order parsing
-        return Order(...)
+        """
+        Parse Dhan API order response into a Lumibot Order object.
+        """
+        order_id = dhan_order.get('orderId')
+        symbol = dhan_order.get('tradingSymbol')
+        status_raw = dhan_order.get('orderStatus', '').upper()
+        
+        # Map status
+        status = Order.OrderStatus.NEW
+        if status_raw == "FILLED":
+            status = Order.OrderStatus.FILLED
+        elif status_raw == "CANCELLED":
+            status = Order.OrderStatus.CANCELED
+        elif status_raw in ["REJECTED", "FAILED"]:
+            status = Order.OrderStatus.ERROR
+            
+        quantity = float(dhan_order.get('quantity', 0))
+        price = float(dhan_order.get('price', 0))
+        avg_price = float(dhan_order.get('avgPrice', 0))
+        
+        order = Order(
+            asset=symbol, # This should ideally be an Asset object
+            quantity=quantity,
+            side="buy" if dhan_order.get('transactionType') == "BUY" else "sell",
+            limit_price=price,
+            avg_fill_price=avg_price,
+            status=status,
+            identifier=order_id
+        )
+        return order
 
     def submit_order(self, order):
         """
         Submit a new order to Dhan.
         """
         try:
+            # Determine product type from order parameters if available, else default to INTRA (MIS)
+            p_type = getattr(order, "product_type", self.INTRA)
+            if p_type not in [self.INTRA, self.CNC, self.MARGIN]:
+                p_type = self.INTRA
+
             # Map Lumibot order to Dhan API call
             response = self.api.place_order(
-                security_id=order.asset.symbol, # Needs mapping if not using security_id
-                exchange_segment=self.NSE, # Default for now
+                security_id=str(getattr(order.asset, "dhan_id", order.asset.symbol)), 
+                exchange_segment=getattr(order.asset, "exchange", self.NSE),
                 transaction_type=self.BUY if order.side == "buy" else self.SELL,
-                quantity=order.quantity,
+                quantity=int(order.quantity),
                 order_type=self.MARKET if order.type == "market" else self.LIMIT,
-                product_type=self.INTRA, # Default to Intraday
-                price=order.limit_price or 0,
-                trigger_price=order.stop_price or 0
+                product_type=p_type,
+                price=float(order.limit_price or 0),
+                trigger_price=float(order.stop_price or 0)
             )
             
             if response and response.get('status') == 'success':

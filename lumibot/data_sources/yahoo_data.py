@@ -232,7 +232,8 @@ class YahooData(DataSourceBacktesting):
                         sym,
                         interval=interval,
                         auto_adjust=self.auto_adjust,
-                        last_needed_datetime=self.datetime_end, # Keep this if needed for caching logic
+                        last_needed_datetime=self.datetime_end, 
+                        symbol=sym, # Pass the symbol for timezone detection
                     )
                     if data is not None and data.shape[0] > 0:
                         logger.info(f"Successfully fetched data for symbol: {sym}")
@@ -430,7 +431,7 @@ class YahooData(DataSourceBacktesting):
         )
 
     def get_historical_prices(
-        self, asset, length, timestep="", timeshift=None, quote=None, exchange=None, include_after_hours=True
+        self, asset, length, timestep="", timeshift=None, quote=None, exchange=None, include_after_hours=True, **kwargs
     ):
         """Get bars for a given asset"""
         if isinstance(asset, str):

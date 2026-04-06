@@ -1,7 +1,6 @@
 import os
 from datetime import datetime
 from dotenv import load_dotenv
-from lumibot.backtesting import Backtest
 from lumibot.example_strategies.india_ai_momentum import IndiaAIMomentum
 from lumibot.data_sources.dhan_data import DhanData
 from lumibot.brokers import Dhan
@@ -18,18 +17,15 @@ ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
 backtesting_start = datetime(2025, 1, 1)
 backtesting_end = datetime(2025, 4, 1)
 
-# 4. Setup Local Dhan Data with YF Fallback for NSE
-data_source = DhanData(
-    client_id=CLIENT_ID,
-    access_token=ACCESS_TOKEN,
-    use_yfinance_historical=True
-)
-
-# 5. Execute Backtest
+# 4. Execute Backtest
 IndiaAIMomentum.backtest(
-    data_source,
+    DhanData,
     backtesting_start,
     backtesting_end,
+    # Source initialization parameters
+    client_id=CLIENT_ID,
+    access_token=ACCESS_TOKEN,
+    use_yfinance_historical=True,
     # Parameters for strategy
     symbol="RELIANCE",
     quantity=10,

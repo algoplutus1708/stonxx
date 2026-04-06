@@ -158,7 +158,7 @@ class YahooHelper:
         return df
 
     @staticmethod
-    def process_df(df, asset_info=None):
+    def process_df(df, symbol=None):
         df = df.dropna().copy()
 
         # If the df is empty, return it
@@ -168,10 +168,18 @@ class YahooHelper:
         # Ensure data is sorted by index before any other processing
         df.sort_index(inplace=True)
 
+        # Detect target timezone
+        target_tz = LUMIBOT_DEFAULT_PYTZ
+        if symbol:
+            symbol_upper = symbol.upper()
+            if symbol_upper.endswith(".NS") or symbol_upper.endswith(".BO"):
+                import pytz
+                target_tz = pytz.timezone("Asia/Kolkata")
+
         if df.index.tzinfo is None:
-            df.index = pd.to_datetime(df.index).tz_localize(LUMIBOT_DEFAULT_PYTZ)
+            df.index = pd.to_datetime(df.index).tz_localize(target_tz)
         else:
-            df.index = df.index.tz_convert(LUMIBOT_DEFAULT_PYTZ)
+            df.index = df.index.tz_convert(target_tz)
 
         return df
 
@@ -195,6 +203,15 @@ class YahooHelper:
                 "error": True,
                 "info": None,
             }
+
+        # Inject Indian market session logic if it's an NSE/BSE symbol
+        symbol_upper = symbol.upper()
+        if symbol_upper.endswith(".NS") or symbol_upper.endswith(".BO"):
+            if info is None:
+                info = {}
+            info["exchangeTimezoneName"] = "Asia/Kolkata"
+            info["marketCloseTime"] = "15:30"
+            info["marketOpenTime"] = "09:15"
 
         return {
             "ticker": ticker.ticker,

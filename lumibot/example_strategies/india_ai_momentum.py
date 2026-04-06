@@ -12,7 +12,7 @@ class IndiaAIMomentum(Strategy):
     def initialize(self, symbol="RELIANCE", quantity=1):
         self.symbol = symbol
         self.quantity = quantity
-        self.sleeptime = "1 minute"
+        self.sleeptime = 60
         self.target_asset = Asset(symbol=symbol, asset_type="stock")
         
         # Indian Market Hours (9:15 AM - 3:30 PM IST)
