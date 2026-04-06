@@ -3496,3 +3496,37 @@ class OptionsHelper:
     # ============================================================
     # End of OptionsHelper Component
     # ============================================================
+
+
+import datetime
+
+class NSEOptionsHelper:
+    @staticmethod
+    def get_next_expiry(symbol: str, current_date: datetime.date) -> datetime.date:
+        """
+        Overrides US expiry logic with NSE staggered weekly expiries.
+        Note: This is a basic mapping and does not account for exchange holidays.
+        """
+        base_symbol = symbol.upper().split("_")[0] # Assumes format NIFTY_230406C17000
+        
+        # NSE Weekly Expiry Mapping
+        # 0 = Monday, 1 = Tuesday, 2 = Wednesday, 3 = Thursday, 4 = Friday
+        expiry_days = {
+            "MIDCPNIFTY": 0,
+            "FINNIFTY": 1,
+            "BANKNIFTY": 2,
+            "NIFTY": 3,
+            "SENSEX": 4 # BSE
+        }
+        
+        # Default to Thursday for equities if not found in index map
+        target_weekday = expiry_days.get(base_symbol, 3)
+        
+        days_ahead = target_weekday - current_date.weekday()
+        
+        # If the day has already passed this week, roll to next week
+        if days_ahead < 0:
+            days_ahead += 7
+            
+        next_expiry = current_date + datetime.timedelta(days=days_ahead)
+        return next_expiry
