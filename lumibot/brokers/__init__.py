@@ -9,3 +9,4 @@ from .projectx import ProjectX
 from .schwab import Schwab
 from .tradier import Tradier
 from .tradovate import Tradovate
+from .dhan import Dhan

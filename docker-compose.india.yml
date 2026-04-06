@@ -1,0 +1,13 @@
+services:
+  lumibot-india:
+    build:
+      context: .
+      dockerfile: Dockerfile.india
+    container_name: lumibot-india-service
+    volumes:
+      - .:/app
+      - .env.india:/app/.env.india
+      - .secrets:/app/.secrets
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
