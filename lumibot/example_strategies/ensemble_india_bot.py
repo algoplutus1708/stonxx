@@ -171,15 +171,20 @@ class EnsembleTrader(Strategy):
                 self.halt_trading = True
                 return
 
-        # Define the asset we are trading
-        asset = Asset(symbol="RELIANCE.NS", asset_type="stock")
+        # Iterate through the universe
+        for symbol in self.universe:
+            asset = Asset(symbol=symbol, asset_type="stock" if ".NS" in symbol or ".BO" in symbol else "index")
 
-        # Get ML prediction
-        ml_signal = self._get_ml_prediction(asset)
+            # Get ML prediction
+            ml_signal = self._get_ml_prediction(asset)
 
-        # The Ensemble Logic
-        if ml_signal == 1:
-            if self.daily_macro_bias == "BULLISH":
+            # The Ensemble Logic
+            # In backtest we allow Neutral bias, in live we require Bullish
+            is_bullish = self.daily_macro_bias == "BULLISH"
+            if self.is_backtesting and self.daily_macro_bias == "NEUTRAL":
+                is_bullish = True
+
+            if ml_signal == 1 and is_bullish:
                 # Check if we already have an open position
                 position = self.get_position(asset)
                 
@@ -226,10 +231,10 @@ if __name__ == '__main__':
 
     # 1. Define the backtesting window
     backtest_start = datetime(2025, 1, 1)
-    backtest_end = datetime(2025, 3, 31)
+    backtest_end = datetime(2025, 12, 31)
 
     # 2. Path to local CSV data (as requested)
-    csv_path = "data/nifty_15m.csv"
+    csv_path = "data/NIFTY 50_15minute.csv"
 
     # 3. Handle Data Source logic
     # LumiBot's .backtest() takes the CLASS and initializes it internally.
@@ -257,7 +262,8 @@ if __name__ == '__main__':
         pandas_data=pandas_data,
         show_plot=True,
         show_tearsheet=True,
-        save_logfile=True
+        save_logfile=True,
+        universe=["NIFTY"] # Use the symbol that matches our CSV
     )
     
     print("Backtest Run Completed!")
