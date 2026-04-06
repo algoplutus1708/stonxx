@@ -95,3 +95,5 @@ context*.json
 
 # Local scratch / diagnostics (never commit)
 tmp/
+
+dataset/
