@@ -21,6 +21,13 @@ class EnsembleTrader(Strategy):
         # Trade on hourly candles to avoid minute-level noise
         self.sleeptime = "1H"
         
+        # Load the universe from parameters
+        # Default to a core set of NIFTY 50 liquid stocks if not provided
+        self.universe = self.parameters.get(
+            "universe", 
+            ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS"]
+        )
+        
         # Load the pre-trained machine learning model
         try:
             self.model = joblib.load("nifty_xgb_model.joblib")
@@ -100,8 +107,8 @@ class EnsembleTrader(Strategy):
             self.log_message("Cannot predict; model is not loaded.", color="red")
             return 0
 
-        # Fetch the last 50 hourly bars
-        bars = self.get_historical_prices(asset, 50, "day")
+        # Fetch the last 50 bars based on current timestep
+        bars = self.get_historical_prices(asset, 50, self.sleeptime)
         if bars is None or len(bars.df) < 35:
             self.log_message(f"Not enough data to calculate features for {asset.symbol}", color="yellow")
             return 0
