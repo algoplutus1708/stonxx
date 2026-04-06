@@ -39,6 +39,7 @@ lumiwealth_tradier
 /ThetaTerminal.jar
 !lumibot/resources/ThetaTerminal.jar
 pytest.ini
+dataset
 
 # Pypi deployment
 build
