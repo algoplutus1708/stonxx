@@ -58,6 +58,9 @@ my_dev
 data/SRNE_Minute.csv
 .vscode/**
 *.tmp
+# Project specific
+.env.india
+.secrets/*.env
 .env
 token.json
 schwab_token.json
