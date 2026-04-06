@@ -101,7 +101,7 @@ class EnsembleTrader(Strategy):
             return 0
 
         # Fetch the last 50 hourly bars
-        bars = self.get_historical_prices(asset, 50, "hour")
+        bars = self.get_historical_prices(asset, 50, "day")
         if bars is None or len(bars.df) < 35:
             self.log_message(f"Not enough data to calculate features for {asset.symbol}", color="yellow")
             return 0
@@ -172,7 +172,7 @@ class EnsembleTrader(Strategy):
                 return
 
         # Define the asset we are trading
-        asset = Asset(symbol="NIFTY", asset_type="stock")
+        asset = Asset(symbol="RELIANCE.NS", asset_type="stock")
 
         # Get ML prediction
         ml_signal = self._get_ml_prediction(asset)
@@ -185,7 +185,7 @@ class EnsembleTrader(Strategy):
                 
                 if position is None or position.quantity == 0:
                     # Calculate the current ATR value from historical data
-                    bars = self.get_historical_prices(asset, 20, "hour")
+                    bars = self.get_historical_prices(asset, 20, "day")
                     if bars is not None and len(bars.df) >= 15:
                         df = bars.df.copy()
                         df.ta.atr(length=14, append=True)
@@ -215,3 +215,49 @@ class EnsembleTrader(Strategy):
                         self.log_message("Insufficient data to calculate ATR. Skipping.", color="yellow")
             else:
                 self.log_message("ML Signal triggered BUY, but vetoed by Gemini macro bias.", color="yellow")
+
+if __name__ == '__main__':
+    from datetime import datetime
+    import os
+    import pandas as pd
+    from lumibot.backtesting import YahooDataBacktesting
+    from lumibot.data_sources import PandasData
+    from lumibot.entities import Asset
+
+    # 1. Define the backtesting window
+    backtest_start = datetime(2025, 1, 1)
+    backtest_end = datetime(2025, 3, 31)
+
+    # 2. Path to local CSV data (as requested)
+    csv_path = "data/nifty_15m.csv"
+
+    # 3. Handle Data Source logic
+    # LumiBot's .backtest() takes the CLASS and initializes it internally.
+    datasource_class = YahooDataBacktesting
+    pandas_data = None
+
+    if os.path.exists(csv_path):
+        print(f"Using local CSV data from: {csv_path}")
+        datasource_class = PandasData
+        # PandasData expects a DataFrame in the 'pandas_data' parameter
+        pandas_data = pd.read_csv(csv_path)
+    else:
+        print(f"Local CSV {csv_path} not found. Falling back to Yahoo Finance for backtesting.")
+
+    print("Starting Ensemble AI Backtest...")
+    
+    # 5. Run the backtest and print the tearsheet/statistics
+    # We pass the class (datasource_class) and if it's Pandas, we pass the data.
+    EnsembleTrader.backtest(
+        datasource_class,
+        backtesting_start=backtest_start,
+        backtesting_end=backtest_end,
+        budget=2500000,  # ₹25,00,000 starting balance
+        quote_asset=Asset(symbol="INR", asset_type="forex"),
+        pandas_data=pandas_data,
+        show_plot=True,
+        show_tearsheet=True,
+        save_logfile=True
+    )
+    
+    print("Backtest Run Completed!")

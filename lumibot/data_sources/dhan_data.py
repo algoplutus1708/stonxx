@@ -468,7 +468,7 @@ class DhanData(DataSourceBacktesting):
     # Live quotes (always via Dhan)
     # ------------------------------------------------------------------
 
-    def get_quote(self, asset) -> Optional[dict]:
+    def get_quote(self, asset, **kwargs) -> Optional[dict]:
         """
         Fetch the current OHLC quote from Dhan for *asset*.
 
@@ -600,7 +600,7 @@ class DhanData(DataSourceBacktesting):
     # Options / chains (not supported)
     # ------------------------------------------------------------------
 
-    def get_chains(self, asset: Asset, quote: Asset = None, exchange: str = None):
+    def get_chains(self, asset: Asset, quote: Asset = None, exchange: str = None, **kwargs):
         """
         Option chain data is not implemented for DhanData.
 
@@ -613,7 +613,7 @@ class DhanData(DataSourceBacktesting):
             "Implement a Dhan instrument-master lookup to enable this feature."
         )
 
-    def get_strikes(self, asset: Asset):
+    def get_strikes(self, asset: Asset, **kwargs):
         raise NotImplementedError(
             "DhanData does not yet support strike fetching.  "
             "See get_chains() for details."

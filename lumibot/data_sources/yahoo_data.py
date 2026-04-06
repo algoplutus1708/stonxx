@@ -232,8 +232,7 @@ class YahooData(DataSourceBacktesting):
                         sym,
                         interval=interval,
                         auto_adjust=self.auto_adjust,
-                        last_needed_datetime=self.datetime_end, 
-                        symbol=sym, # Pass the symbol for timezone detection
+                        last_needed_datetime=self.datetime_end,
                     )
                     if data is not None and data.shape[0] > 0:
                         logger.info(f"Successfully fetched data for symbol: {sym}")

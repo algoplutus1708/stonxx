@@ -1,88 +1,80 @@
 """
-run_ensemble_live.py
-====================
-Live trading runner specifically designed for the AI/ML Ensemble trader.
-This connects your Dhan API to the EnsembleTrader strategy to execute
-trades in real time.
+Ensemble AI Trading Agent - Live Execution Runner
+--------------------------------------------------
+This script initializes the Ensemble AI strategy with live Dhan broker 
+connectivity for the Indian Stock Market (NSE/BSE).
+
+Prerequisites:
+1. Ensure .env.india is populated with:
+   - DHAN_CLIENT_ID
+   - DHAN_ACCESS_TOKEN
+   - GOOGLE_API_KEY
+2. Ensure nifty_xgb_model.joblib is present in the root directory.
 """
 
 import os
-import sys
 from dotenv import load_dotenv
-
-# Load credentials
-load_dotenv(".env.india")
-load_dotenv(".secrets/lumi_secrets.env")
-
-# Ensure required libraries are imported
 from lumibot.brokers import Dhan
-from lumibot.data_sources.dhan_data import DhanData
+from lumibot.data_sources import DhanData
+from lumibot.strategies.strategy import Strategy
+from lumibot.entities import Asset
 from lumibot.example_strategies.ensemble_india_bot import EnsembleTrader
-from lumibot.traders import Trader
 
-def run_live():
-    print("\n" + "="*60)
-    print("🚀 Running AI/ML Ensemble Live on Dhan (Indian Equities)")
-    print("="*60)
-
-    # 1. Fetch Environment Variables
-    CLIENT_ID    = os.getenv("DHAN_CLIENT_ID")
-    ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-    GEMINI_KEY   = os.getenv("GEMINI_API_KEY")
-
-    # 2. Safety Guards
-    missing = []
-    if not CLIENT_ID:    missing.append("DHAN_CLIENT_ID")
-    if not ACCESS_TOKEN: missing.append("DHAN_ACCESS_TOKEN")
-    
-    if missing:
-        print(f"[ERROR] Missing required broker credentials: {', '.join(missing)}")
-        print("Please add them to your .env.india file before running live.\n")
-        sys.exit(1)
-
-    if not GEMINI_KEY:
-        print("[WARNING] GEMINI_API_KEY is missing. Gemini macro veto logic will NOT function.")
+def main():
+    # 1. Load environment variables from .env.india
+    env_path = ".env.india"
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+        print(f"Loaded credentials from {env_path}")
     else:
-        print("[OK] Gemini AI integrated for daily risk management.")
+        print(f"CRITICAL: {env_path} not found. Please create it from the template.")
+        return
 
-    if not os.path.exists("nifty_xgb_model.joblib"):
-        print("[CRITICAL ERROR] nifty_xgb_model.joblib is missing!")
-        print("You cannot trade live without the compiled machine learning model. Exiting.")
-        sys.exit(1)
-
-    # 3. Component Setup
-    print("\nInitializing Dhan Data Source and Broker...")
+    # 2. Extract credentials
+    client_id = os.getenv("DHAN_CLIENT_ID")
+    access_token = os.getenv("DHAN_ACCESS_TOKEN")
     
+    if not client_id or not access_token:
+        print("CRITICAL: Missing DHAN_CLIENT_ID or DHAN_ACCESS_TOKEN in environment.")
+        return
+
+    # 3. Initialize the Data Source (Live DhanData)
+    # By default, use_yfinance_historical=True for cost optimization
     data_source = DhanData(
-        client_id=CLIENT_ID,
-        access_token=ACCESS_TOKEN,
-        use_yfinance_historical=True,  # Backwards fallback for historical bars
-        default_exchange="NSE",
+        client_id=client_id,
+        access_token=access_token,
+        use_yfinance_historical=True
     )
 
+    # 4. Initialize the Broker (Live Dhan)
+    # default_product_type="INTRA" (MIS) for intraday trading
     broker = Dhan(
-        client_id=CLIENT_ID,
-        access_token=ACCESS_TOKEN,
-        default_product_type="MIS",    # Strongly relying on MIS for algorithmic discipline
-        data_source=data_source,
+        client_id=client_id,
+        access_token=access_token,
+        default_product_type="INTRA",
+        data_source=data_source
     )
 
-    # 4. Strategy Initialization
-    print("Mounting EnsembleTrader Strategy...")
+    # 5. Initialize the Strategy
+    # We use a default budget of ₹25,00,000 for position sizing (mock balance for live logic)
     strategy = EnsembleTrader(
         broker=broker,
-        parameters={},
+        data_source=data_source,
+        budget=2500000,
+        quote_asset=Asset(symbol="INR", asset_type="forex")
     )
 
-    # 5. Connect and Execute
-    trader = Trader()
-    trader.add_strategy(strategy)
-
+    # 6. Run the strategy live
+    print("Starting Ensemble AI Agent in LIVE mode...")
+    print("Market Hours: 09:15 - 15:30 IST (Mon-Fri)")
+    
     try:
-        print("\n🟢 Connecting to live exchange... Press Ctrl+C to abort.")
-        trader.run_all()
+        # run_live() handles the main execution loop
+        strategy.run_live()
     except KeyboardInterrupt:
-        print("\n🛑 Live session safely aborted by user.")
+        print("\nShutdown signal received. Closing connections...")
+    except Exception as e:
+        print(f"CRITICAL ERROR: {e}")
 
 if __name__ == "__main__":
-    run_live()
+    main()

@@ -344,7 +344,7 @@ class YahooHelper:
                     df.index = df.index.map(lambda t: t.replace(hour=23, minute=59))
 
         # Finally, run any custom DataFrame processing
-        df = YahooHelper.process_df(df, asset_info=info)
+        df = YahooHelper.process_df(df, symbol=symbol)
         return df
 
     @staticmethod
