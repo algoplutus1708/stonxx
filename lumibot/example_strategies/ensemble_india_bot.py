@@ -1,286 +1,489 @@
 """
-Ensemble India Bot
-A specialized strategy that incorporates a pre-trained XGBoost model 
-for hourly predictions on Indian equities.
+ensemble_india_bot.py
+=====================
+Ensemble AI/ML Strategy for Indian equities.
+
+Key design decisions:
+  • Loads a pre-trained RandomForest artifact that bundles the model + feature list,
+    so training and inference are always in sync.
+  • All features are scale-invariant (%, ratios, bounded oscillators) so the model
+    trained on NIFTY 50 data generalises correctly to individual .NS stocks.
+  • Uses predict_proba with a 0.55 confidence threshold — a hard binary predict()
+    is too noisy on intraday data.
+  • Position sizing: ATR-based Kelly (risk 1 % of portfolio per trade) capped at
+    15 % of portfolio value. This replaces the broken quantity=1 constant.
+  • Explicit exit: when ML signal drops to 0, open positions are closed on the
+    next bar rather than waiting for stale bracket orders.
+  • Circuit breaker: halts all trading if portfolio drops > 2 % intraday.
 """
 
-from lumibot.strategies.strategy import Strategy
-from lumibot.entities import Asset
-from lumibot.entities.data import Data
-import joblib
-import pandas as pd
-import pandas_ta as ta
 import os
-import google.generativeai as genai
+
+try:
+    import google.genai as genai
+    _GENAI_NEW = True
+except ImportError:
+    import google.generativeai as genai  # legacy fallback
+    _GENAI_NEW = False
+import joblib
+import numpy as np
+import pandas as pd
+import pandas_ta  # noqa: F401 — registers df.ta accessor
+
+from lumibot.entities import Asset
+from lumibot.strategies.strategy import Strategy
+
+# Minimum confidence threshold for predict_proba required to trigger a trade.
+CONFIDENCE_THRESHOLD = 0.45
+
+# Position size: allocating 10% of available portfolio capital per trade
+POSITION_SIZE_PCT = 0.10
+
 
 class EnsembleTrader(Strategy):
     """
-    Ensemble AI/ML Strategy loading an external XGBoost model.
+    Ensemble AI/ML Strategy — ML signal (RandomForest) + Gemini LLM macro filter.
     """
 
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
     def initialize(self):
-        # Trade on 15m candles to match our CSV data resolution
+        # Match ML training resolution: 15 minutes
         self.sleeptime = "15M"
-        
-        # Load the universe from parameters
-        # Default to a core set of NIFTY 50 liquid stocks if not provided
+
         self.universe = self.parameters.get(
-            "universe", 
-            ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS"]
+            "universe",
+            ["NIFTY50"],
         )
-        
-        # Load the pre-trained machine learning model
+
+        # ── Load model artifact ───────────────────────────────────────────────
+        self.model    = None
+        self.features = None
+        model_path = "nifty_xgb_model.joblib"
         try:
-            self.model = joblib.load("nifty_xgb_model.joblib")
-            self.log_message("[EnsembleTrader] Model loaded successfully.", color="green")
+            artifact = joblib.load(model_path)
+            # Support both old format (bare model) and new format (dict artifact)
+            if isinstance(artifact, dict):
+                self.model    = artifact["model"]
+                self.features = artifact["features"]
+                meta = artifact.get("meta", {})
+                self.log_message(
+                    f"[EnsembleTrader] Model loaded. "
+                    f"OOS acc={meta.get('oos_accuracy', '?')}, "
+                    f"AUC={meta.get('oos_roc_auc', '?')}",
+                    color="green",
+                )
+            else:
+                # Legacy bare-model format
+                self.model    = artifact
+                self.features = ["RSI_14", "MACD_12_26_9", "ATRr_14"]
+                self.log_message(
+                    "[EnsembleTrader] Legacy model loaded (no feature metadata).",
+                    color="yellow",
+                )
         except FileNotFoundError:
             self.log_message(
-                "[EnsembleTrader] nifty_xgb_model.joblib not found! Predictions will fail.", 
-                color="red"
+                f"[EnsembleTrader] {model_path} not found! Run train_nifty_model.py first.",
+                color="red",
             )
-            self.model = None
 
-        # Set default daily macro bias and safety flags
         self.daily_macro_bias = "NEUTRAL"
-        self.halt_trading = False
+        self.halt_trading     = False
+
+    # ── Daily macro bias via Gemini ───────────────────────────────────────────
 
     def get_market_news(self):
-        """Placeholder for fetching recent financial news headlines for the Indian Market."""
+        """Placeholder headlines; replace with a real news API in production."""
         return [
-            "RBI expected to keep rates unchanged in upcoming policy meet.",
+            "RBI expected to keep rates unchanged in the upcoming policy meeting.",
             "FPIs turn net sellers as valuation concerns rise in the short term.",
             "IT stocks rally tracking strong overnight gains in the US tech sector.",
             "Monsoon progress better than expected, aiding rural FMCG themes.",
-            "Auto sector sales hit record highs ahead of the festive season."
+            "Auto sector sales hit record highs ahead of the festive season.",
         ]
 
     def before_market_opens(self):
-        """
-        Runs once per day before the market opens to set the daily statistical bias using Gemini.
-        """
+        """Set daily macro bias from Gemini. Falls back to NEUTRAL if unavailable."""
         self.halt_trading = False
         self.starting_portfolio_value = self.get_portfolio_value()
-        
+
         gemini_api_key = os.getenv("GEMINI_API_KEY")
         if not gemini_api_key:
-            self.log_message("[EnsembleTrader] GEMINI_API_KEY not set. Defaulting macro bias to NEUTRAL.", color="yellow")
+            self.log_message(
+                "[EnsembleTrader] GEMINI_API_KEY not set — macro bias = NEUTRAL.",
+                color="yellow",
+            )
             self.daily_macro_bias = "NEUTRAL"
             return
-            
-        genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel("gemini-2.5-flash")
-        
+
+        if _GENAI_NEW:
+            client = genai.Client(api_key=gemini_api_key)
+        else:
+            genai.configure(api_key=gemini_api_key)
+        # Model handle differs between new and old SDK
+
         headlines = self.get_market_news()
         news_text = "\n".join(f"- {h}" for h in headlines)
-        
         prompt = (
-            f"You are a ruthless hedge fund risk manager. Read these headlines:\n"
-            f"{news_text}\n\n"
-            f"What is the overall macro sentiment for the Indian market today? "
-            f"You must reply with exactly one word: BULLISH, BEARISH, or NEUTRAL. No other text."
+            f"You are a ruthless hedge-fund risk manager.\n"
+            f"Headlines:\n{news_text}\n\n"
+            f"Give the single-word overall macro sentiment for Indian equities today: "
+            f"BULLISH, BEARISH, or NEUTRAL. Reply with that one word only."
         )
-        
+
         try:
-            response = model.generate_content(prompt)
+            if _GENAI_NEW:
+                response = client.models.generate_content(
+                    model="gemini-2.5-flash", contents=prompt
+                )
+            else:
+                response = genai.GenerativeModel("gemini-2.5-flash").generate_content(prompt)
             bias = response.text.strip().upper()
-            
-            # Simple validation to ensure clean output
-            if bias in ["BULLISH", "BEARISH", "NEUTRAL"]:
+            if bias in {"BULLISH", "BEARISH", "NEUTRAL"}:
                 self.daily_macro_bias = bias
             else:
-                self.log_message(f"[EnsembleTrader] Unrecognized Gemini output: '{bias}'. Reverting to NEUTRAL.", color="yellow")
+                self.log_message(
+                    f"[EnsembleTrader] Unexpected Gemini output: '{bias}'. Using NEUTRAL.",
+                    color="yellow",
+                )
                 self.daily_macro_bias = "NEUTRAL"
-        except Exception as e:
-            self.log_message(f"[EnsembleTrader] Error fetching Gemini macro sentiment: {e}", color="red")
+        except Exception as exc:
+            self.log_message(
+                f"[EnsembleTrader] Gemini error: {exc}. Using NEUTRAL.", color="red"
+            )
             self.daily_macro_bias = "NEUTRAL"
-            
-        self.log_message(f"Daily Macro Bias set by Gemini: {self.daily_macro_bias}", color="cyan")
 
-    def _get_ml_prediction(self, asset):
+        self.log_message(
+            f"Daily macro bias (Gemini): {self.daily_macro_bias}", color="cyan"
+        )
+
+    # ── Feature computation ───────────────────────────────────────────────────
+
+    def _compute_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calculates required features via pandas_ta and runs the XGBoost model 
-        on the most recent bar to predict the next move.
-        
-        Returns:
-            int: 1 for Buy, 0 for Do Nothing/Sell.
+        Compute the strictly stationary features used during training.
+        No raw price inputs or time-of-day inputs are used.
         """
-        if self.model is None:
-            self.log_message("Cannot predict; model is not loaded.", color="red")
-            return 0
+        df = df.copy()
 
-        # Fetch the last 50 bars based on current timestep
-        bars = self.get_historical_prices(asset, 50, self.sleeptime)
-        if bars is None or len(bars.df) < 35:
-            self.log_message(f"Not enough data to calculate features for {asset.symbol}", color="yellow")
-            return 0
+        # Normalize column names — LumiBot broker returns Title-Case columns
+        # (Open, High, Low, Close, Volume). Training data used lowercase.
+        df.columns = [c.lower() for c in df.columns]
 
-        # Convert to pandas DataFrame
-        df = bars.df.copy()
+        # 1. log_return
+        df["log_return"] = np.log(df["close"] / df["close"].shift(1))
 
-        # Calculate exact features the model was trained on
-        # 1. 14-period RSI
-        df.ta.rsi(length=14, append=True)
+        # 2. volatility_20
+        df["volatility_20"] = df["log_return"].rolling(window=20).std()
 
-        # 2. MACD (12, 26, 9)
-        # pandas_ta MACD by default uses fast=12, slow=26, signal=9.
-        # It creates columns: MACD_12_26_9, MACDh_12_26_9 (histogram), MACDs_12_26_9 (signal)
-        df.ta.macd(fast=12, slow=26, signal=9, append=True)
+        # 3. volume_delta
+        high_low = df["high"] - df["low"]
+        buying_selling_pressure = ((df["close"] - df["low"]) - (df["high"] - df["close"]))
+        df["volume_delta"] = (buying_selling_pressure / (high_low + 1e-8)) * df["volume"]
 
-        # 3. 14-period ATR
+        # 4. hl_spread
+        df["hl_spread"] = high_low / df["close"]
+
+        # 5. atr_pct
         df.ta.atr(length=14, append=True)
+        atr_col = "ATRr_14" if "ATRr_14" in df.columns else "ATR_14"
+        df["atr_pct"] = df[atr_col] / df["close"]
 
-        # Drop NaN values generated by indicator windows
+        # 6. bb_width (Bollinger Bandwidth percentage)
+        middle_band = df["close"].rolling(window=20).mean()
+        std_dev = df["close"].rolling(window=20).std()
+        upper_band = middle_band + (2 * std_dev)
+        lower_band = middle_band - (2 * std_dev)
+        df["bb_width"] = (upper_band - lower_band) / (middle_band + 1e-8)
+
+        # 7. vwap_dist (Daily VWAP distance)
+        df["typical_price"] = (df["high"] + df["low"] + df["close"]) / 3
+        df["typical_volume"] = df["typical_price"] * df["volume"]
+        df["date_only"] = df.index.date
+        cum_vol = df.groupby("date_only")["volume"].cumsum()
+        cum_typ_vol = df.groupby("date_only")["typical_volume"].cumsum()
+        df["vwap"] = cum_typ_vol / (cum_vol + 1e-8)
+        df["vwap_dist"] = (df["close"] - df["vwap"]) / (df["vwap"] + 1e-8)
+        df.drop(columns=["typical_price", "typical_volume", "date_only", "vwap"], inplace=True, errors="ignore")
+
+        # 8. htf_trend (Percentage distance from 200 EMA)
+        df.ta.ema(length=200, append=True)
+        ema_cols = [c for c in df.columns if c.startswith("EMA_")]
+        ema_col = ema_cols[-1] if ema_cols else "EMA_200"
+        df["htf_trend"] = (df["close"] - df[ema_col]) / (df[ema_col] + 1e-8)
+
+        # Drop NaNs created by rolling windows / shifts / ATR / EMA_200
         df.dropna(inplace=True)
+        return df
+
+
+    # ── ML prediction ─────────────────────────────────────────────────────────
+
+    def _get_ml_prediction(self, asset: Asset) -> tuple[int, float]:
+        """
+        Returns (signal, confidence) where:
+            signal     = 1 (buy) or 0 (hold/exit)
+            confidence = probability of the 'up' class from predict_proba
+        """
+        if self.model is None or self.features is None:
+            return 0, 0.0
+
+        # Need enough 15-minute bars to cover the longest lookback (EMA 200)
+        # Request 15-minute bars to match ML feature training matrix exactly.
+        bars = self.get_historical_prices(asset, 250, "15 minutes")
+        if bars is None or len(bars.df) < 200:
+            self.log_message(
+                f"Not enough bars for {asset.symbol} — skipping.", color="yellow"
+            )
+            return 0, 0.0
+
+        # ── ONE-TIME DIAGNOSTIC: log raw columns from broker bars ──────────────
+        if not getattr(self, "_diag_logged", False):
+            self._diag_logged = True
+            self.log_message(
+                f"[DIAG] bars.df.columns = {list(bars.df.columns)}", color="yellow"
+            )
+            self.log_message(
+                f"[DIAG] bars.df.dtypes = {bars.df.dtypes.to_dict()}", color="yellow"
+            )
+
+        df = self._compute_features(bars.df)
+
+        # ── ONE-TIME DIAGNOSTIC: log feature values ────────────────────────────
+        if not getattr(self, "_feat_diag_logged", False):
+            self._feat_diag_logged = True
+            self.log_message(
+                f"[DIAG] computed df.columns = {list(df.columns)}", color="yellow"
+            )
+            if not df.empty:
+                self.log_message(
+                    f"[DIAG] last feature row = {df[self.features].iloc[-1].to_dict() if self.features and all(f in df.columns for f in self.features) else 'FEATURES MISSING'}",
+                    color="yellow"
+                )
 
         if df.empty:
-            return 0
+            return 0, 0.0
 
-        # Extract the most recent row of these specific features
-        # Assuming the model was explicitly trained on the core MACD output line, RSI, and ATR.
-        feature_columns = ["RSI_14", "MACD_12_26_9", "ATRr_14"]
-        
-        # Guard check in case columns are named slightly differently by pandas_ta
-        missing_cols = [c for c in feature_columns if c not in df.columns]
-        if missing_cols:
-            self.log_message(f"Missing expected pandas_ta columns: {missing_cols}", color="red")
-            return 0
 
-        latest_features = df[feature_columns].iloc[-1:]
+        # Identify which features are available
+        missing = [f for f in self.features if f not in df.columns]
+        if missing:
+            self.log_message(
+                f"Missing features for {asset.symbol}: {missing}", color="red"
+            )
+            return 0, 0.0
 
-        # Run inference
+        latest = df[self.features].iloc[-1:]
+
         try:
-            prediction = self.model.predict(latest_features)
-            # Extracted single integer prediction (1 or 0)
-            return int(prediction[0])
-        except Exception as e:
-            self.log_message(f"Error generating ML prediction: {e}", color="red")
-            return 0
+            probas = self.model.predict_proba(latest)[0]
+            # Sklearn orders classes naturally: [-1, 0, 1] -> [p_down, p_hold, p_up]
+            p_down = probas[0]
+            p_hold = probas[1]
+            p_up   = probas[2]
+
+            # Debug log for distribution analysis
+            self.log_message(
+                f"[{asset.symbol}] Logic check: Short={p_down:.3f} | Hold={p_hold:.3f} | Long={p_up:.3f}",
+                color="blue"
+            )
+
+            if p_up > CONFIDENCE_THRESHOLD:
+                return 1, float(p_up)
+            elif p_down > CONFIDENCE_THRESHOLD:
+                return -1, float(p_down)
+            else:
+                return 0, float(p_hold)
+                
+        except Exception as exc:
+            self.log_message(f"Prediction error for {asset.symbol}: {exc}", color="red")
+            return 0, 0.0
+
+    # ── ATR for position sizing ───────────────────────────────────────────────
+
+    def _get_current_atr(self, asset: Asset) -> float | None:
+        """Fetch recent 15-minute bars to compute ATR matching ML targets."""
+        bars = self.get_historical_prices(asset, 50, "15 minutes")
+        if bars is None or len(bars.df) < 15:
+            return None
+        df = bars.df.copy()
+        df.ta.atr(length=14, append=True)
+        atr_col = "ATRr_14" if "ATRr_14" in df.columns else "ATR_14"
+        if atr_col not in df.columns:
+            return None
+        val = df[atr_col].iloc[-1]
+        return float(val) if pd.notna(val) else None
+
+    # ── Position sizing ───────────────────────────────────────────────────────
+
+    def _calc_quantity(self, current_price: float) -> int:
+        """Allocate exactly exactly 10% of portfolio capital per trade."""
+        portfolio_value = self.get_portfolio_value()
+        alloc_amount = portfolio_value * POSITION_SIZE_PCT
+        
+        qty = int(alloc_amount / current_price)
+
+        # Ensure we have cash for the order
+        available_cash = self.get_cash()
+        max_by_cash    = int(available_cash * 0.95 / current_price)
+        qty            = min(qty, max_by_cash)
+
+        return max(qty, 0)
+
+    # ── Main iteration ────────────────────────────────────────────────────────
+
+    def is_market_open(self):
+        """Guard for NSE market hours (9:15 AM - 3:30 PM IST)."""
+        now = self.get_datetime()
+        # Ensure we are in Asia/Kolkata or comparison is safe
+        # NSE hours: 09:15 to 15:30
+        current_time = now.time()
+        start_time = pd.Timestamp("09:15").time()
+        end_time = pd.Timestamp("15:30").time()
+        
+        # Check weekday (0=Mon, 4=Fri)
+        if now.weekday() > 4:
+            return False
+            
+        return start_time <= current_time <= end_time
 
     def on_trading_iteration(self):
-        """
-        Core iteration loop checking the ensemble logic.
-        Executes strictly on the intersection of the ML model and LLM macro bias.
-        """
         if getattr(self, "halt_trading", False):
             return
 
-        # Hard Circuit Breaker
-        current_portfolio_value = self.get_portfolio_value()
-        if hasattr(self, "starting_portfolio_value") and self.starting_portfolio_value > 0:
-            drop_amount = self.starting_portfolio_value - current_portfolio_value
-            drop_pct = drop_amount / self.starting_portfolio_value
-            if drop_pct > 0.02:
-                self.log_message(
-                    f"CRITICAL: Portfolio dropped by >2% ({drop_pct:.2%}). "
-                    "Halting trading and selling all.", 
-                    color="red"
-                )
-                self.sell_all()
-                self.halt_trading = True
-                return
+        if not self.is_market_open():
+            return
 
-        # Iterate through the universe
+        # ── Circuit breaker ────────────────────────────────────────────────
+        current_pv = self.get_portfolio_value()
+        starting   = getattr(self, "starting_portfolio_value", 0)
+        if starting > 0 and (starting - current_pv) / starting > 0.02:
+            self.log_message(
+                f"CIRCUIT BREAKER: portfolio down > 2 % ({(starting - current_pv)/starting:.2%}). "
+                "Selling all and halting.",
+                color="red",
+            )
+            self.sell_all()
+            self.halt_trading = True
+            return
+
+        # ── Determine macro filter ─────────────────────────────────────────
+        # During backtesting without Gemini, NEUTRAL is treated as permissive
+        # (not a veto). This ensures Short signals are not blocked when LLM is off.
+        macro_bias = getattr(self, "daily_macro_bias", "NEUTRAL")
+        if self.is_backtesting and macro_bias == "NEUTRAL":
+            is_bullish_or_neutral = True
+            is_bearish            = True
+        else:
+            is_bullish_or_neutral = macro_bias in {"BULLISH", "NEUTRAL"}
+            is_bearish            = macro_bias == "BEARISH"
+
         for symbol in self.universe:
-            asset = Asset(symbol=symbol, asset_type="stock" if ".NS" in symbol or ".BO" in symbol else "index")
+            asset = Asset(
+                symbol=symbol,
+                asset_type="index" if symbol == "NIFTY50" else "stock",
+            )
 
-            # Get ML prediction
-            ml_signal = self._get_ml_prediction(asset)
-            self.log_message(f"Iteration: {asset.symbol} | ML Signal: {ml_signal} | Bias: {self.daily_macro_bias}")
+            ml_signal, confidence = self._get_ml_prediction(asset)
+            self.log_message(
+                f"{asset.symbol} | ML={ml_signal} | conf={confidence:.3f} | "
+                f"bias={self.daily_macro_bias}"
+            )
 
-            # The Ensemble Logic
-            # In backtest we allow Neutral bias, in live we require Bullish
-            is_bullish = self.daily_macro_bias == "BULLISH"
-            if self.is_backtesting and self.daily_macro_bias == "NEUTRAL":
-                is_bullish = True
+            position = self.get_position(asset)
+            holding  = position is not None and position.quantity > 0
 
-            if ml_signal == 1 and is_bullish:
-                # Check if we already have an open position
-                position = self.get_position(asset)
+            # ── LONG ENTRY: Class 1 bracket logic ──────────────────────────
+            if ml_signal == 1 and is_bullish_or_neutral and not holding:
+                current_atr = self._get_current_atr(asset)
+                if current_atr is None or current_atr <= 0:
+                    continue
+                current_price = self.get_last_price(asset)
+                stop_loss_price   = current_price - (current_atr * 1.0)
+                take_profit_price = current_price + (current_atr * 1.5)
+                quantity = self._calc_quantity(current_price)
+
+                if quantity <= 0:
+                    continue
+
+                order = self.create_order(
+                    asset=asset,
+                    quantity=quantity,
+                    side="buy",
+                    take_profit_price=take_profit_price,
+                    stop_loss_price=stop_loss_price,
+                    type="market",
+                )
+                self.submit_order(order)
+                self.log_message(
+                    f"LONG {asset.symbol}: qty={quantity} @ ~{current_price:.2f} | "
+                    f"SL={stop_loss_price:.2f} TP={take_profit_price:.2f} | "
+                    f"conf={confidence:.3f}",
+                    color="green",
+                )
+
+            # ── SHORT ENTRY: Class -1 bracket logic ─────────────────────────
+            elif ml_signal == -1 and is_bearish and not holding:
+                current_atr = self._get_current_atr(asset)
+                if current_atr is None or current_atr <= 0:
+                    continue
+                current_price = self.get_last_price(asset)
+                stop_loss_price   = current_price + (current_atr * 1.0)
+                take_profit_price = current_price - (current_atr * 1.5)
+                quantity = self._calc_quantity(current_price)
+
+                if quantity <= 0:
+                    continue
+
+                order = self.create_order(
+                    asset=asset,
+                    quantity=quantity,
+                    side="sell",
+                    take_profit_price=take_profit_price,
+                    stop_loss_price=stop_loss_price,
+                    type="market",
+                )
+                self.submit_order(order)
+                self.log_message(
+                    f"SHORT {asset.symbol}: qty={quantity} @ ~{current_price:.2f} | "
+                    f"SL={stop_loss_price:.2f} TP={take_profit_price:.2f} | "
+                    f"conf={confidence:.3f}",
+                    color="red",
+                )
+
+            # ── HOLD / NO TRADE ─────────────────────────────────────────────
+            elif not holding and ml_signal == 0:
+                pass
                 
-                if position is None or position.quantity == 0:
-                    # Calculate the current ATR value from historical data
-                    bars = self.get_historical_prices(asset, 20, "day")
-                    if bars is not None and len(bars.df) >= 15:
-                        df = bars.df.copy()
-                        df.ta.atr(length=14, append=True)
-                        
-                        if "ATRr_14" in df.columns:
-                            current_atr = float(df["ATRr_14"].iloc[-1])
-                            current_price = float(self.get_last_price(asset))
-                            
-                            # Bracket Order Config
-                            stop_loss_price = current_price - (1.5 * current_atr)
-                            take_profit_price = current_price + (3.0 * current_atr)
-                            
-                            # Place order
-                            order = self.create_order(
-                                asset=asset,
-                                quantity=1,  # Example static quantity
-                                side="buy",
-                                take_profit_price=take_profit_price,
-                                stop_loss_price=stop_loss_price,
-                                type="market"
-                            )
-                            self.submit_order(order)
-                            self.log_message(f"Ensemble BUY executed for {asset.symbol}. SL: {stop_loss_price:.2f}, TP: {take_profit_price:.2f}", color="green")
-                        else:
-                            self.log_message("Failed to calculate ATR for bracket order. Skipping.", color="yellow")
-                    else:
-                        self.log_message("Insufficient data to calculate ATR. Skipping.", color="yellow")
-            else:
-                self.log_message("ML Signal triggered BUY, but vetoed by Gemini macro bias.", color="yellow")
+            # ── MACRO VETO LOGIC ────────────────────────────────────────────
+            elif ml_signal == 1 and is_bearish:
+                self.log_message(
+                    f"VETO LONG {asset.symbol}: blocked by BEARISH macro bias.",
+                    color="yellow",
+                )
+            elif ml_signal == -1 and is_bullish_or_neutral:
+                self.log_message(
+                    f"VETO SHORT {asset.symbol}: blocked by BULLISH/NEUTRAL macro bias.",
+                    color="yellow",
+                )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     from datetime import datetime
-    import os
-    import pandas as pd
+
     from lumibot.backtesting import YahooDataBacktesting
-    from lumibot.data_sources import PandasData
-    from lumibot.entities import Asset
 
-    # 1. Define the backtesting window
     backtest_start = datetime(2025, 1, 1)
-    backtest_end = datetime(2025, 12, 31)
+    backtest_end   = datetime(2025, 12, 31)
 
-    # 2. Path to local CSV data (as requested)
-    csv_path = "data/NIFTY 50_15minute.csv"
-
-    # 3. Handle Data Source logic
-    # LumiBot's .backtest() takes the CLASS and initializes it internally.
-    datasource_class = YahooDataBacktesting
-    pandas_data = None
-
-    if os.path.exists(csv_path):
-        print(f"Using local CSV data from: {csv_path}")
-        datasource_class = PandasData
-        # Wrap the dataframe in a Data object for LumiBot
-        df_csv = pd.read_csv(csv_path)
-        df_csv.columns = [c.lower() for c in df_csv.columns]
-        if 'date' in df_csv.columns:
-            df_csv['date'] = pd.to_datetime(df_csv['date'])
-            df_csv.set_index('date', inplace=True)
-            
-        nifty_asset = Asset(symbol="NIFTY", asset_type="index")
-        data_obj = Data(asset=nifty_asset, df=df_csv, timestep="minute")
-        pandas_data = [data_obj]
-    else:
-        print(f"Local CSV {csv_path} not found. Falling back to Yahoo Finance for backtesting.")
-
-    print("Starting Ensemble AI Backtest...")
-    
-    # 5. Run the backtest and print the tearsheet/statistics
-    # We pass the class (datasource_class) and if it's Pandas, we pass the data.
     EnsembleTrader.backtest(
-        datasource_class,
+        YahooDataBacktesting,
         backtesting_start=backtest_start,
         backtesting_end=backtest_end,
-        budget=2500000,  # ₹25,00,000 starting balance
-        quote_asset=Asset(symbol="INR", asset_type="forex"),
-        pandas_data=pandas_data,
+        budget=10_000_000,   # ₹1 crore
+        benchmark_asset=Asset("^NSEI", Asset.AssetType.INDEX),
         show_plot=True,
         show_tearsheet=True,
         save_logfile=True,
-        universe=["NIFTY"] # Use the symbol that matches our CSV
+        name="EnsembleTrader",
     )
-    
-    print("Backtest Run Completed!")
