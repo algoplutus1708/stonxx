@@ -6,6 +6,7 @@ for hourly predictions on Indian equities.
 
 from lumibot.strategies.strategy import Strategy
 from lumibot.entities import Asset
+from lumibot.entities.data import Data
 import joblib
 import pandas as pd
 import pandas_ta as ta
@@ -18,8 +19,8 @@ class EnsembleTrader(Strategy):
     """
 
     def initialize(self):
-        # Trade on hourly candles to avoid minute-level noise
-        self.sleeptime = "1H"
+        # Trade on 15m candles to match our CSV data resolution
+        self.sleeptime = "15M"
         
         # Load the universe from parameters
         # Default to a core set of NIFTY 50 liquid stocks if not provided
@@ -184,6 +185,7 @@ class EnsembleTrader(Strategy):
 
             # Get ML prediction
             ml_signal = self._get_ml_prediction(asset)
+            self.log_message(f"Iteration: {asset.symbol} | ML Signal: {ml_signal} | Bias: {self.daily_macro_bias}")
 
             # The Ensemble Logic
             # In backtest we allow Neutral bias, in live we require Bullish
@@ -251,8 +253,16 @@ if __name__ == '__main__':
     if os.path.exists(csv_path):
         print(f"Using local CSV data from: {csv_path}")
         datasource_class = PandasData
-        # PandasData expects a DataFrame in the 'pandas_data' parameter
-        pandas_data = pd.read_csv(csv_path)
+        # Wrap the dataframe in a Data object for LumiBot
+        df_csv = pd.read_csv(csv_path)
+        df_csv.columns = [c.lower() for c in df_csv.columns]
+        if 'date' in df_csv.columns:
+            df_csv['date'] = pd.to_datetime(df_csv['date'])
+            df_csv.set_index('date', inplace=True)
+            
+        nifty_asset = Asset(symbol="NIFTY", asset_type="index")
+        data_obj = Data(asset=nifty_asset, df=df_csv, timestep="minute")
+        pandas_data = [data_obj]
     else:
         print(f"Local CSV {csv_path} not found. Falling back to Yahoo Finance for backtesting.")
 
