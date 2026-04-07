@@ -18,12 +18,16 @@ Key design decisions:
 """
 
 import os
+import csv
+import requests
 
 try:
     import google.genai as genai
+
     _GENAI_NEW = True
 except ImportError:
     import google.generativeai as genai  # legacy fallback
+
     _GENAI_NEW = False
 import joblib
 import numpy as np
@@ -32,6 +36,12 @@ import pandas_ta  # noqa: F401 — registers df.ta accessor
 
 from lumibot.entities import Asset
 from lumibot.strategies.strategy import Strategy
+
+try:
+    from sentiment_engine import SentimentAnalyzer
+except ImportError:
+    SentimentAnalyzer = None
+
 
 # Minimum confidence threshold for predict_proba required to trigger a trade.
 CONFIDENCE_THRESHOLD = 0.45
@@ -57,14 +67,14 @@ class EnsembleTrader(Strategy):
         )
 
         # ── Load model artifact ───────────────────────────────────────────────
-        self.model    = None
+        self.model = None
         self.features = None
         model_path = "nifty_xgb_model.joblib"
         try:
             artifact = joblib.load(model_path)
             # Support both old format (bare model) and new format (dict artifact)
             if isinstance(artifact, dict):
-                self.model    = artifact["model"]
+                self.model = artifact["model"]
                 self.features = artifact["features"]
                 meta = artifact.get("meta", {})
                 self.log_message(
@@ -75,7 +85,7 @@ class EnsembleTrader(Strategy):
                 )
             else:
                 # Legacy bare-model format
-                self.model    = artifact
+                self.model = artifact
                 self.features = ["RSI_14", "MACD_12_26_9", "ATRr_14"]
                 self.log_message(
                     "[EnsembleTrader] Legacy model loaded (no feature metadata).",
@@ -88,7 +98,17 @@ class EnsembleTrader(Strategy):
             )
 
         self.daily_macro_bias = "NEUTRAL"
-        self.halt_trading     = False
+        self.halt_trading = False
+
+        self.IS_PAPER_TRADING = True
+        self.sentiment_engine = SentimentAnalyzer(model_name="llama3.2")
+        self.local_sentiment_score = 0.0
+
+        self.paper_trade_file = "paper_trades.csv"
+        if self.IS_PAPER_TRADING and not os.path.exists(self.paper_trade_file):
+            with open(self.paper_trade_file, mode="w", newline="") as file:
+                writer = csv.writer(file)
+                writer.writerow(["Timestamp", "Asset", "Direction", "Quantity", "Entry", "TakeProfit", "StopLoss"])
 
     # ── Daily macro bias via Gemini ───────────────────────────────────────────
 
@@ -133,9 +153,7 @@ class EnsembleTrader(Strategy):
 
         try:
             if _GENAI_NEW:
-                response = client.models.generate_content(
-                    model="gemini-2.5-flash", contents=prompt
-                )
+                response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
             else:
                 response = genai.GenerativeModel("gemini-2.5-flash").generate_content(prompt)
             bias = response.text.strip().upper()
@@ -148,14 +166,19 @@ class EnsembleTrader(Strategy):
                 )
                 self.daily_macro_bias = "NEUTRAL"
         except Exception as exc:
-            self.log_message(
-                f"[EnsembleTrader] Gemini error: {exc}. Using NEUTRAL.", color="red"
-            )
+            self.log_message(f"[EnsembleTrader] Gemini error: {exc}. Using NEUTRAL.", color="red")
             self.daily_macro_bias = "NEUTRAL"
 
-        self.log_message(
-            f"Daily macro bias (Gemini): {self.daily_macro_bias}", color="cyan"
-        )
+        self.log_message(f"Daily macro bias (Gemini): {self.daily_macro_bias}", color="cyan")
+
+        # ── Daily local sentiment bias via Llama 3.2 ──────────────────────────
+        if hasattr(self, "sentiment_engine"):
+            try:
+                news = self.sentiment_engine.fetch_text_data("Indian Stock Market")
+                self.local_sentiment_score = self.sentiment_engine.analyze_sentiment(news)
+                self.log_message(f"Local NLP Sentiment Score (Llama 3.2): {self.local_sentiment_score}", color="cyan")
+            except Exception as e:
+                self.log_message(f"Sentiment Engine Error: {e}", color="red")
 
     # ── Feature computation ───────────────────────────────────────────────────
 
@@ -178,7 +201,7 @@ class EnsembleTrader(Strategy):
 
         # 3. volume_delta
         high_low = df["high"] - df["low"]
-        buying_selling_pressure = ((df["close"] - df["low"]) - (df["high"] - df["close"]))
+        buying_selling_pressure = (df["close"] - df["low"]) - (df["high"] - df["close"])
         df["volume_delta"] = (buying_selling_pressure / (high_low + 1e-8)) * df["volume"]
 
         # 4. hl_spread
@@ -216,7 +239,6 @@ class EnsembleTrader(Strategy):
         df.dropna(inplace=True)
         return df
 
-
     # ── ML prediction ─────────────────────────────────────────────────────────
 
     def _get_ml_prediction(self, asset: Asset) -> tuple[int, float]:
@@ -232,45 +254,34 @@ class EnsembleTrader(Strategy):
         # Request 15-minute bars to match ML feature training matrix exactly.
         bars = self.get_historical_prices(asset, 250, "15 minutes")
         if bars is None or len(bars.df) < 200:
-            self.log_message(
-                f"Not enough bars for {asset.symbol} — skipping.", color="yellow"
-            )
+            self.log_message(f"Not enough bars for {asset.symbol} — skipping.", color="yellow")
             return 0, 0.0
 
         # ── ONE-TIME DIAGNOSTIC: log raw columns from broker bars ──────────────
         if not getattr(self, "_diag_logged", False):
             self._diag_logged = True
-            self.log_message(
-                f"[DIAG] bars.df.columns = {list(bars.df.columns)}", color="yellow"
-            )
-            self.log_message(
-                f"[DIAG] bars.df.dtypes = {bars.df.dtypes.to_dict()}", color="yellow"
-            )
+            self.log_message(f"[DIAG] bars.df.columns = {list(bars.df.columns)}", color="yellow")
+            self.log_message(f"[DIAG] bars.df.dtypes = {bars.df.dtypes.to_dict()}", color="yellow")
 
         df = self._compute_features(bars.df)
 
         # ── ONE-TIME DIAGNOSTIC: log feature values ────────────────────────────
         if not getattr(self, "_feat_diag_logged", False):
             self._feat_diag_logged = True
-            self.log_message(
-                f"[DIAG] computed df.columns = {list(df.columns)}", color="yellow"
-            )
+            self.log_message(f"[DIAG] computed df.columns = {list(df.columns)}", color="yellow")
             if not df.empty:
                 self.log_message(
                     f"[DIAG] last feature row = {df[self.features].iloc[-1].to_dict() if self.features and all(f in df.columns for f in self.features) else 'FEATURES MISSING'}",
-                    color="yellow"
+                    color="yellow",
                 )
 
         if df.empty:
             return 0, 0.0
 
-
         # Identify which features are available
         missing = [f for f in self.features if f not in df.columns]
         if missing:
-            self.log_message(
-                f"Missing features for {asset.symbol}: {missing}", color="red"
-            )
+            self.log_message(f"Missing features for {asset.symbol}: {missing}", color="red")
             return 0, 0.0
 
         latest = df[self.features].iloc[-1:]
@@ -280,12 +291,11 @@ class EnsembleTrader(Strategy):
             # Sklearn orders classes naturally: [-1, 0, 1] -> [p_down, p_hold, p_up]
             p_down = probas[0]
             p_hold = probas[1]
-            p_up   = probas[2]
+            p_up = probas[2]
 
             # Debug log for distribution analysis
             self.log_message(
-                f"[{asset.symbol}] Logic check: Short={p_down:.3f} | Hold={p_hold:.3f} | Long={p_up:.3f}",
-                color="blue"
+                f"[{asset.symbol}] Logic check: Short={p_down:.3f} | Hold={p_hold:.3f} | Long={p_up:.3f}", color="blue"
             )
 
             if p_up > CONFIDENCE_THRESHOLD:
@@ -294,7 +304,7 @@ class EnsembleTrader(Strategy):
                 return -1, float(p_down)
             else:
                 return 0, float(p_hold)
-                
+
         except Exception as exc:
             self.log_message(f"Prediction error for {asset.symbol}: {exc}", color="red")
             return 0, 0.0
@@ -320,15 +330,44 @@ class EnsembleTrader(Strategy):
         """Allocate exactly exactly 10% of portfolio capital per trade."""
         portfolio_value = self.get_portfolio_value()
         alloc_amount = portfolio_value * POSITION_SIZE_PCT
-        
+
         qty = int(alloc_amount / current_price)
 
         # Ensure we have cash for the order
         available_cash = self.get_cash()
-        max_by_cash    = int(available_cash * 0.95 / current_price)
-        qty            = min(qty, max_by_cash)
+        max_by_cash = int(available_cash * 0.95 / current_price)
+        qty = min(qty, max_by_cash)
 
         return max(qty, 0)
+
+    # ── Paper trade logging ───────────────────────────────────────────────────
+
+    def _record_paper_trade(self, asset_symbol, direction, quantity, entry, tp, sl):
+        timestamp = self.get_datetime().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 1. Log to console
+        msg = f"PAPER TRADE (Direction: {direction}, Asset: {asset_symbol}, Quantity: {quantity}, Entry: ~{entry:.2f}, TP: {tp:.2f}, SL: {sl:.2f})"
+        self.log_message(msg, color="cyan")
+
+        # 2. Save to CSV
+        try:
+            with open(self.paper_trade_file, mode="a", newline="") as file:
+                writer = csv.writer(file)
+                writer.writerow([timestamp, asset_symbol, direction, quantity, entry, tp, sl])
+        except Exception as e:
+            self.log_message(f"Failed to write to CSV: {e}", color="red")
+
+        # 3. Send Telegram Alert
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        if bot_token and chat_id:
+            try:
+                tg_msg = f"🚨 <b>PAPER TRADE ALERT</b> 🚨\n\n<b>Asset:</b> {asset_symbol}\n<b>Side:</b> {direction}\n<b>Qty:</b> {quantity}\n<b>Entry:</b> {entry:.2f}\n<b>TP:</b> {tp:.2f}\n<b>SL:</b> {sl:.2f}\n<b>Time:</b> {timestamp}"
+                url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                payload = {"chat_id": chat_id, "text": tg_msg, "parse_mode": "HTML"}
+                requests.post(url, json=payload, timeout=5)
+            except Exception as e:
+                self.log_message(f"Failed to send Telegram alert: {e}", color="red")
 
     # ── Main iteration ────────────────────────────────────────────────────────
 
@@ -340,11 +379,11 @@ class EnsembleTrader(Strategy):
         current_time = now.time()
         start_time = pd.Timestamp("09:15").time()
         end_time = pd.Timestamp("15:30").time()
-        
+
         # Check weekday (0=Mon, 4=Fri)
         if now.weekday() > 4:
             return False
-            
+
         return start_time <= current_time <= end_time
 
     def on_trading_iteration(self):
@@ -356,10 +395,10 @@ class EnsembleTrader(Strategy):
 
         # ── Circuit breaker ────────────────────────────────────────────────
         current_pv = self.get_portfolio_value()
-        starting   = getattr(self, "starting_portfolio_value", 0)
+        starting = getattr(self, "starting_portfolio_value", 0)
         if starting > 0 and (starting - current_pv) / starting > 0.02:
             self.log_message(
-                f"CIRCUIT BREAKER: portfolio down > 2 % ({(starting - current_pv)/starting:.2%}). "
+                f"CIRCUIT BREAKER: portfolio down > 2 % ({(starting - current_pv) / starting:.2%}). "
                 "Selling all and halting.",
                 color="red",
             )
@@ -373,10 +412,13 @@ class EnsembleTrader(Strategy):
         macro_bias = getattr(self, "daily_macro_bias", "NEUTRAL")
         if self.is_backtesting and macro_bias == "NEUTRAL":
             is_bullish_or_neutral = True
-            is_bearish            = True
+            is_bearish = True
         else:
             is_bullish_or_neutral = macro_bias in {"BULLISH", "NEUTRAL"}
-            is_bearish            = macro_bias == "BEARISH"
+            is_bearish = macro_bias == "BEARISH"
+
+        # Extract the local sentiment score to apply as a secondary strict filter
+        local_score = getattr(self, "local_sentiment_score", 0.0)
 
         for symbol in self.universe:
             asset = Asset(
@@ -385,85 +427,114 @@ class EnsembleTrader(Strategy):
             )
 
             ml_signal, confidence = self._get_ml_prediction(asset)
-            self.log_message(
-                f"{asset.symbol} | ML={ml_signal} | conf={confidence:.3f} | "
-                f"bias={self.daily_macro_bias}"
-            )
+            self.log_message(f"{asset.symbol} | ML={ml_signal} | conf={confidence:.3f} | bias={self.daily_macro_bias}")
 
             position = self.get_position(asset)
-            holding  = position is not None and position.quantity > 0
+            holding = position is not None and position.quantity > 0
 
             # ── LONG ENTRY: Class 1 bracket logic ──────────────────────────
             if ml_signal == 1 and is_bullish_or_neutral and not holding:
+                news = self.sentiment_engine.fetch_text_data(asset.symbol)
+                llm_score = self.sentiment_engine.analyze_sentiment(news)
+                if llm_score < -0.25:
+                    self.log_message("VETO: LLM blocked BUY (bearish sentiment)", color="yellow")
+                    continue
+
                 current_atr = self._get_current_atr(asset)
                 if current_atr is None or current_atr <= 0:
                     continue
                 current_price = self.get_last_price(asset)
-                stop_loss_price   = current_price - (current_atr * 1.0)
+                stop_loss_price = current_price - (current_atr * 1.0)
                 take_profit_price = current_price + (current_atr * 1.5)
                 quantity = self._calc_quantity(current_price)
 
                 if quantity <= 0:
                     continue
 
-                order = self.create_order(
-                    asset=asset,
-                    quantity=quantity,
-                    side="buy",
-                    take_profit_price=take_profit_price,
-                    stop_loss_price=stop_loss_price,
-                    type="market",
-                )
-                self.submit_order(order)
-                self.log_message(
-                    f"LONG {asset.symbol}: qty={quantity} @ ~{current_price:.2f} | "
-                    f"SL={stop_loss_price:.2f} TP={take_profit_price:.2f} | "
-                    f"conf={confidence:.3f}",
-                    color="green",
-                )
+                if not self.IS_PAPER_TRADING:
+                    order = self.create_order(
+                        asset=asset,
+                        quantity=quantity,
+                        side="buy",
+                        take_profit_price=take_profit_price,
+                        stop_loss_price=stop_loss_price,
+                        type="market",
+                    )
+                    self.submit_order(order)
+                    self.log_message(
+                        f"LONG {asset.symbol}: qty={quantity} @ ~{current_price:.2f} | "
+                        f"SL={stop_loss_price:.2f} TP={take_profit_price:.2f} | "
+                        f"conf={confidence:.3f}",
+                        color="green",
+                    )
+                else:
+                    self._record_paper_trade(
+                        asset.symbol, "BUY", quantity, current_price, take_profit_price, stop_loss_price
+                    )
 
             # ── SHORT ENTRY: Class -1 bracket logic ─────────────────────────
             elif ml_signal == -1 and is_bearish and not holding:
+                news = self.sentiment_engine.fetch_text_data(asset.symbol)
+                llm_score = self.sentiment_engine.analyze_sentiment(news)
+                if llm_score > 0.25:
+                    self.log_message("VETO: LLM blocked SELL (bullish sentiment)", color="yellow")
+                    continue
+
                 current_atr = self._get_current_atr(asset)
                 if current_atr is None or current_atr <= 0:
                     continue
                 current_price = self.get_last_price(asset)
-                stop_loss_price   = current_price + (current_atr * 1.0)
+                stop_loss_price = current_price + (current_atr * 1.0)
                 take_profit_price = current_price - (current_atr * 1.5)
                 quantity = self._calc_quantity(current_price)
 
                 if quantity <= 0:
                     continue
 
-                order = self.create_order(
-                    asset=asset,
-                    quantity=quantity,
-                    side="sell",
-                    take_profit_price=take_profit_price,
-                    stop_loss_price=stop_loss_price,
-                    type="market",
-                )
-                self.submit_order(order)
-                self.log_message(
-                    f"SHORT {asset.symbol}: qty={quantity} @ ~{current_price:.2f} | "
-                    f"SL={stop_loss_price:.2f} TP={take_profit_price:.2f} | "
-                    f"conf={confidence:.3f}",
-                    color="red",
-                )
+                if not self.IS_PAPER_TRADING:
+                    order = self.create_order(
+                        asset=asset,
+                        quantity=quantity,
+                        side="sell",
+                        take_profit_price=take_profit_price,
+                        stop_loss_price=stop_loss_price,
+                        type="market",
+                    )
+                    self.submit_order(order)
+                    self.log_message(
+                        f"SHORT {asset.symbol}: qty={quantity} @ ~{current_price:.2f} | "
+                        f"SL={stop_loss_price:.2f} TP={take_profit_price:.2f} | "
+                        f"conf={confidence:.3f}",
+                        color="red",
+                    )
+                else:
+                    self._record_paper_trade(
+                        asset.symbol, "SELL", quantity, current_price, take_profit_price, stop_loss_price
+                    )
 
             # ── HOLD / NO TRADE ─────────────────────────────────────────────
             elif not holding and ml_signal == 0:
                 pass
-                
+
             # ── MACRO VETO LOGIC ────────────────────────────────────────────
             elif ml_signal == 1 and is_bearish:
                 self.log_message(
                     f"VETO LONG {asset.symbol}: blocked by BEARISH macro bias.",
                     color="yellow",
                 )
+            elif ml_signal == 1 and local_score <= -0.5:
+                self.log_message(
+                    f"VETO LONG {asset.symbol}: blocked by strong negative local sentiment ({local_score}).",
+                    color="yellow",
+                )
             elif ml_signal == -1 and is_bullish_or_neutral:
                 self.log_message(
                     f"VETO SHORT {asset.symbol}: blocked by BULLISH/NEUTRAL macro bias.",
+                    color="yellow",
+                )
+            elif ml_signal == -1 and local_score >= 0.5:
+                self.log_message(
+                    f"VETO SHORT {asset.symbol}: blocked by strong positive local sentiment ({local_score}).",
                     color="yellow",
                 )
 
@@ -474,13 +545,13 @@ if __name__ == "__main__":
     from lumibot.backtesting import YahooDataBacktesting
 
     backtest_start = datetime(2025, 1, 1)
-    backtest_end   = datetime(2025, 12, 31)
+    backtest_end = datetime(2025, 12, 31)
 
     EnsembleTrader.backtest(
         YahooDataBacktesting,
         backtesting_start=backtest_start,
         backtesting_end=backtest_end,
-        budget=10_000_000,   # ₹1 crore
+        budget=10_000_000,  # ₹1 crore
         benchmark_asset=Asset("^NSEI", Asset.AssetType.INDEX),
         show_plot=True,
         show_tearsheet=True,
