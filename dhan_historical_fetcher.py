@@ -212,11 +212,11 @@ def fetch_historical_paginated(
         logger.error(f"Failed to save parquet dataset: {e}")
 
 if __name__ == "__main__":
-    # Example execution testing parameters:
+    # Example execution testing parameters with a recent timeframe and valid index name
     fetch_historical_paginated(
-        symbol="NIFTY_50",         # Example Nifty index symbol layout equivalent
+        symbol="NIFTY 50",         
         exchange_segment="IDX_I",
         instrument="INDEX",
-        start_date=datetime.date(2023, 1, 1),
-        end_date=datetime.date(2023, 12, 31)
+        start_date=datetime.date.today() - datetime.timedelta(days=10),
+        end_date=datetime.date.today()
     )
