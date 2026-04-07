@@ -8,12 +8,13 @@ from .chains import Chains
 from .data import Data as _DataBase
 from .data_polars import DataPolars
 from .dataline import Dataline
+from .india_trading_fees import IndiaTradingFee, make_india_equity_fees
 from .order import Order
 from .position import Position
 from .quote import Quote
+from .smart_limit import SmartLimitConfig, SmartLimitPreset
 from .trading_fee import TradingFee
 from .trading_slippage import TradingSlippage
-from .smart_limit import SmartLimitConfig, SmartLimitPreset
 
 # Use base implementations directly
 Bars = _BarsBase
@@ -35,4 +36,6 @@ __all__ = [
     "TradingSlippage",
     "SmartLimitConfig",
     "SmartLimitPreset",
+    "IndiaTradingFee",
+    "make_india_equity_fees",
 ]

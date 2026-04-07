@@ -33,6 +33,7 @@ load_dotenv(".secrets/lumi_secrets.env")
 # ── Imports ──────────────────────────────────────────────────────────────────
 from lumibot.brokers import Dhan
 from lumibot.data_sources.dhan_data import DhanData
+from lumibot.entities.india_trading_fees import make_india_equity_fees
 from lumibot.example_strategies.india_ai_trader import IndiaAITrader
 from lumibot.traders import Trader
 
@@ -81,14 +82,30 @@ def _telegram_alert(msg: str):
         print(f"[Telegram alert failed] {exc}")
 
 # ── Build components ──────────────────────────────────────────────────────────
-print(f"\n{'='*60}")
+print(f"\n{'='*65}")
 print("  IndiaAITrader — LIVE NSE Trading")
-print(f"{'='*60}")
+print(f"{'='*65}")
 print(f"  Universe  : {', '.join(UNIVERSE)}")
 print(f"  Product   : {PRODUCT_TYPE}")
 print(f"  Model     : {GOOGLE_MODEL}")
 print(f"  Positions : max {MAX_POSITIONS}")
-print(f"{'='*60}\n")
+print(f"{'─'*65}")
+print("  Fee model applied by live broker (NSE statutory charges):")
+_buy_fees, _sell_fees = make_india_equity_fees(PRODUCT_TYPE, include_slippage=False)
+for _label, _fee in [
+    ("  BUY  market", _buy_fees[0]),
+    ("  BUY  limit ", _buy_fees[1]),
+    ("  SELL market", _sell_fees[0]),
+    ("  SELL limit ", _sell_fees[1]),
+]:
+    _bd = _fee.breakdown()
+    print(
+        f"{_label}  effective={_bd['effective_cost_pct']:.5f}%"
+        f"  (brkr={_bd['brokerage_inr']:.2f}"
+        f"  STT={_bd['stt_inr']:.2f}"
+        f"  GST={_bd['gst_inr']:.2f}  on ₹{_bd['turnover_inr']:.0f})"
+    )
+print(f"{'='*65}\n")
 
 # Data source — uses Yahoo Finance for historical + Dhan for live quotes
 data_source = DhanData(
