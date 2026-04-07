@@ -1,7 +1,7 @@
 """
 train_nifty_model.py
 ====================
-Production-grade training pipeline for the Nifty Ensemble strategy.
+Production-grade training pipeline for the Nifty stonxx strategy.
 
 Temporal Split (strict, zero leakage):
     Training + CV  : 2015-01-01 → 2022-12-31  (7 years, ~42k bars)

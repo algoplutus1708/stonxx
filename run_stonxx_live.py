@@ -1,7 +1,7 @@
 """
-Ensemble AI Trading Agent - Live Execution Runner
+stonxx AI Trading Agent - Live Execution Runner
 --------------------------------------------------
-This script initializes the Ensemble AI strategy with live Dhan broker 
+This script initializes the stonxx AI strategy with live Dhan broker 
 connectivity for the Indian Stock Market (NSE/BSE).
 
 Prerequisites:
@@ -18,7 +18,7 @@ from lumibot.brokers import Dhan
 from lumibot.data_sources import DhanData
 from lumibot.strategies.strategy import Strategy
 from lumibot.entities import Asset
-from lumibot.example_strategies.ensemble_india_bot import EnsembleTrader
+from lumibot.example_strategies.stonxx_india_bot import stonxx
 
 def main():
     # 1. Load environment variables from .env.india
@@ -57,7 +57,7 @@ def main():
 
     # 5. Initialize the Strategy
     # We use a default budget of ₹25,00,000 for position sizing (mock balance for live logic)
-    strategy = EnsembleTrader(
+    strategy = stonxx(
         broker=broker,
         data_source=data_source,
         budget=2500000,
@@ -65,7 +65,7 @@ def main():
     )
 
     # 6. Run the strategy live
-    print("Starting Ensemble AI Agent in LIVE mode...")
+    print("Starting stonxx AI Agent in LIVE mode...")
     print("Market Hours: 09:15 - 15:30 IST (Mon-Fri)")
     
     try:

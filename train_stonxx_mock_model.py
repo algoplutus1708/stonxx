@@ -1,12 +1,12 @@
 """
-train_mock_ml_model.py
+train_stonxx_mock_model.py
 ======================
 This is a helper script to train and save a basic mock XGBoost model.
 It generates random dummy data shaped like our technical indicators 
 (RSI, MACD, ATR) and trains a quick model. 
 
 Run this ONCE to locally generate the `nifty_xgb_model.joblib` file 
-required by your EnsembleTrader strategy!
+required by your stonxx strategy!
 """
 
 import numpy as np
@@ -71,7 +71,7 @@ def train_and_save_model():
     filename = "nifty_xgb_model.joblib"
     joblib.dump(model, filename)
     print(f"✅ Success! Saved compiled model to: {filename}")
-    print("You can now successfully run python run_ensemble_live.py")
+    print("You can now successfully run python run_stonxx_live.py")
 
 if __name__ == "__main__":
     train_and_save_model()

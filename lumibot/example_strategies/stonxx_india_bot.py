@@ -1,7 +1,7 @@
 """
-ensemble_india_bot.py
+stonxx_india_bot.py
 =====================
-Ensemble AI/ML Strategy for Indian equities.
+stonxx AI/ML Strategy for Indian equities.
 
 Key design decisions:
   • Loads a pre-trained RandomForest artifact that bundles the model + feature list,
@@ -50,9 +50,9 @@ CONFIDENCE_THRESHOLD = 0.45
 POSITION_SIZE_PCT = 0.10
 
 
-class EnsembleTrader(Strategy):
+class stonxx(Strategy):
     """
-    Ensemble AI/ML Strategy — ML signal (RandomForest) + Gemini LLM macro filter.
+    stonxx AI/ML Strategy — ML signal (RandomForest) + Gemini LLM macro filter.
     """
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ class EnsembleTrader(Strategy):
                 self.features = artifact["features"]
                 meta = artifact.get("meta", {})
                 self.log_message(
-                    f"[EnsembleTrader] Model loaded. "
+                    f"[stonxx] Model loaded. "
                     f"OOS acc={meta.get('oos_accuracy', '?')}, "
                     f"AUC={meta.get('oos_roc_auc', '?')}",
                     color="green",
@@ -88,12 +88,12 @@ class EnsembleTrader(Strategy):
                 self.model = artifact
                 self.features = ["RSI_14", "MACD_12_26_9", "ATRr_14"]
                 self.log_message(
-                    "[EnsembleTrader] Legacy model loaded (no feature metadata).",
+                    "[stonxx] Legacy model loaded (no feature metadata).",
                     color="yellow",
                 )
         except FileNotFoundError:
             self.log_message(
-                f"[EnsembleTrader] {model_path} not found! Run train_nifty_model.py first.",
+                f"[stonxx] {model_path} not found! Run train_nifty_model.py first.",
                 color="red",
             )
 
@@ -130,7 +130,7 @@ class EnsembleTrader(Strategy):
         gemini_api_key = os.getenv("GEMINI_API_KEY")
         if not gemini_api_key:
             self.log_message(
-                "[EnsembleTrader] GEMINI_API_KEY not set — macro bias = NEUTRAL.",
+                "[stonxx] GEMINI_API_KEY not set — macro bias = NEUTRAL.",
                 color="yellow",
             )
             self.daily_macro_bias = "NEUTRAL"
@@ -161,12 +161,12 @@ class EnsembleTrader(Strategy):
                 self.daily_macro_bias = bias
             else:
                 self.log_message(
-                    f"[EnsembleTrader] Unexpected Gemini output: '{bias}'. Using NEUTRAL.",
+                    f"[stonxx] Unexpected Gemini output: '{bias}'. Using NEUTRAL.",
                     color="yellow",
                 )
                 self.daily_macro_bias = "NEUTRAL"
         except Exception as exc:
-            self.log_message(f"[EnsembleTrader] Gemini error: {exc}. Using NEUTRAL.", color="red")
+            self.log_message(f"[stonxx] Gemini error: {exc}. Using NEUTRAL.", color="red")
             self.daily_macro_bias = "NEUTRAL"
 
         self.log_message(f"Daily macro bias (Gemini): {self.daily_macro_bias}", color="cyan")
@@ -547,7 +547,7 @@ if __name__ == "__main__":
     backtest_start = datetime(2025, 1, 1)
     backtest_end = datetime(2025, 12, 31)
 
-    EnsembleTrader.backtest(
+    stonxx.backtest(
         YahooDataBacktesting,
         backtesting_start=backtest_start,
         backtesting_end=backtest_end,
@@ -556,5 +556,5 @@ if __name__ == "__main__":
         show_plot=True,
         show_tearsheet=True,
         save_logfile=True,
-        name="EnsembleTrader",
+        name="stonxx",
     )

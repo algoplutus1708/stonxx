@@ -1,7 +1,7 @@
 """
-run_ensemble_backtest.py
+run_stonxx_backtest.py
 ========================
-Backtest runner for the AI/ML Ensemble trader on Indian equities.
+Backtest runner for the AI/ML stonxx trader on Indian equities.
 
 Backtest period: 2025-01-01 → 2025-12-31  (full OOS year)
 Warm-up starts 2024-12-20 so the bot has enough bars to trade on day 1 of Jan 2025.
@@ -24,7 +24,7 @@ load_dotenv(".secrets/lumi_secrets.env")
 import pandas as pd
 from lumibot.backtesting import PandasDataBacktesting
 from lumibot.entities import Asset, Data, TradingFee, TradingSlippage
-from lumibot.example_strategies.ensemble_india_bot import EnsembleTrader
+from lumibot.example_strategies.stonxx_india_bot import stonxx
 
 
 def run_backtest():
@@ -34,7 +34,7 @@ def run_backtest():
     backtesting_end   = datetime(2025, 12, 31)   # full 2025 OOS window
 
     print("\n" + "=" * 65)
-    print("  🚀  Ensemble AI/ML Backtest — Indian Equities (2025 True OOS)")
+    print("  🚀  stonxx AI/ML Backtest — Indian Equities (2025 True OOS)")
     print("=" * 65)
 
     if not os.getenv("GEMINI_API_KEY"):
@@ -70,7 +70,7 @@ def run_backtest():
         Asset("^NSEI", Asset.AssetType.INDEX): Data(Asset("^NSEI", Asset.AssetType.INDEX), df.copy())
     }
     
-    EnsembleTrader.backtest(
+    stonxx.backtest(
         PandasDataBacktesting,
         pandas_data=pandas_data,
         backtesting_start=backtesting_start,
@@ -91,7 +91,7 @@ def run_backtest():
         sell_trading_slippages=[trading_slippage],
 
         parameters={"universe": ["NIFTY50"]},
-        name="EnsembleTrader",
+        name="stonxx",
         quiet_logs=False,
         show_plot=True,
         show_tearsheet=True,
