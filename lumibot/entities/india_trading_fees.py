@@ -62,9 +62,15 @@ References
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from decimal import InvalidOperation
+from typing import Any
 
 from lumibot.entities.trading_fee import TradingFee
+
+# Module-level logger — consumers can configure this via standard logging config.
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Rate constants  (all values as decimal fractions; 1 % == 0.01)
@@ -327,6 +333,272 @@ class IndiaTradingFee(TradingFee):
                 "limit/stop-limit" if (self.maker and not self.taker) else
                 "all orders"
             ),
+        }
+
+    def calculate_for_order(
+        self,
+        order: Any,
+        fill_price: float,
+    ) -> dict[str, Any]:
+        """Calculate exact statutory fees for a Lumibot ``Order`` object.
+
+        Returns an itemised breakdown of every Indian regulatory charge plus
+        the slippage penalty (for market/stop orders).  The ``total_inr``
+        key is the exact amount that should be deducted from the portfolio
+        cash balance for this single fill.
+
+        This method is *additive* to the broker's standard ``percent_fee``
+        deduction — use it for reporting, audit, or paper-trading custom
+        brokers that call the fee object directly.
+
+        Parameters
+        ----------
+        order : lumibot.entities.Order (or any duck-typed object with the
+                 same interface)
+            The order being filled.  Must expose at minimum:
+              - ``quantity``   — number of shares (int, float, or Decimal)
+              - ``side``       — ``"buy"`` or ``"sell"`` (or OrderSide enum)
+              - ``order_type`` — ``"market"``, ``"limit"``, etc.
+              - ``asset``      — object with a ``.symbol`` attribute
+        fill_price : float
+            The actual fill price in INR.
+
+        Returns
+        -------
+        dict[str, Any]
+            Keys: ``brokerage_inr``, ``stt_inr``, ``exchange_charges_inr``,
+            ``gst_inr``, ``sebi_fee_inr``, ``stamp_duty_inr``,
+            ``slippage_penalty_inr``, ``total_statutory_inr``,
+            ``total_inr``, ``brokerage_cap_applied``, ``turnover_inr``,
+            ``symbol``, ``side``, ``order_type``, ``is_market_order``.
+
+        Notes
+        -----
+        * If ``order`` is ``None`` or does not have a ``quantity`` attribute,
+          a ``WARNING`` is logged and a zero-fee dict is returned so the
+          caller is never broken by a malformed order.
+        * The brokerage cap (min ₹20) is applied exactly here — unlike the
+          ``percent_fee`` path used by the standard Lumibot broker.
+
+        Examples
+        --------
+        >>> from lumibot.entities import Order
+        >>> fee = IndiaTradingFee("MIS", side="buy")
+        >>> order = Order("strategy", asset, quantity=10, side="buy",
+        ...               order_type="market")
+        >>> result = fee.calculate_for_order(order, fill_price=500.0)
+        >>> print(f"Total cost: ₹{result['total_inr']:.2f}")
+        """
+        _ZERO: dict[str, Any] = {
+            "brokerage_inr":        0.0,
+            "stt_inr":              0.0,
+            "exchange_charges_inr": 0.0,
+            "gst_inr":              0.0,
+            "sebi_fee_inr":         0.0,
+            "stamp_duty_inr":       0.0,
+            "slippage_penalty_inr": 0.0,
+            "total_statutory_inr":  0.0,
+            "total_inr":            0.0,
+            "brokerage_cap_applied": False,
+            "turnover_inr":         0.0,
+            "symbol":               None,
+            "side":                 None,
+            "order_type":           None,
+            "is_market_order":      False,
+            "error":                None,
+        }
+
+        # ── Guard: None order ────────────────────────────────────────────────
+        if order is None:
+            logger.warning(
+                "[IndiaTradingFee] calculate_for_order received None order; "
+                "returning zero fees."
+            )
+            return {**_ZERO, "error": "order is None"}
+
+        # ── Extract quantity ─────────────────────────────────────────────────
+        try:
+            raw_qty = getattr(order, "quantity", None)
+            if raw_qty is None:
+                logger.warning(
+                    "[IndiaTradingFee] Order %r has no 'quantity' attribute; "
+                    "returning zero fees.",
+                    getattr(order, "identifier", repr(order)),
+                )
+                return {**_ZERO, "error": "missing quantity"}
+            qty = float(raw_qty)
+            if qty <= 0:
+                logger.warning(
+                    "[IndiaTradingFee] Order %r has non-positive quantity=%s; "
+                    "returning zero fees.",
+                    getattr(order, "identifier", repr(order)),
+                    qty,
+                )
+                return {**_ZERO, "error": f"non-positive quantity: {qty}"}
+        except (TypeError, ValueError, InvalidOperation) as exc:
+            logger.warning(
+                "[IndiaTradingFee] Could not convert quantity %r to float: %s",
+                getattr(order, "quantity", "?"),
+                exc,
+            )
+            return {**_ZERO, "error": f"quantity conversion error: {exc}"}
+
+        # ── Extract fill price ───────────────────────────────────────────────
+        try:
+            price = float(fill_price)
+            if price < 0:
+                raise ValueError(f"fill_price must be non-negative, got {price}")
+        except (TypeError, ValueError) as exc:
+            logger.warning(
+                "[IndiaTradingFee] Invalid fill_price %r: %s", fill_price, exc
+            )
+            return {**_ZERO, "error": f"invalid fill_price: {exc}"}
+
+        # ── Extract side ─────────────────────────────────────────────────────
+        try:
+            raw_side = getattr(order, "side", None)
+            if raw_side is None:
+                logger.warning(
+                    "[IndiaTradingFee] Order %r missing 'side'; defaulting to "
+                    "instance side=%s.",
+                    getattr(order, "identifier", repr(order)),
+                    self.side,
+                )
+                side_key = self.side
+            else:
+                side_str = str(raw_side).lower().strip()
+                # Normalise Lumibot extended sides (buy_to_open, sell_to_close …)
+                side_key = "buy" if side_str.startswith("buy") else "sell"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[IndiaTradingFee] Could not parse order side %r: %s; "
+                "using instance default.",
+                getattr(order, "side", "?"),
+                exc,
+            )
+            side_key = self.side
+
+        # ── Extract order type (taker vs maker) ──────────────────────────────
+        try:
+            ot_attr = getattr(order, "order_type", None)
+            if ot_attr is None:
+                order_type_str = "market"
+            elif hasattr(ot_attr, "value"):
+                order_type_str = str(ot_attr.value).lower()
+            else:
+                order_type_str = str(ot_attr).lower().strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[IndiaTradingFee] Could not parse order_type: %s; "
+                "defaulting to 'market'.",
+                exc,
+            )
+            order_type_str = "market"
+
+        is_market_order: bool = order_type_str in {"market", "stop"}
+
+        # ── Extract symbol (for reporting only) ──────────────────────────────
+        try:
+            asset = getattr(order, "asset", None)
+            symbol: str | None = (
+                str(asset.symbol) if asset and hasattr(asset, "symbol") else None
+            )
+        except Exception:  # noqa: BLE001
+            symbol = None
+
+        # ── Core arithmetic ──────────────────────────────────────────────────
+        try:
+            rates    = self._rates
+            turnover = qty * price
+
+            if turnover == 0.0:
+                logger.warning(
+                    "[IndiaTradingFee] Zero turnover (qty=%s, price=%s) for "
+                    "order %r; returning zero fees.",
+                    qty,
+                    price,
+                    getattr(order, "identifier", repr(order)),
+                )
+                return {
+                    **_ZERO,
+                    "turnover_inr": 0.0,
+                    "symbol": symbol,
+                    "side": side_key,
+                    "order_type": order_type_str,
+                    "is_market_order": is_market_order,
+                }
+
+            # Brokerage — exact cap
+            raw_bkr   = rates.brokerage_pct * turnover
+            brokerage = (
+                min(raw_bkr, rates.brokerage_cap_inr)
+                if rates.brokerage_cap_inr > 0
+                else raw_bkr
+            )
+            cap_applied: bool = (
+                rates.brokerage_cap_inr > 0 and raw_bkr > rates.brokerage_cap_inr
+            )
+
+            # STT (side-dependent)
+            stt = (
+                rates.stt_buy_pct if side_key == "buy" else rates.stt_sell_pct
+            ) * turnover
+
+            # Exchange transaction charge
+            exch = rates.exchange_charge_pct * turnover
+
+            # GST: 18 % on (exact brokerage + exchange charges)
+            gst = _GST_RATE * (brokerage + exch)
+
+            # SEBI turnover fee
+            sebi = _SEBI_FEE_PCT * turnover
+
+            # Stamp duty (buy side only)
+            stamp = (
+                rates.stamp_duty_buy_pct * turnover if side_key == "buy" else 0.0
+            )
+
+            # Slippage penalty — only for market / stop orders
+            slippage = (
+                _MARKET_SLIPPAGE_PCT * turnover if is_market_order else 0.0
+            )
+
+            total_statutory = brokerage + stt + exch + gst + sebi + stamp
+            total_inr       = total_statutory + slippage
+
+        except ZeroDivisionError as exc:
+            logger.warning(
+                "[IndiaTradingFee] ZeroDivisionError during fee calculation: %s",
+                exc,
+            )
+            return {**_ZERO, "error": f"ZeroDivisionError: {exc}"}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[IndiaTradingFee] Unexpected error during fee calculation: %s",
+                exc,
+            )
+            return {**_ZERO, "error": f"unexpected error: {exc}"}
+
+        return {
+            "symbol":               symbol,
+            "side":                 side_key.upper(),
+            "order_type":           order_type_str,
+            "is_market_order":      is_market_order,
+            "turnover_inr":         round(turnover, 4),
+            # ── Itemised charges ────────────────────────────────────────────
+            "brokerage_inr":        round(brokerage, 4),
+            "stt_inr":              round(stt, 4),
+            "exchange_charges_inr": round(exch, 4),
+            "gst_inr":              round(gst, 4),
+            "sebi_fee_inr":         round(sebi, 4),
+            "stamp_duty_inr":       round(stamp, 4),
+            "slippage_penalty_inr": round(slippage, 4),
+            # ── Totals ──────────────────────────────────────────────────────
+            "total_statutory_inr":  round(total_statutory, 4),
+            "total_inr":            round(total_inr, 4),
+            # ── Meta ────────────────────────────────────────────────────────
+            "brokerage_cap_applied": cap_applied,
+            "error":                None,
         }
 
     def __repr__(self) -> str:
