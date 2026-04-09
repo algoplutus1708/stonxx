@@ -4,21 +4,23 @@
 
 [![Market: NSE/BSE](https://img.shields.io/badge/Market-NSE%2FBSE-orange?style=flat-square)](https://www.nseindia.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](https://opensource.org/licenses/MIT)
-[![Powered By: XGBoost](https://img.shields.io/badge/Core-XGBoost-green?style=flat-square)](https://xgboost.readthedocs.io/)
+[![Core: XGBoost](https://img.shields.io/badge/Core-XGBoost-green?style=flat-square)](https://xgboost.readthedocs.io/)
 [![LLM: Gemini + Llama](https://img.shields.io/badge/LLM-Gemini%20%7C%20Llama-purple?style=flat-square)](https://deepmind.google/technologies/gemini/)
+[![Maintainer: swastick](https://img.shields.io/badge/Maintained%20by-swastick-brightgreen?style=flat-square)](#authors)
 
-**stonxx** is a high-conviction, automated trading framework specifically engineered for the **Indian Stock Market (NSE/BSE)**. It combines state-of-the-art machine learning with dual-layer LLM sentiment analysis to navigate the complexities of Indian market volatility with institutional precision.
+**stonxx** is a high-conviction, automated trading framework specifically engineered for the **Indian Stock Market (NSE/BSE)**. Created and maintained by **swastick**, it combines state-of-the-art machine learning with dual-layer LLM sentiment analysis to navigate the complexities of Indian market volatility with institutional precision.
 
 ---
 
 ## 💎 Why stonxx?
 
-Most retail bots struggle with the "noise" of intraday trading and the high friction of the Indian market. **stonxx** solves this through:
+Retail trading in the Indian market is often a battle against noise, high slippage, and emotional bias. **stonxx** is designed to pivot away from low-probability intraday scalping towards high-conviction **Daily Swing Trading**.
 
--   **Deep ML Intelligence**: Built on an XGBoost engine trained on 10+ years (2015-2024) of NIFTY 15-minute historical data.
--   **Institutional Awareness**: Default configurations for ₹1 Crore+ portfolio management with realistic fee/slippage modeling (₹20 flat commission).
--   **Dual-Layer Veto System**: Every ML signal is cross-referenced against global macro sentiment (via **Google Gemini 2.5**) and local market news (via **Llama 3.2**).
--   **Native India Integration**: First-class support for **Dhan Broker** and intelligent Yahoo Finance fallback for backtesting.
+-   **Deep ML Intelligence**: Built on an XGBoost engine trained on 10+ years (2015-2024) of NIFTY 15-minute and Daily historical data.
+-   **Institutional Awareness**: Optimized for ₹1 Crore+ portfolio management with realistic fee/slippage modeling (₹20 flat commission per leg).
+-   **Dual-Layer Veto System**: Every ML signal is cross-referenced against global macro sentiment (via **Google Gemini 2.5 Flash**) and local market news (via **Llama 3.2**).
+-   **Native India Integration**: First-class support for **Dhan Broker** via LumiBot, with intelligent fallback to Yahoo Finance for high-fidelity backtesting.
+-   **Persistent Memory Bank**: Uses a local state manager to ensure active trades are tracked across bot restarts and crashes.
 
 ---
 
@@ -26,16 +28,40 @@ Most retail bots struggle with the "noise" of intraday trading and the high fric
 
 ### 🧠 AI-Driven Execution
 -   **Predictive Confidence**: Uses `predict_proba` with a strict **45% threshold** to minimize low-probability entries.
--   **Stationary Features**: Logic built on scale-invariant features (RSI, ATR ratios, VWAP distance), allowing the models to generalized from Nifty indices to individual liquid stocks.
+-   **Strictly Stationary Features**: Logic ignores raw prices, focusing on scale-invariant features:
+    -   *Log Returns & Volatility (20-bar std)*
+    -   *Volume Pressure (Buying vs Selling pressure ratio)*
+    -   *ATR Percentage & Bollinger Band Width*
+    -   *VWAP Distance & 200 EMA Trend Alignment*
 
-### 🛡️ Risk Management Engine
--   **ATR-Based Sizing**: Dynamic position sizing based on Kelly-inspired ATR risk (1% portfolio risk per trade, capped at 15% allocation).
--   **Intraday Circuit Breaker**: Instant "Sell All & Halt" trigger if the portfolio drops >2% within a single session.
--   **Bracket Scaling**: Automated Take-Profit and Stop-Loss placements based on 1.5x and 1.0x ATR multiples.
+### 🛡️ Institutional Risk Engine
+-   **ATR-Based Kelly Sizing**: Dynamic position sizing based on 1% portfolio risk per trade, capped at a maximum 15% allocation per asset.
+-   **Automatic Bracket Orders**: Hardcoded Take-Profit (1.5x ATR) and Stop-Loss (1.0x ATR) for every entry.
+-   **Intraday Circuit Breaker**: Instant "Sell All & Halt" trigger if the total portfolio drops more than 2% within a single trading session.
 
-### 📊 Real-Time Connectivity
--   **Paper Trade Alerts**: Live Telegram notifications for all order intents, entry, and exits.
--   **Local NLP Engine**: Runs local Llama 3.2 models (via Ollama) to scrape and analyze Indian financial press in real-time.
+### 📊 Real-Time Operations
+-   **Live Terminal Dashboard**: A `rich`-powered terminal interface for monitoring signals, active trades, and recent history.
+-   **Paper Trade Alerts**: Automatic Telegram notifications for every order intent, entry, and exit.
+-   **Local NLP Pipeline**: Scrapes Indian financial press and analyzes sentiment locally using Llama 3.2 (via Ollama).
+
+---
+
+## 🏗️ Project Architecture
+
+```text
+├── lumibot/                     # Core trading framework
+│   ├── brokers/dhan.py          # Native Dhan HQ API integration
+│   ├── example_strategies/      
+│   │   ├── stonxx_india_bot.py  # Main strategy logic (XGB + LLM)
+│   │   └── state_manager.py     # Memory Bank: persistence for trades
+├── data/                        # Local CSV datasets (NIFTY 15-min)
+├── dataset/                     # Processed feature matrices
+├── nifty_xgb_model.joblib       # Trained ML artifact (XGBoost)
+├── sentiment_engine.py          # Dual LLM sentiment analysis logic
+├── stonxx_dashboard.py          # Live terminal UI (Rich-based)
+├── run_stonxx_backtest.py       # High-fidelity backtest runner
+└── daily_paper_trader.py        # Live paper trading runner
+```
 
 ---
 
@@ -43,8 +69,8 @@ Most retail bots struggle with the "noise" of intraday trading and the high fric
 
 ### 1. Requirements
 -   Python 3.10+
--   Ollama (for Llama 3.2 local sentiment)
--   DhanHQ API Credentials
+-   Ollama (Required for local Llama 3.2 sentiment)
+-   DhanHQ API Access
 
 ### 2. Installation
 ```bash
@@ -57,8 +83,8 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-### 3. Environment Configuration
-Create a `.env.india` file in the root directory:
+### 3. Setup Environment
+Create a `.env.india` file in the root:
 ```env
 # Dhan Credentials
 DHAN_CLIENT_ID="your_id"
@@ -74,40 +100,37 @@ TELEGRAM_CHAT_ID="your_chat_id"
 
 ---
 
-## 📈 Usage
+## 📈 Usage Guide
 
-### Run a Backtest
-Validate the system on 2025 Out-of-Sample (OOS) data with realistic slippage:
+### 1. Backtesting
+Test the strategy on historical data with realistic Indian market fees (Tax, GST, STT simulated):
 ```bash
 python run_stonxx_backtest.py
 ```
 
-### Start Paper Trading
-Run the strategy in a safe paper environment with live Dhan data:
+### 2. Live/Paper Trading
+Start the bot in paper trading mode. It will scan the market every 15 minutes but execute based on Daily Swing signals:
 ```bash
 python daily_paper_trader.py
 ```
 
-### Train the Model
-Update the XGBoost artifact with the latest market data:
+### 3. Monitoring Dashboard
+In a separate terminal, launch the live dashboard to see real-time probabilities and active positions:
+```bash
+python stonxx_dashboard.py
+```
+
+### 4. Model Training
+Refresh the machine learning model using the latest NIFTY data:
 ```bash
 python train_nifty_model.py
 ```
 
 ---
 
-## 🏗️ Project Architecture
+## 👤 Authors
 
-```text
-├── lumibot/                     # Core trading framework
-│   ├── brokers/dhan.py          # Native Dhan integration
-│   └── example_strategies/      # Main strategy logic (stonxx_india_bot.py)
-├── data/                        # Local CSV datasets (NIFTY 15-min)
-├── dataset/                     # Processed feature matrices
-├── nifty_xgb_model.joblib       # Trained ML artifact
-├── sentiment_engine.py          # Dual LLM sentiment logic
-└── run_stonxx_backtest.py       # High-fidelity backtest runner
-```
+- **swastick** (@algoplutus1708) — Lead Developer & Quant Strategist
 
 ---
 
