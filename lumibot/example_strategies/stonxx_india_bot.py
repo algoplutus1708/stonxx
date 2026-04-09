@@ -21,6 +21,13 @@ import os
 import csv
 import requests
 
+# ── State persistence (Memory Bank) ───────────────────────────────────────────
+try:
+    from state_manager import STATE_FILE, load_state, save_state
+except ImportError:
+    # Fallback when the module is imported from outside its own package
+    from lumibot.example_strategies.state_manager import STATE_FILE, load_state, save_state
+
 try:
     import google.genai as genai
 
@@ -58,6 +65,24 @@ class stonxx(Strategy):
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def initialize(self):
+        # ── Memory Bank: restore persisted state on (re)start ─────────────────
+        self.state = load_state()
+        active = self.state.get("active_trades", {})
+        if active:
+            self.log_message(
+                f"[stonxx] Memory Bank restored — tracking {len(active)} active trade(s): "
+                + ", ".join(
+                    f"{sym}@{info.get('fill_price', '?')}"
+                    for sym, info in active.items()
+                ),
+                color="cyan",
+            )
+        else:
+            self.log_message(
+                "[stonxx] Memory Bank: no previous trades found. Starting fresh.",
+                color="cyan",
+            )
+
         # Match ML training resolution: 15 minutes
         self.sleeptime = "15M"
 
@@ -537,6 +562,55 @@ class stonxx(Strategy):
                     f"VETO SHORT {asset.symbol}: blocked by strong positive local sentiment ({local_score}).",
                     color="yellow",
                 )
+
+    # ── Memory Bank lifecycle hook ────────────────────────────────────────────
+
+    def on_filled_order(self, position, order, price, quantity, multiplier):
+        """
+        Called by LumiBot whenever an order is fully filled.
+
+        • BUY fill  → record the trade in self.state["active_trades"] and persist.
+        • SELL fill → if the resulting position is flat (qty == 0), remove the
+                      ticker from state and persist.
+
+        This hook runs on the broker's callback thread and is intentionally
+        lightweight — only dict mutations + a single file write — so it does
+        not block on_trading_iteration.
+        """
+        symbol = order.asset.symbol
+
+        if order.side == "buy":
+            self.state["active_trades"][symbol] = {
+                "fill_price": round(float(price), 4),
+                "quantity": int(quantity),
+            }
+            save_state(self.state)
+            self.log_message(
+                f"[Memory Bank] BUY recorded — {symbol}: "
+                f"qty={quantity} @ {price:.2f}",
+                color="green",
+            )
+
+        elif order.side == "sell":
+            # A position with qty == 0 (or None) means it has been fully closed
+            pos_qty = getattr(position, "quantity", None)
+            if pos_qty is None or pos_qty == 0:
+                removed = self.state["active_trades"].pop(symbol, None)
+                if removed is not None:
+                    save_state(self.state)
+                    self.log_message(
+                        f"[Memory Bank] SELL closed — {symbol} removed from active trades.",
+                        color="magenta",
+                    )
+            else:
+                # Partial fill: update the stored quantity
+                if symbol in self.state["active_trades"]:
+                    self.state["active_trades"][symbol]["quantity"] = int(pos_qty)
+                    save_state(self.state)
+                    self.log_message(
+                        f"[Memory Bank] PARTIAL SELL — {symbol} qty updated to {pos_qty}.",
+                        color="yellow",
+                    )
 
 
 if __name__ == "__main__":
