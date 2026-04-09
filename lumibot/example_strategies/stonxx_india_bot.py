@@ -275,9 +275,11 @@ class stonxx(Strategy):
         if self.model is None or self.features is None:
             return 0, 0.0
 
-        # Need enough 15-minute bars to cover the longest lookback (EMA 200)
-        # Request 15-minute bars to match ML feature training matrix exactly.
-        bars = self.get_historical_prices(asset, 250, "15 minutes")
+        # Fetch daily bars — swing trading anchors all indicators to daily timeframe.
+        # 250 daily bars covers EMA(200) warm-up comfortably.
+        # Note: self.sleeptime="15M" controls scan frequency; timeframe here
+        #       controls the resolution of the historical data fetched.
+        bars = self.get_historical_prices(asset, 250, "day")
         if bars is None or len(bars.df) < 200:
             self.log_message(f"Not enough bars for {asset.symbol} — skipping.", color="yellow")
             return 0, 0.0
@@ -337,8 +339,8 @@ class stonxx(Strategy):
     # ── ATR for position sizing ───────────────────────────────────────────────
 
     def _get_current_atr(self, asset: Asset) -> float | None:
-        """Fetch recent 15-minute bars to compute ATR matching ML targets."""
-        bars = self.get_historical_prices(asset, 50, "15 minutes")
+        """Fetch recent daily bars to compute ATR on the swing trading timeframe."""
+        bars = self.get_historical_prices(asset, 30, "day")
         if bars is None or len(bars.df) < 15:
             return None
         df = bars.df.copy()
