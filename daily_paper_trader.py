@@ -36,6 +36,7 @@ if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
 
 # ── 3. LumiBot imports ────────────────────────────────────────────────────────
 from lumibot.brokers import Dhan
+from lumibot.data_sources import DhanData
 from lumibot.traders import Trader
 from lumibot.example_strategies.stonxx_india_bot import stonxx as NiftySwingAlpha
 
@@ -47,18 +48,32 @@ if __name__ == "__main__":
     print("   STONXX — NiftySwingAlpha Paper Trader")
     print("=" * 60)
 
-    # 4a. Broker — paper_trade=True ensures no real orders are sent
+    # 4a. Data source — DhanData uses Yahoo Finance for historical bars
+    #     (cost-free, no Dhan subscription required for price history)
+    data_source = DhanData(
+        client_id=DHAN_CLIENT_ID,
+        access_token=DHAN_ACCESS_TOKEN,
+        use_yfinance_historical=True,
+    )
+
+    # 4b. Broker — must receive data_source explicitly
+    # Note: Dhan has no paper_trade flag; paper trading is enforced inside
+    # stonxx via IS_PAPER_TRADING=True, which skips real order submission
+    # and logs simulated trades to paper_trades.csv instead.
     broker = Dhan(
         client_id=DHAN_CLIENT_ID,
         access_token=DHAN_ACCESS_TOKEN,
-        paper_trade=True,
+        default_product_type=os.getenv("PRODUCT_TYPE", "INTRA"),
+        data_source=data_source,
     )
 
-    # 4b. Strategy — use universe from env if provided, else fall back to default
+    # 4b. Strategy
+    # IS_PAPER_TRADING=True in parameters forces the strategy into paper mode:
+    # orders are logged to paper_trades.csv; nothing is sent to Dhan.
     universe_raw = os.getenv("STRATEGY_UNIVERSE", "")
     universe = [s.strip() for s in universe_raw.split(",") if s.strip()] or None
 
-    strategy_params = {}
+    strategy_params = {"IS_PAPER_TRADING": True}
     if universe:
         strategy_params["universe"] = universe
         print(f"[stonxx] Trading universe (from env): {universe}")
