@@ -1,9 +1,11 @@
 from datetime import date
+from types import SimpleNamespace
 
 from lumibot.example_strategies.stonxx_india_bot import (
     compute_order_quantity,
     next_trading_day,
     rank_long_candidates,
+    stonxx,
 )
 
 
@@ -53,3 +55,35 @@ def test_rank_long_candidates_filters_negative_and_low_conviction_signals():
 
 def test_next_trading_day_skips_weekend():
     assert next_trading_day(date(2026, 4, 10)).isoformat() == "2026-04-13"
+
+
+def test_initialize_binds_timezone_to_asia_kolkata(monkeypatch):
+    strategy = stonxx.__new__(stonxx)
+    strategy.parameters = {}
+    strategy.is_backtesting = False
+    strategy.broker = SimpleNamespace(data_source=SimpleNamespace(tzinfo=None))
+    strategy.log_message = lambda *args, **kwargs: None
+    strategy.set_market = lambda market: setattr(strategy, "_market", market)
+    strategy.register_cron_callback = lambda *args, **kwargs: None
+    strategy._ensure_paper_trade_file = lambda: None
+
+    monkeypatch.setattr(
+        "lumibot.example_strategies.stonxx_india_bot.load_state",
+        lambda: {
+            "active_trades": {},
+            "pending_orders": [],
+            "paper_cash": 1_000_000.0,
+            "last_signal_date": None,
+            "last_submission_date": None,
+        },
+    )
+    monkeypatch.setattr(
+        "lumibot.example_strategies.stonxx_india_bot.joblib.load",
+        lambda path: (_ for _ in ()).throw(FileNotFoundError()),
+    )
+
+    strategy.initialize()
+
+    assert strategy._market == "XBOM"
+    assert strategy.timezone == "Asia/Kolkata"
+    assert strategy.sleeptime == "1D"

@@ -96,6 +96,10 @@ Running the agent live requires a Dhan trading account and API credentials.
     python run_india_live.py
     ```
 
+The `stonxx` strategy binds its cron callbacks to `Asia/Kolkata` in
+`initialize()`, so the after-close and next-open jobs follow IST even if the
+host machine is configured for a different timezone.
+
 > [!WARNING]
 > While running live, strictly monitor real-time order fills during the first few market sessions to ensure the agent's risk appetite aligns with your account's margin limits.
 

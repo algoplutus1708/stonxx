@@ -13,6 +13,7 @@ from datetime import date, timedelta
 
 import joblib
 import pandas as pd
+import pytz
 
 from lumibot.entities import Asset
 from lumibot.strategies.strategy import Strategy
@@ -103,6 +104,7 @@ class stonxx(Strategy):
 
     def initialize(self):
         self.set_market("XBOM")
+        self.broker.data_source.tzinfo = pytz.timezone("Asia/Kolkata")
         self.sleeptime = "1D"
         self.minutes_before_closing = 0
         self.minutes_after_closing = 15
@@ -156,8 +158,7 @@ class stonxx(Strategy):
         active = self.state.get("active_trades", {})
         if active:
             tracked = ", ".join(
-                f"{symbol}@{info.get('fill_price', '?')}x{info.get('quantity', '?')}"
-                for symbol, info in active.items()
+                f"{symbol}@{info.get('fill_price', '?')}x{info.get('quantity', '?')}" for symbol, info in active.items()
             )
             self.log_message(f"[stonxx] Restored active positions: {tracked}", color="cyan")
         else:
@@ -389,8 +390,7 @@ class stonxx(Strategy):
             return
 
         summary = ", ".join(
-            f"{order['side'].upper()} {order['symbol']} x{order['quantity']}"
-            for order in pending_orders
+            f"{order['side'].upper()} {order['symbol']} x{order['quantity']}" for order in pending_orders
         )
         self.log_message(f"[stonxx] Queued next-open orders: {summary}", color="green")
 
@@ -425,7 +425,10 @@ class stonxx(Strategy):
         max_affordable = int(float(self.state["paper_cash"]) / fill_price) if fill_price > 0 else 0
         quantity = min(quantity, max_affordable)
         if quantity <= 0:
-            self.log_message(f"[stonxx] Skipping paper BUY for {order['symbol']} due to cash constraints.", color="yellow")
+            self.log_message(
+                f"[stonxx] Skipping paper BUY for {order['symbol']} due to cash constraints.",
+                color="yellow",
+            )
             return
 
         self.state["paper_cash"] -= quantity * fill_price
@@ -466,15 +469,14 @@ class stonxx(Strategy):
                 )
                 self.submit_order(lumi_order)
                 self.log_message(
-                    f"[stonxx] Submitted next-open market order: {order['side'].upper()} {order['symbol']} x{order['quantity']}",
+                    (
+                        f"[stonxx] Submitted next-open market order: "
+                        f"{order['side'].upper()} {order['symbol']} x{order['quantity']}"
+                    ),
                     color="green",
                 )
 
-        remaining = [
-            order
-            for order in self.state.get("pending_orders", [])
-            if order not in due_orders
-        ]
+        remaining = [order for order in self.state.get("pending_orders", []) if order not in due_orders]
         self.state["pending_orders"] = remaining
         self.state["last_submission_date"] = today
         save_state(self.state)

@@ -9,6 +9,11 @@ This lifecycle methods is executed only once, when the strategy execution starts
     # self.minutes_before_closing: number of minutes before the market closes to stop trading
     class MyStrategy(Strategy):
         def initialize(self, my_custom_parameter=True):
+            # Bind cron callbacks to the exchange timezone when the host runs elsewhere.
+            # For NSE workflows, use Asia/Kolkata so after-close and next-open jobs stay aligned.
+            import pytz
+
+            self.broker.data_source.tzinfo = pytz.timezone("Asia/Kolkata")
             self.sleeptime = "5M"
             self.minutes_before_closing = 15
             self.my_custom_parameter = my_custom_parameter
