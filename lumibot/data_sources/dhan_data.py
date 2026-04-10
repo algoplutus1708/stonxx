@@ -280,6 +280,33 @@ class DhanData(DataSourceBacktesting):
             self._yahoo = None
 
     # ------------------------------------------------------------------
+    # Time override for Live Trading
+    # ------------------------------------------------------------------
+
+    @property
+    def _datetime(self):
+        """
+        Dynamically return wall-clock time if we are not in a backtest loop.
+        Because DhanData inherits from DataSourceBacktesting, it defaults to a
+        fixed timezone 1 year ago. This property override fixes live/paper trading.
+        """
+        is_bt = getattr(self, "is_backtesting", False)
+        # Check if the trader/broker explicitly set us into backtesting mode
+        if not is_bt:
+            import pandas as pd
+            tz = getattr(self, "tzinfo", None)
+            live_dt = pd.Timestamp.now(tz=tz).to_pydatetime()
+            if getattr(self, "_yahoo", None) is not None:
+                self._yahoo._datetime = live_dt
+            return live_dt
+        
+        return self.__dict__.get("_datetime_val", self.datetime_start)
+
+    @_datetime.setter
+    def _datetime(self, value):
+        self.__dict__["_datetime_val"] = value
+
+    # ------------------------------------------------------------------
     # Historical price retrieval
     # ------------------------------------------------------------------
 

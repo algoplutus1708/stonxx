@@ -51,7 +51,7 @@ except ImportError:
 
 
 # Minimum confidence threshold for predict_proba required to trigger a trade.
-CONFIDENCE_THRESHOLD = 0.45
+CONFIDENCE_THRESHOLD = 0.35
 
 # Position size: allocating 10% of available portfolio capital per trade
 POSITION_SIZE_PCT = 0.10
@@ -325,12 +325,13 @@ class stonxx(Strategy):
                 f"[{asset.symbol}] Logic check: Short={p_down:.3f} | Hold={p_hold:.3f} | Long={p_up:.3f}", color="blue"
             )
 
-            if p_up > CONFIDENCE_THRESHOLD:
-                return 1, float(p_up)
-            elif p_down > CONFIDENCE_THRESHOLD:
-                return -1, float(p_down)
-            else:
+            max_p = max(p_up, p_down, p_hold)
+            if max_p == p_hold or max_p < CONFIDENCE_THRESHOLD:
                 return 0, float(p_hold)
+            elif max_p == p_up:
+                return 1, float(p_up)
+            else:
+                return -1, float(p_down)
 
         except Exception as exc:
             self.log_message(f"Prediction error for {asset.symbol}: {exc}", color="red")
@@ -355,13 +356,18 @@ class stonxx(Strategy):
 
     def _calc_quantity(self, current_price: float) -> int:
         """Allocate exactly exactly 10% of portfolio capital per trade."""
-        portfolio_value = self.get_portfolio_value()
+        if self.IS_PAPER_TRADING:
+            portfolio_value = 1_000_000  # 10 Lakhs flat for paper trading
+            available_cash = 1_000_000
+        else:
+            portfolio_value = self.get_portfolio_value()
+            available_cash = self.get_cash()
+
         alloc_amount = portfolio_value * POSITION_SIZE_PCT
 
         qty = int(alloc_amount / current_price)
 
         # Ensure we have cash for the order
-        available_cash = self.get_cash()
         max_by_cash = int(available_cash * 0.95 / current_price)
         qty = min(qty, max_by_cash)
 
@@ -464,11 +470,12 @@ class stonxx(Strategy):
                 news = self.sentiment_engine.fetch_text_data(asset.symbol)
                 llm_score = self.sentiment_engine.analyze_sentiment(news)
                 if llm_score < -0.25:
-                    self.log_message("VETO: LLM blocked BUY (bearish sentiment)", color="yellow")
+                    self.log_message(f"VETO LONG {asset.symbol}: LLM blocked BUY (bearish sentiment {llm_score})", color="yellow")
                     continue
 
                 current_atr = self._get_current_atr(asset)
                 if current_atr is None or current_atr <= 0:
+                    self.log_message(f"VETO LONG {asset.symbol}: ATR computation failed or zero.", color="red")
                     continue
                 current_price = self.get_last_price(asset)
                 stop_loss_price = current_price - (current_atr * 1.0)
@@ -476,6 +483,7 @@ class stonxx(Strategy):
                 quantity = self._calc_quantity(current_price)
 
                 if quantity <= 0:
+                    self.log_message(f"VETO LONG {asset.symbol}: Calculated quantity is 0 (check cash/budget: {self.get_cash():.2f}).", color="red")
                     continue
 
                 if not self.IS_PAPER_TRADING:
@@ -504,11 +512,12 @@ class stonxx(Strategy):
                 news = self.sentiment_engine.fetch_text_data(asset.symbol)
                 llm_score = self.sentiment_engine.analyze_sentiment(news)
                 if llm_score > 0.25:
-                    self.log_message("VETO: LLM blocked SELL (bullish sentiment)", color="yellow")
+                    self.log_message(f"VETO SHORT {asset.symbol}: LLM blocked SELL (bullish sentiment {llm_score})", color="yellow")
                     continue
 
                 current_atr = self._get_current_atr(asset)
                 if current_atr is None or current_atr <= 0:
+                    self.log_message(f"VETO SHORT {asset.symbol}: ATR computation failed or zero.", color="red")
                     continue
                 current_price = self.get_last_price(asset)
                 stop_loss_price = current_price + (current_atr * 1.0)
@@ -516,6 +525,7 @@ class stonxx(Strategy):
                 quantity = self._calc_quantity(current_price)
 
                 if quantity <= 0:
+                    self.log_message(f"VETO SHORT {asset.symbol}: Calculated quantity is 0 (check cash/budget: {self.get_cash():.2f}).", color="red")
                     continue
 
                 if not self.IS_PAPER_TRADING:

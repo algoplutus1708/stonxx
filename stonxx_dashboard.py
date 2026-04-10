@@ -56,9 +56,18 @@ def _fmt_ts(ts_str: str) -> str:
         delta = datetime.now() - dt
         mins = int(delta.total_seconds() // 60)
         if mins < 60:
-            return f"{mins}m ago"
-        hrs = mins // 60
-        return f"{hrs}h {mins % 60}m ago"
+            rel = f"{mins}m ago"
+        else:
+            hrs = mins // 60
+            rel = f"{hrs}h {mins % 60}m ago"
+            
+        # Absolute timestamp
+        if delta.days > 0 or delta.days < -1:
+            abs_ts = dt.strftime("%b %d, %H:%M")
+        else:
+            abs_ts = dt.strftime("%H:%M:%S")
+            
+        return f"{abs_ts} ({rel})"
     except Exception:
         return ts_str
 
@@ -276,7 +285,7 @@ def make_paper_trades_table(trades: list[dict]) -> Panel:
         expand=True,
         padding=(0, 1),
     )
-    table.add_column("Time",     min_width=12)
+    table.add_column("Time",     min_width=22)
     table.add_column("Symbol",   style="bold white", min_width=10)
     table.add_column("Dir",      justify="center",   min_width=7)
     table.add_column("Qty",      justify="right",    min_width=6)
