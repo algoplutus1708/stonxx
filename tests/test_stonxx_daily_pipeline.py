@@ -8,6 +8,8 @@ from train_yf_model import (
     DEFAULT_PANEL_PATH,
     FEATURE_COLUMNS,
     FORWARD_HORIZON_DAYS,
+    TRAIN_CUTOFF_DATE,
+    apply_training_cutoff,
     generate_temporal_splits,
     load_price_panel,
     prepare_training_frame,
@@ -16,8 +18,8 @@ from train_yf_model import (
 from yf_historical_fetcher import build_panel_from_histories
 
 
-def _make_history(start_price: float, step: float, periods: int = 80) -> pd.DataFrame:
-    dates = pd.bdate_range("2024-01-01", periods=periods, tz="Asia/Kolkata")
+def _make_history(start_price: float, step: float, periods: int = 80, start: str = "2024-01-01") -> pd.DataFrame:
+    dates = pd.bdate_range(start, periods=periods, tz="Asia/Kolkata")
     close = start_price + (np.arange(periods) * step)
     frame = pd.DataFrame(
         {
@@ -79,6 +81,23 @@ def test_load_price_panel_rejects_missing_custom_path(tmp_path):
 
     with pytest.raises(FileNotFoundError, match="yf_historical_fetcher.py --output"):
         load_price_panel(str(missing_path))
+
+
+def test_training_cutoff_excludes_2024_rows_from_training_frame():
+    histories = {
+        "^NSEI": _make_history(20_000.0, 4.0, periods=90, start="2023-10-02"),
+        "RELIANCE.NS": _make_history(2_400.0, 2.0, periods=90, start="2023-10-02"),
+        "INFY.NS": _make_history(1_600.0, 1.25, periods=90, start="2023-10-02"),
+    }
+    panel = build_panel_from_histories(histories, benchmark_ticker="^NSEI")
+
+    assert panel["datetime"].dt.year.max() >= 2024
+
+    filtered_panel = apply_training_cutoff(panel)
+    training_frame = prepare_training_frame(filtered_panel, forward_horizon_days=FORWARD_HORIZON_DAYS)
+
+    assert filtered_panel["datetime"].dt.year.max() == 2023
+    assert training_frame["datetime"].dt.year.max() == 2023
 
 
 def test_build_panel_from_histories_merges_benchmark_and_normalizes_symbols():

@@ -109,6 +109,10 @@ Test the strategy on historical data with realistic Indian market fees (Tax, GST
 ```bash
 python run_stonxx_backtest.py
 ```
+Or, equivalently:
+```bash
+python run_daily_backtest.py
+```
 
 ### 2. Prepare Daily Research Data
 Build or refresh the split-adjusted daily Yahoo Finance panel used by the swing baseline:
@@ -122,6 +126,7 @@ Train the leak-aware daily cross-sectional baseline with temporal walk-forward v
 python train_yf_model.py
 ```
 If `data/stonxx_daily_panel_yf.parquet` is missing, the trainer will generate it automatically from Yahoo Finance before fitting.
+The training run is hard-capped at `2023-12-31`, so all 2024+ rows stay out of sample before walk-forward splits are created.
 
 ### 4. Live/Paper Trading
 Start the bot in paper trading mode. It will scan the market every 15 minutes but execute based on Daily Swing signals:

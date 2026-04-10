@@ -3,7 +3,8 @@
 The baseline predicts each stock's 5-trading-day forward return from a
 split-adjusted daily Yahoo Finance panel. Validation is done with expanding
 walk-forward splits plus an embargo gap so train dates always precede
-validation dates globally across the entire stock panel.
+validation dates globally across the entire stock panel. Training is hard-capped
+at 2023-12-31 so 2024+ rows stay strictly out of sample.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from xgboost import XGBRegressor
 
 DEFAULT_PANEL_PATH = "data/stonxx_daily_panel_yf.parquet"
 DEFAULT_MODEL_PATH = "stonxx_daily_panel_model.joblib"
+TRAIN_CUTOFF_DATE = "2023-12-31"
 FORWARD_HORIZON_DAYS = 5
 BENCHMARK_TICKER = "^NSEI"
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
@@ -98,6 +100,24 @@ def load_price_panel(path: str = DEFAULT_PANEL_PATH) -> pd.DataFrame:
     frame["datetime"] = pd.to_datetime(frame["datetime"])
     frame = frame.sort_values(["ticker", "datetime"]).reset_index(drop=True)
     return frame
+
+
+def apply_training_cutoff(panel: pd.DataFrame, cutoff_date: str = TRAIN_CUTOFF_DATE) -> pd.DataFrame:
+    """Drop all rows strictly after the out-of-sample training cutoff."""
+    frame = panel.copy()
+    frame["datetime"] = pd.to_datetime(frame["datetime"])
+
+    cutoff = pd.Timestamp(cutoff_date) + pd.Timedelta(days=1) - pd.Timedelta(nanoseconds=1)
+    tzinfo = getattr(frame["datetime"].dt, "tz", None)
+    if tzinfo is not None:
+        cutoff = cutoff.tz_localize(tzinfo)
+
+    filtered = frame.loc[frame["datetime"] <= cutoff].copy()
+    if filtered.empty:
+        raise ValueError(f"No rows remain on or before training cutoff {cutoff_date}")
+
+    filtered = filtered.sort_values(["ticker", "datetime"]).reset_index(drop=True)
+    return filtered
 
 
 def compute_rsi(series: pd.Series, length: int) -> pd.Series:
@@ -362,6 +382,7 @@ def train_baseline_model(
 ) -> dict:
     """Train and persist the daily XGBoost baseline."""
     panel = load_price_panel(panel_path)
+    panel = apply_training_cutoff(panel)
     frame = prepare_training_frame(panel, forward_horizon_days=FORWARD_HORIZON_DAYS)
     splits = generate_temporal_splits(
         frame,
@@ -371,7 +392,7 @@ def train_baseline_model(
         embargo_days=embargo_days,
     )
 
-    print(f"Loaded panel rows: {len(panel):,}")
+    print(f"Loaded panel rows through {TRAIN_CUTOFF_DATE}: {len(panel):,}")
     print(f"Training rows after feature prep: {len(frame):,}")
     print(f"Stocks in panel: {frame['ticker'].nunique()}")
     print(f"Feature columns: {FEATURE_COLUMNS}")

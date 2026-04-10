@@ -1,6 +1,8 @@
 from datetime import date
 from types import SimpleNamespace
 
+import run_daily_backtest
+
 from lumibot.example_strategies.stonxx_india_bot import (
     compute_order_quantity,
     next_trading_day,
@@ -87,3 +89,17 @@ def test_initialize_binds_timezone_to_asia_kolkata(monkeypatch):
     assert strategy._market == "XBOM"
     assert strategy.timezone == "Asia/Kolkata"
     assert strategy.sleeptime == "1D"
+
+
+def test_run_daily_backtest_alias_delegates(monkeypatch):
+    called = {"ran": False}
+
+    monkeypatch.setattr(
+        run_daily_backtest,
+        "_run_stonxx_backtest",
+        lambda: called.__setitem__("ran", True),
+    )
+
+    run_daily_backtest.run_backtest()
+
+    assert called["ran"] is True

@@ -62,6 +62,8 @@ The fetcher saves ``data/stonxx_daily_panel_yf.parquet`` and the trainer saves
 trainer will build it automatically before fitting. The baseline trainer uses
 expanding temporal validation with an embargo gap so train dates always
 precede validation dates across the entire stock panel.
+Training is hard-capped at ``2023-12-31``, so 2024+ rows remain strictly out
+of sample before the walk-forward splits are generated.
 
 Stocks
 ------

@@ -72,6 +72,8 @@ panel, and if the default parquet is missing it will build it automatically
 before computing long-only ranking features such as normalized momentum,
 `rsi_5`, and benchmark-relative alpha, then saving
 `stonxx_daily_panel_model.joblib`.
+Training is hard-capped at `2023-12-31`, so 2024+ rows never enter the
+expanding walk-forward splits or model fit.
 
 Important operating assumptions:
 
