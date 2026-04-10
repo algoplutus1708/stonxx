@@ -136,10 +136,17 @@ def _prepare_feature_frame(
     frame = frame.drop(columns=["benchmark_close"]).merge(benchmark, on="datetime", how="left")
 
     by_ticker = frame.groupby("ticker", group_keys=False)
+    prev_close = by_ticker["close"].shift(1)
+    frame["true_range"] = pd.concat(
+        [
+            frame["high"] - frame["low"],
+            (frame["high"] - prev_close).abs(),
+            (frame["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
     frame["sma_20"] = by_ticker["close"].transform(lambda s: s.rolling(20).mean())
-    frame["atr_20"] = by_ticker.apply(
-        lambda group: compute_true_range(group).rolling(20).mean()
-    ).reset_index(level=0, drop=True)
+    frame["atr_20"] = by_ticker["true_range"].transform(lambda s: s.rolling(20).mean())
     frame["vol_norm_momentum"] = (frame["close"] - frame["sma_20"]) / frame["atr_20"].replace(0.0, np.nan)
     frame["rsi_5"] = by_ticker["close"].transform(lambda s: compute_rsi(s, 5))
     frame["stock_return_30"] = by_ticker["close"].transform(lambda s: s.pct_change(30))

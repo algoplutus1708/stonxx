@@ -128,13 +128,14 @@ def test_prepare_symbol_inference_frame_matches_training_features():
         ticker="RELIANCE",
     )
 
-    training_last = (
-        training_frame[training_frame["ticker"] == "RELIANCE"]
-        .sort_values("datetime")
-        .iloc[-1][FEATURE_COLUMNS]
-    )
-    live_last = live_frame.sort_values("datetime").iloc[-1][FEATURE_COLUMNS]
+    training_symbol = training_frame[training_frame["ticker"] == "RELIANCE"].sort_values("datetime")
+    live_symbol = live_frame.sort_values("datetime")
+    comparison_datetime = training_symbol.iloc[-1]["datetime"]
+
+    training_last = training_symbol[training_symbol["datetime"] == comparison_datetime].iloc[-1][FEATURE_COLUMNS]
+    live_last = live_symbol[live_symbol["datetime"] == comparison_datetime].iloc[-1][FEATURE_COLUMNS]
 
     assert list(live_frame.columns) == ["datetime", "ticker", *FEATURE_COLUMNS]
+    assert live_symbol["datetime"].max() > training_symbol["datetime"].max()
     for feature in FEATURE_COLUMNS:
         assert live_last[feature] == pytest.approx(training_last[feature])
