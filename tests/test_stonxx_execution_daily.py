@@ -79,7 +79,9 @@ def test_basket_strategy_buys_missing_positions(monkeypatch):
     strategy.basket_symbols = ["MARUTI.NS", "RELIANCE.NS", "BHARTIARTL.NS"]
     strategy.get_positions = lambda: []
     strategy.get_portfolio_value = lambda: 9_000_000.0
-    strategy.get_last_price = lambda asset: {"MARUTI.NS": 16000.0, "RELIANCE.NS": 1550.0, "BHARTIARTL.NS": 2150.0}[asset.symbol]
+    strategy.get_last_price = lambda asset: {"MARUTI.NS": 16000.0, "RELIANCE.NS": 1550.0, "BHARTIARTL.NS": 2150.0}[
+        asset.symbol
+    ]
 
     submitted_orders = []
     strategy.submit_order = lambda order: submitted_orders.append(order)
