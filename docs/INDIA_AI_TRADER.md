@@ -68,8 +68,10 @@ intraday broker history. The research loop is:
     ```
 
 The fetcher writes `data/stonxx_daily_panel_yf.parquet`. The trainer reads that
-panel, computes long-only ranking features such as normalized momentum, `rsi_5`,
-and benchmark-relative alpha, then saves `stonxx_daily_panel_model.joblib`.
+panel, and if the default parquet is missing it will build it automatically
+before computing long-only ranking features such as normalized momentum,
+`rsi_5`, and benchmark-relative alpha, then saving
+`stonxx_daily_panel_model.joblib`.
 
 Important operating assumptions:
 

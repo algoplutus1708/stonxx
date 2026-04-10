@@ -1,11 +1,15 @@
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from train_yf_model import (
+    DEFAULT_PANEL_PATH,
     FEATURE_COLUMNS,
     FORWARD_HORIZON_DAYS,
     generate_temporal_splits,
+    load_price_panel,
     prepare_training_frame,
     prepare_symbol_inference_frame,
 )
@@ -27,6 +31,54 @@ def _make_history(start_price: float, step: float, periods: int = 80) -> pd.Data
     )
     frame.index.name = "datetime"
     return frame
+
+
+def test_load_price_panel_builds_default_panel_when_missing(tmp_path, monkeypatch):
+    panel_path = tmp_path / Path(DEFAULT_PANEL_PATH).name
+    sample_panel = pd.DataFrame(
+        [
+            {
+                "datetime": "2024-01-02",
+                "ticker": "B",
+                "open": 2.0,
+                "high": 3.0,
+                "low": 1.5,
+                "close": 2.5,
+                "volume": 200.0,
+                "benchmark_close": 100.0,
+            },
+            {
+                "datetime": "2024-01-01",
+                "ticker": "A",
+                "open": 1.0,
+                "high": 1.5,
+                "low": 0.5,
+                "close": 1.25,
+                "volume": 100.0,
+                "benchmark_close": 99.0,
+            },
+        ]
+    )
+
+    def fake_builder(output_path: Path) -> None:
+        assert output_path == panel_path
+        sample_panel.to_parquet(output_path, index=False)
+
+    monkeypatch.setattr("train_yf_model.DEFAULT_PANEL_PATH", str(panel_path))
+    monkeypatch.setattr("train_yf_model._download_default_price_panel", fake_builder)
+
+    loaded = load_price_panel(str(panel_path))
+
+    assert loaded["ticker"].tolist() == ["A", "B"]
+    assert loaded["datetime"].tolist() == list(pd.to_datetime(["2024-01-01", "2024-01-02"]))
+    assert loaded["benchmark_close"].tolist() == [99.0, 100.0]
+
+
+def test_load_price_panel_rejects_missing_custom_path(tmp_path):
+    missing_path = tmp_path / "missing_panel.parquet"
+
+    with pytest.raises(FileNotFoundError, match="yf_historical_fetcher.py --output"):
+        load_price_panel(str(missing_path))
 
 
 def test_build_panel_from_histories_merges_benchmark_and_normalizes_symbols():
@@ -69,14 +121,10 @@ def test_prepare_training_frame_creates_features_and_forward_target():
     source_position = 30
     expected_target = raw_prices.iloc[source_position + FORWARD_HORIZON_DAYS] / raw_prices.iloc[source_position] - 1.0
     expected_stock_return_30 = raw_prices.iloc[source_position] / raw_prices.iloc[source_position - 30] - 1.0
-    expected_benchmark_return_30 = (
-        raw_benchmark.iloc[source_position] / raw_benchmark.iloc[source_position - 30] - 1.0
-    )
+    expected_benchmark_return_30 = raw_benchmark.iloc[source_position] / raw_benchmark.iloc[source_position - 30] - 1.0
 
     assert sample_row["target_forward_return_5d"] == pytest.approx(expected_target)
-    assert sample_row["benchmark_alpha"] == pytest.approx(
-        expected_stock_return_30 - expected_benchmark_return_30
-    )
+    assert sample_row["benchmark_alpha"] == pytest.approx(expected_stock_return_30 - expected_benchmark_return_30)
 
 
 def test_generate_temporal_splits_respects_embargo_gap():

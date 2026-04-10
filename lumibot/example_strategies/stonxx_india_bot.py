@@ -102,7 +102,7 @@ class stonxx(Strategy):
     """Daily long-only swing strategy using next-open execution intents."""
 
     def initialize(self):
-        self.set_market("NSE_INDIA")
+        self.set_market("XBOM")
         self.sleeptime = "1D"
         self.minutes_before_closing = 0
         self.minutes_after_closing = 15

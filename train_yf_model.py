@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -56,9 +57,38 @@ class TemporalSplit:
     validation_mask: np.ndarray
 
 
+def _download_default_price_panel(output_path: Path) -> None:
+    """Generate the default Yahoo Finance panel at the requested path."""
+    from yf_historical_fetcher import fetch_data
+
+    fetch_data(output_path=str(output_path))
+
+
 def load_price_panel(path: str = DEFAULT_PANEL_PATH) -> pd.DataFrame:
-    """Load the daily stock panel saved by yf_historical_fetcher.py."""
-    frame = pd.read_parquet(path)
+    """Load the daily stock panel saved by yf_historical_fetcher.py.
+
+    If the default panel path is missing, build it automatically with the
+    Yahoo fetcher so the trainer can run end-to-end from a clean checkout.
+    """
+    panel_path = Path(path)
+    default_panel_path = Path(DEFAULT_PANEL_PATH).resolve(strict=False)
+
+    if not panel_path.exists():
+        if panel_path.resolve(strict=False) != default_panel_path:
+            raise FileNotFoundError(
+                f"Panel file not found: {panel_path}. Run `python yf_historical_fetcher.py --output {panel_path}` "
+                "or point --panel-path at an existing parquet file."
+            )
+
+        print(f"[train_yf_model] Missing default panel {panel_path}; building it now.")
+        _download_default_price_panel(panel_path)
+
+    if not panel_path.exists():
+        raise FileNotFoundError(
+            f"Panel file could not be created: {panel_path}. Run `python yf_historical_fetcher.py` and try again."
+        )
+
+    frame = pd.read_parquet(panel_path)
     required = {"datetime", "ticker", "open", "high", "low", "close", "volume", "benchmark_close"}
     missing = required.difference(frame.columns)
     if missing:
@@ -211,9 +241,7 @@ def generate_temporal_splits(
     unique_dates = pd.Index(sorted(pd.to_datetime(frame["datetime"]).unique()))
     min_required = min_train_days + embargo_days + validation_window_days
     if len(unique_dates) < min_required:
-        raise ValueError(
-            f"Need at least {min_required} unique dates, found {len(unique_dates)}"
-        )
+        raise ValueError(f"Need at least {min_required} unique dates, found {len(unique_dates)}")
 
     max_train_end_position = len(unique_dates) - embargo_days - validation_window_days - 1
     candidate_positions = np.linspace(
@@ -383,8 +411,7 @@ def train_baseline_model(
     final_model = _make_model()
     final_model.fit(frame[FEATURE_COLUMNS], frame["target_forward_return_5d"])
     importance = {
-        feature: round(float(score), 6)
-        for feature, score in zip(FEATURE_COLUMNS, final_model.feature_importances_)
+        feature: round(float(score), 6) for feature, score in zip(FEATURE_COLUMNS, final_model.feature_importances_)
     }
 
     mean_metrics = {

@@ -46,13 +46,6 @@ _DATA_QUOTE_FIELDS = {
 # PERF: module-level sentinel used to avoid eager-evaluating fallbacks in `getattr()` hot paths.
 _MISSING = object()
 
-# Set the option to raise an error if downcasting is not possible (if available in this pandas version)
-try:
-    pd.set_option('future.no_silent_downcasting', True)
-except (pd._config.config.OptionError, AttributeError):
-    # Option not available in this pandas version, skip it
-    pass
-
 
 class Data:
     """Input and manage Pandas dataframes for backtesting.
@@ -183,9 +176,7 @@ class Data:
             )
 
         if timestep not in ["minute", "hour", "day"]:
-            raise ValueError(
-                f"Timestep must be one of 'minute', 'hour', or 'day'. You entered: {timestep}"
-            )
+            raise ValueError(f"Timestep must be one of 'minute', 'hour', or 'day'. You entered: {timestep}")
 
         self.timestep = timestep
 
@@ -330,7 +321,7 @@ class Data:
         # Set the start and end dates of the data.
         for dt in [date_start, date_end]:
             if dt and not isinstance(dt, datetime.datetime):
-                raise TypeError(f"Start and End dates must be entries as full datetimes. {dt} " f"was entered")
+                raise TypeError(f"Start and End dates must be entries as full datetimes. {dt} was entered")
 
         if not date_start:
             date_start = self.df.index.min()
@@ -366,21 +357,16 @@ class Data:
             )
         return df
 
-    # ./lumibot/build/__editable__.lumibot-3.1.14-py3-none-any/lumibot/entities/data.py:280:
-    # FutureWarning: Downcasting object dtype arrays on .fillna, .ffill, .bfill is deprecated and will change in a future version.
-    # Call result.infer_objects(copy=False) instead.
-    # To opt-in to the future behavior, set `pd.set_option('future.no_silent_downcasting', True)`
-
     def repair_times_and_fill(self, idx):
         # OPTIMIZATION: Use searchsorted instead of expensive boolean indexing
         # Replace: idx[(idx >= self.datetime_start) & (idx <= self.datetime_end)]
-        start_pos = idx.searchsorted(self.datetime_start, side='left')
-        end_pos = idx.searchsorted(self.datetime_end, side='right')
+        start_pos = idx.searchsorted(self.datetime_start, side="left")
+        end_pos = idx.searchsorted(self.datetime_end, side="right")
         idx = idx[start_pos:end_pos]
 
         # OPTIMIZATION: More efficient duplicate removal
         if self.df.index.has_duplicates:
-            self.df = self.df[~self.df.index.duplicated(keep='first')]
+            self.df = self.df[~self.df.index.duplicated(keep="first")]
 
         # Reindex the DataFrame with the new index and forward-fill missing values.
         df = self.df.reindex(idx, method="ffill")
@@ -389,7 +375,7 @@ class Data:
         if "volume" in df.columns:
             df.loc[df["volume"].isna(), "volume"] = 0
         else:
-            df["volume"] = None
+            df["volume"] = np.nan
 
         # CRITICAL FIX: Time-gap aware forward-fill for bid/ask columns
         # Prevent stale weekend/after-hours quote data from being forward-filled
@@ -432,6 +418,7 @@ class Data:
         non_ohlc_cols = [col for col in df.columns if col not in ohlc_cols and col not in quote_cols_set]
         if non_ohlc_cols:
             df[non_ohlc_cols] = df[non_ohlc_cols].ffill()
+            df[non_ohlc_cols] = df[non_ohlc_cols].infer_objects(copy=False)
 
         # For quote columns, do segment-wise ffill (don't fill across session boundaries)
         if apply_quote_session_boundaries and quote_cols_present and isinstance(df.index, pd.DatetimeIndex):
@@ -444,11 +431,12 @@ class Data:
             for col in quote_cols_present:
                 # Group by segment and forward-fill within each group only
                 df[col] = df.groupby(segment_ids)[col].ffill()
+                df[col] = df[col].infer_objects(copy=False)
 
         # If any of close, open, high, low columns are missing, add them with NaN.
         for col in ["close", "open", "high", "low"]:
             if col not in df.columns:
-                df[col] = None
+                df[col] = np.nan
 
         # OPTIMIZATION: Vectorized NaN filling for OHLC columns
         if "close" in df.columns:
@@ -721,8 +709,9 @@ class Data:
             if self.timestep == "day":
                 # Convert datetime_end to UTC to get the actual date the bar represents
                 import pytz
+
                 utc = pytz.UTC
-                if hasattr(self.datetime_end, 'astimezone'):
+                if hasattr(self.datetime_end, "astimezone"):
                     datetime_end_utc = self.datetime_end.astimezone(utc)
                 else:
                     datetime_end_utc = self.datetime_end
@@ -811,7 +800,7 @@ class Data:
         -------
         float or Decimal or None
             Returns the close price (or open price for intraday before bar completion).
-            
+
             IMPORTANT: This method is trade/bar based only. It never falls back to bid/ask
             quotes. Use `get_quote()` / `get_price_snapshot()` for quote/mark pricing.
         """
@@ -1171,9 +1160,9 @@ class Data:
             if needs_copy:
                 df = df.copy()
                 if has_volume and getattr(self, "_volume_has_nan", False):
-                    df["volume"] = df["volume"].fillna(0)
+                    df["volume"] = df["volume"].fillna(0).infer_objects(copy=False)
                 if has_dividend and getattr(self, "_dividend_has_nan", False):
-                    df["dividend"] = df["dividend"].fillna(0)
+                    df["dividend"] = df["dividend"].fillna(0).infer_objects(copy=False)
 
             required = getattr(self, "_bars_required_cols", None)
             if required is None:
@@ -1202,10 +1191,7 @@ class Data:
         if (
             quantity == 1
             and self._index_is_unique
-            and (
-                (timestep == "minute" and self.timestep == "minute")
-                or (timestep == "day" and self.timestep == "day")
-            )
+            and ((timestep == "minute" and self.timestep == "minute") or (timestep == "day" and self.timestep == "day"))
         ):
             # PERF: avoid reconstructing a DataFrame from datalines on every call.
             # The underlying `self.df` is already indexed by datetime, so we can slice by
@@ -1294,9 +1280,9 @@ class Data:
             if needs_copy:
                 df = df.copy()
                 if has_volume and getattr(self, "_volume_has_nan", False):
-                    df["volume"] = df["volume"].fillna(0)
+                    df["volume"] = df["volume"].fillna(0).infer_objects(copy=False)
                 if has_dividend and getattr(self, "_dividend_has_nan", False):
-                    df["dividend"] = df["dividend"].fillna(0)
+                    df["dividend"] = df["dividend"].fillna(0).infer_objects(copy=False)
 
             required = getattr(self, "_bars_required_cols", None)
             if required is None:
@@ -1321,7 +1307,7 @@ class Data:
             unit = "D"
             data = self._get_bars_dict(dt, length=length, timestep="hour", timeshift=timeshift)
 
-        elif timestep == 'day' and self.timestep == 'day':
+        elif timestep == "day" and self.timestep == "day":
             unit = "D"
             data = self._get_bars_dict(dt, length=length, timestep=timestep, timeshift=timeshift)
 
@@ -1344,7 +1330,7 @@ class Data:
         if data is None:
             return None
 
-        df = pd.DataFrame(data).assign(datetime=lambda df: pd.to_datetime(df['datetime'])).set_index('datetime')
+        df = pd.DataFrame(data).assign(datetime=lambda df: pd.to_datetime(df["datetime"])).set_index("datetime")
         if "dividend" in df.columns:
             agg_column_map["dividend"] = "sum"
         df_result = df.resample(f"{quantity}{unit}").agg(agg_column_map)

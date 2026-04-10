@@ -43,6 +43,7 @@ except ImportError:
     # Fallback for Python < 3.8
     try:
         import pkg_resources
+
         __version__ = pkg_resources.get_distribution("lumibot").version
     except:
         __version__ = "unknown"
@@ -57,6 +58,13 @@ major, minor = sys.version_info[:2]
 # Check if Python version is less than 3.10
 if (major, minor) < (3, 10):
     warnings.warn("Lumibot requires Python 3.10 or higher.", RuntimeWarning)
+
+# alpaca-py still imports deprecated websockets legacy APIs in the current release.
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=r"websockets\.legacy is deprecated")
+warnings.filterwarnings("ignore", category=DeprecationWarning, message=r"websockets\.client\.connect is deprecated")
+warnings.filterwarnings(
+    "ignore", category=DeprecationWarning, message=r"websockets\.client\.WebSocketClientProtocol is deprecated"
+)
 
 # SOURCE PATH
 # Import constants from constants module (before importing submodules to avoid circular imports)
@@ -91,6 +99,7 @@ if not os.path.exists(LUMIBOT_CACHE_FOLDER):
 
 # Map the root package alias.
 import lumibot.entities as _lb_entities
+
 sys.modules.setdefault("entities", _lb_entities)
 
 # Expose common sub-modules (asset, bars, data, order, position, trading_fee)
@@ -107,32 +116,32 @@ for _sub in ("asset", "bars", "data", "order", "position", "trading_fee"):
         logger.warning(f"[lumibot/__init__.py] Could not create alias '{_alias}' for '{_full}': {e}")
         # Ensure the problematic alias isn't lingering if it was partially set or if it's a mock
         if _alias in sys.modules and isinstance(sys.modules[_alias], importlib.util.LazyLoader):
-            pass # Don't remove if it's a lazy loader that might resolve later or differently
+            pass  # Don't remove if it's a lazy loader that might resolve later or differently
         elif _alias in sys.modules:
             # If it's a real module or a simple mock that failed, best to remove its alias attempt
             # to avoid Sphinx confusion with a potentially broken module object.
             # However, if Sphinx/autodoc is running, it might be safer to leave mocks as they are.
             # For now, we'll log and continue, letting Sphinx handle missing modules.
             # Reconsidering removal: could interfere with Sphinx's own mock handling.
-            pass # Reconsidering removal: could interfere with Sphinx's own mock handling
-    except ImportError as e: # Catch other import-related errors
+            pass  # Reconsidering removal: could interfere with Sphinx's own mock handling
+    except ImportError as e:  # Catch other import-related errors
         logger.warning(f"[lumibot/__init__.py] ImportError while creating alias '{_alias}' for '{_full}': {e}")
-    except Exception as e: # Catch any other unexpected errors during aliasing
+    except Exception as e:  # Catch any other unexpected errors during aliasing
         logger.warning(f"[lumibot/__init__.py] Unexpected error creating alias '{_alias}' for '{_full}': {e}")
 
 # Export the default timezone constants so they can be imported by other modules
 __all__ = [
-    '__version__',
-    'LUMIBOT_DEFAULT_TIMEZONE',
-    'LUMIBOT_DEFAULT_PYTZ',
-    'LUMIBOT_DEFAULT_QUOTE_ASSET_SYMBOL',
-    'LUMIBOT_DEFAULT_QUOTE_ASSET_TYPE',
-    'LUMIBOT_SOURCE_PATH',
-    'LUMIBOT_CACHE_FOLDER',
-    'strategies',
-    'brokers',
-    'backtesting',
-    'entities',
-    'data_sources',
-    'traders'
+    "__version__",
+    "LUMIBOT_DEFAULT_TIMEZONE",
+    "LUMIBOT_DEFAULT_PYTZ",
+    "LUMIBOT_DEFAULT_QUOTE_ASSET_SYMBOL",
+    "LUMIBOT_DEFAULT_QUOTE_ASSET_TYPE",
+    "LUMIBOT_SOURCE_PATH",
+    "LUMIBOT_CACHE_FOLDER",
+    "strategies",
+    "brokers",
+    "backtesting",
+    "entities",
+    "data_sources",
+    "traders",
 ]

@@ -2,6 +2,7 @@ import datetime
 from decimal import Decimal
 from typing import Optional, Union
 
+import numpy as np
 import pandas as pd
 import polars as pl
 
@@ -14,13 +15,6 @@ from .asset import Asset
 from .dataline import Dataline
 
 logger = get_logger(__name__)
-
-# Set the option to raise an error if downcasting is not possible (if available in this pandas version)
-try:
-    pd.set_option('future.no_silent_downcasting', True)
-except (pd._config.config.OptionError, AttributeError):
-    # Option not available in this pandas version, skip it
-    pass
 
 
 class DataPolars:
@@ -120,9 +114,7 @@ class DataPolars:
             )
 
         if timestep not in ["minute", "hour", "day"]:
-            raise ValueError(
-                f"Timestep must be one of 'minute', 'hour', or 'day'. You entered: {timestep}"
-            )
+            raise ValueError(f"Timestep must be one of 'minute', 'hour', or 'day'. You entered: {timestep}")
 
         self.timestep = timestep
 
@@ -142,9 +134,7 @@ class DataPolars:
             self.polars_df = self.polars_df.with_columns(pl.col("datetime").cast(desired))
         elif self.polars_df["datetime"].dtype != pl.Datetime:
             # No timezone, cast to naive datetime
-            self.polars_df = self.polars_df.with_columns(
-                pl.col("datetime").cast(pl.Datetime(time_unit="ns"))
-            )
+            self.polars_df = self.polars_df.with_columns(pl.col("datetime").cast(pl.Datetime(time_unit="ns")))
 
         # Apply timezone if specified
         if timezone is not None:
@@ -172,9 +162,9 @@ class DataPolars:
         self.datetime_end = self.polars_df["datetime"][-1]
 
         # Convert polars datetime to pandas datetime for compatibility
-        if hasattr(self.datetime_start, 'to_pydatetime'):
+        if hasattr(self.datetime_start, "to_pydatetime"):
             self.datetime_start = self.datetime_start.to_pydatetime()
-        if hasattr(self.datetime_end, 'to_pydatetime'):
+        if hasattr(self.datetime_end, "to_pydatetime"):
             self.datetime_end = self.datetime_end.to_pydatetime()
 
         # Cached pandas DataFrame (lazy conversion)
@@ -255,11 +245,11 @@ class DataPolars:
 
         if not date_start:
             date_start = self.polars_df["datetime"].min()
-            if hasattr(date_start, 'to_pydatetime'):
+            if hasattr(date_start, "to_pydatetime"):
                 date_start = date_start.to_pydatetime()
         if not date_end:
             date_end = self.polars_df["datetime"].max()
-            if hasattr(date_end, 'to_pydatetime'):
+            if hasattr(date_end, "to_pydatetime"):
                 date_end = date_end.to_pydatetime()
 
         date_start = to_datetime_aware(date_start)
@@ -278,23 +268,37 @@ class DataPolars:
         # Convert comparison timestamps to match column timezone
         if datetime_tz is not None:
             # Column has timezone, align dates to it
-            date_start_aligned = pd.Timestamp(date_start).tz_convert(datetime_tz) if hasattr(pd.Timestamp(date_start), 'tz_convert') else pd.Timestamp(date_start).tz_localize(datetime_tz)
-            date_end_aligned = pd.Timestamp(date_end).tz_convert(datetime_tz) if hasattr(pd.Timestamp(date_end), 'tz_convert') else pd.Timestamp(date_end).tz_localize(datetime_tz)
+            date_start_aligned = (
+                pd.Timestamp(date_start).tz_convert(datetime_tz)
+                if hasattr(pd.Timestamp(date_start), "tz_convert")
+                else pd.Timestamp(date_start).tz_localize(datetime_tz)
+            )
+            date_end_aligned = (
+                pd.Timestamp(date_end).tz_convert(datetime_tz)
+                if hasattr(pd.Timestamp(date_end), "tz_convert")
+                else pd.Timestamp(date_end).tz_localize(datetime_tz)
+            )
         else:
             # Column is naive, make dates naive too
-            date_start_aligned = pd.Timestamp(date_start).tz_localize(None) if hasattr(pd.Timestamp(date_start), 'tz') and pd.Timestamp(date_start).tz else pd.Timestamp(date_start)
-            date_end_aligned = pd.Timestamp(date_end).tz_localize(None) if hasattr(pd.Timestamp(date_end), 'tz') and pd.Timestamp(date_end).tz else pd.Timestamp(date_end)
+            date_start_aligned = (
+                pd.Timestamp(date_start).tz_localize(None)
+                if hasattr(pd.Timestamp(date_start), "tz") and pd.Timestamp(date_start).tz
+                else pd.Timestamp(date_start)
+            )
+            date_end_aligned = (
+                pd.Timestamp(date_end).tz_localize(None)
+                if hasattr(pd.Timestamp(date_end), "tz") and pd.Timestamp(date_end).tz
+                else pd.Timestamp(date_end)
+            )
 
         # Filter by date range
-        df = df.filter(
-            (pl.col("datetime") >= date_start_aligned) & (pl.col("datetime") <= date_end_aligned)
-        )
+        df = df.filter((pl.col("datetime") >= date_start_aligned) & (pl.col("datetime") <= date_end_aligned))
 
         # Filter by trading hours if intraday data
         if self.timestep in {"minute", "hour"}:
             df = df.filter(
-                (pl.col("datetime").dt.time() >= trading_hours_start) &
-                (pl.col("datetime").dt.time() <= trading_hours_end)
+                (pl.col("datetime").dt.time() >= trading_hours_start)
+                & (pl.col("datetime").dt.time() <= trading_hours_end)
             )
 
         if df.height == 0:
@@ -318,13 +322,13 @@ class DataPolars:
         df = self.df
 
         # OPTIMIZATION: Use searchsorted instead of expensive boolean indexing
-        start_pos = idx.searchsorted(self.datetime_start, side='left')
-        end_pos = idx.searchsorted(self.datetime_end, side='right')
+        start_pos = idx.searchsorted(self.datetime_start, side="left")
+        end_pos = idx.searchsorted(self.datetime_end, side="right")
         idx = idx[start_pos:end_pos]
 
         # OPTIMIZATION: More efficient duplicate removal
         if df.index.has_duplicates:
-            df = df[~df.index.duplicated(keep='first')]
+            df = df[~df.index.duplicated(keep="first")]
 
         # Reindex the DataFrame with the new index and forward-fill missing values.
         df = df.reindex(idx, method="ffill")
@@ -333,18 +337,19 @@ class DataPolars:
         if "volume" in df.columns:
             df.loc[df["volume"].isna(), "volume"] = 0
         else:
-            df["volume"] = None
+            df["volume"] = np.nan
 
         # OPTIMIZATION: More efficient column selection and forward fill
         ohlc_cols = ["open", "high", "low"]
         non_ohlc_cols = [col for col in df.columns if col not in ohlc_cols]
         if non_ohlc_cols:
             df[non_ohlc_cols] = df[non_ohlc_cols].ffill()
+            df[non_ohlc_cols] = df[non_ohlc_cols].infer_objects(copy=False)
 
         # If any of close, open, high, low columns are missing, add them with NaN.
         for col in ["close", "open", "high", "low"]:
             if col not in df.columns:
-                df[col] = None
+                df[col] = np.nan
 
         # OPTIMIZATION: Vectorized NaN filling for OHLC columns
         if "close" in df.columns:
@@ -418,6 +423,7 @@ class DataPolars:
 
     def check_data(func):
         """Validates if the provided date, length, timeshift, and timestep will return data."""
+
         def checker(self, *args, **kwargs):
             if type(kwargs.get("length", 1)) not in [int, float]:
                 raise TypeError(f"Length must be an integer. {type(kwargs.get('length', 1))} was provided.")
@@ -500,8 +506,17 @@ class DataPolars:
         }
 
         missing_quote_cols = [
-            col for col in ["bid", "ask", "bid_size", "ask_size", "bid_condition", "ask_condition",
-                            "bid_exchange", "ask_exchange"]
+            col
+            for col in [
+                "bid",
+                "ask",
+                "bid_size",
+                "ask_size",
+                "bid_condition",
+                "ask_condition",
+                "bid_exchange",
+                "ask_exchange",
+            ]
             if col not in self.datalines
         ]
         if missing_quote_cols:
@@ -524,9 +539,7 @@ class DataPolars:
             except TypeError:
                 return value
 
-        quote_dict = {
-            name: _get_value(column, digits) for name, (column, digits) in quote_fields.items()
-        }
+        quote_dict = {name: _get_value(column, digits) for name, (column, digits) in quote_fields.items()}
 
         return quote_dict
 
@@ -535,11 +548,15 @@ class DataPolars:
         """Returns a dictionary of the data."""
         # Convert timeshift to integer if it's a timedelta
         if isinstance(timeshift, datetime.timedelta):
-            logger.debug(f"[TIMESHIFT_CONVERT] asset={self.symbol} input_timeshift={timeshift} type={type(timeshift)} repr={repr(timeshift)}")
+            logger.debug(
+                f"[TIMESHIFT_CONVERT] asset={self.symbol} input_timeshift={timeshift} type={type(timeshift)} repr={repr(timeshift)}"
+            )
             ts = timestep if timestep is not None else self.timestep
             if ts == "day":
                 timeshift_converted = int(timeshift.total_seconds() / (24 * 3600))
-                logger.debug(f"[TIMESHIFT_CONVERT] asset={self.symbol} timestep=day total_seconds={timeshift.total_seconds()} converted={timeshift_converted}")
+                logger.debug(
+                    f"[TIMESHIFT_CONVERT] asset={self.symbol} timestep=day total_seconds={timeshift.total_seconds()} converted={timeshift_converted}"
+                )
                 timeshift = timeshift_converted
             elif ts == "hour":
                 timeshift_converted = int(timeshift.total_seconds() / 3600)
@@ -549,7 +566,9 @@ class DataPolars:
                 timeshift = timeshift_converted
             else:  # minute
                 timeshift_converted = int(timeshift.total_seconds() / 60)
-                logger.debug(f"[TIMESHIFT_CONVERT] asset={self.symbol} timestep=minute total_seconds={timeshift.total_seconds()} converted={timeshift_converted}")
+                logger.debug(
+                    f"[TIMESHIFT_CONVERT] asset={self.symbol} timestep=minute total_seconds={timeshift.total_seconds()} converted={timeshift_converted}"
+                )
                 timeshift = timeshift_converted
 
         # Get bars.
@@ -621,7 +640,7 @@ class DataPolars:
             unit = "D"
             data = self._get_bars_dict(dt, length=length, timestep="hour", timeshift=timeshift)
 
-        elif timestep == 'day' and self.timestep == 'day':
+        elif timestep == "day" and self.timestep == "day":
             unit = "D"
             data = self._get_bars_dict(dt, length=length, timestep=timestep, timeshift=timeshift)
 
@@ -643,7 +662,7 @@ class DataPolars:
         if data is None:
             return None
 
-        df = pd.DataFrame(data).assign(datetime=lambda df: pd.to_datetime(df['datetime'])).set_index('datetime')
+        df = pd.DataFrame(data).assign(datetime=lambda df: pd.to_datetime(df["datetime"])).set_index("datetime")
         if "dividend" in df.columns:
             agg_column_map["dividend"] = "sum"
         df_result = df.resample(f"{quantity}{unit}").agg(agg_column_map)

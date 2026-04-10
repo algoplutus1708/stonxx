@@ -111,7 +111,7 @@ python run_stonxx_backtest.py
 ```
 
 ### 2. Prepare Daily Research Data
-Build the split-adjusted daily Yahoo Finance panel used by the swing baseline:
+Build or refresh the split-adjusted daily Yahoo Finance panel used by the swing baseline:
 ```bash
 python yf_historical_fetcher.py
 ```
@@ -121,6 +121,7 @@ Train the leak-aware daily cross-sectional baseline with temporal walk-forward v
 ```bash
 python train_yf_model.py
 ```
+If `data/stonxx_daily_panel_yf.parquet` is missing, the trainer will generate it automatically from Yahoo Finance before fitting.
 
 ### 4. Live/Paper Trading
 Start the bot in paper trading mode. It will scan the market every 15 minutes but execute based on Daily Swing signals:

@@ -58,9 +58,10 @@ research, then train a walk-forward baseline model:
     python train_yf_model.py
 
 The fetcher saves ``data/stonxx_daily_panel_yf.parquet`` and the trainer saves
-``stonxx_daily_panel_model.joblib``. The baseline trainer uses expanding
-temporal validation with an embargo gap so train dates always precede
-validation dates across the entire stock panel.
+``stonxx_daily_panel_model.joblib``. If the default parquet is missing, the
+trainer will build it automatically before fitting. The baseline trainer uses
+expanding temporal validation with an embargo gap so train dates always
+precede validation dates across the entire stock panel.
 
 Stocks
 ------
