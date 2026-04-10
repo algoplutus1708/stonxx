@@ -21,6 +21,7 @@ DEFAULT_PANEL_PATH = "data/stonxx_daily_panel_yf.parquet"
 DEFAULT_MODEL_PATH = "stonxx_daily_panel_model.joblib"
 FORWARD_HORIZON_DAYS = 5
 BENCHMARK_TICKER = "^NSEI"
+OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 
 FEATURE_COLUMNS = [
     "vol_norm_momentum",
@@ -92,12 +93,32 @@ def compute_true_range(group: pd.DataFrame) -> pd.Series:
     return pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
 
 
-def prepare_training_frame(
+def normalize_history_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Normalize one OHLCV history frame to lowercase daily columns."""
+    normalized = frame.copy()
+    normalized.columns = [str(column).lower() for column in normalized.columns]
+    missing = [column for column in OHLCV_COLUMNS if column not in normalized.columns]
+    if missing:
+        raise ValueError(f"History frame is missing required OHLCV columns: {missing}")
+
+    if "datetime" in normalized.columns:
+        normalized["datetime"] = pd.to_datetime(normalized["datetime"])
+        normalized = normalized.set_index("datetime")
+
+    normalized.index = pd.to_datetime(normalized.index)
+    normalized.index.name = "datetime"
+    normalized = normalized[OHLCV_COLUMNS].sort_index()
+    normalized = normalized[~normalized.index.duplicated(keep="last")]
+    return normalized
+
+
+def _prepare_feature_frame(
     panel: pd.DataFrame,
     *,
-    forward_horizon_days: int = FORWARD_HORIZON_DAYS,
+    forward_horizon_days: int,
+    include_target: bool,
 ) -> pd.DataFrame:
-    """Build the feature matrix and 5-day forward return target."""
+    """Build the shared feature matrix for training or live inference."""
     frame = panel.copy()
     frame["datetime"] = pd.to_datetime(frame["datetime"])
     frame = frame.sort_values(["ticker", "datetime"]).reset_index(drop=True)
@@ -125,21 +146,50 @@ def prepare_training_frame(
     frame["benchmark_alpha"] = frame["stock_return_30"] - frame["benchmark_return_30"]
     frame["atr_pct_20"] = frame["atr_20"] / frame["close"].replace(0.0, np.nan)
     frame["volume_ratio_20"] = frame["volume"] / by_ticker["volume"].transform(lambda s: s.rolling(20).mean())
-    frame["target_forward_return_5d"] = by_ticker["close"].transform(
-        lambda s: s.shift(-forward_horizon_days) / s - 1.0
-    )
+    output_columns = ["datetime", "ticker", *FEATURE_COLUMNS]
+    if include_target:
+        frame["target_forward_return_5d"] = by_ticker["close"].transform(
+            lambda s: s.shift(-forward_horizon_days) / s - 1.0
+        )
+        output_columns.extend(["target_forward_return_5d", "benchmark_forward_return_5d"])
 
-    model_frame = frame[
-        [
-            "datetime",
-            "ticker",
-            *FEATURE_COLUMNS,
-            "target_forward_return_5d",
-            "benchmark_forward_return_5d",
-        ]
-    ].dropna()
+    model_frame = frame[output_columns].dropna()
     model_frame = model_frame.sort_values(["datetime", "ticker"]).reset_index(drop=True)
     return model_frame
+
+
+def prepare_training_frame(
+    panel: pd.DataFrame,
+    *,
+    forward_horizon_days: int = FORWARD_HORIZON_DAYS,
+) -> pd.DataFrame:
+    """Build the feature matrix and 5-day forward return target."""
+    return _prepare_feature_frame(
+        panel,
+        forward_horizon_days=forward_horizon_days,
+        include_target=True,
+    )
+
+
+def prepare_symbol_inference_frame(
+    stock_history: pd.DataFrame,
+    benchmark_history: pd.DataFrame,
+    *,
+    ticker: str = "LIVE",
+) -> pd.DataFrame:
+    """Build the exact live feature frame for one symbol and the benchmark."""
+    stock = normalize_history_frame(stock_history).reset_index()
+    stock["ticker"] = ticker
+
+    benchmark = normalize_history_frame(benchmark_history)[["close"]].rename(columns={"close": "benchmark_close"})
+    benchmark = benchmark.reset_index()
+    panel = stock.merge(benchmark, on="datetime", how="inner")
+
+    return _prepare_feature_frame(
+        panel,
+        forward_horizon_days=FORWARD_HORIZON_DAYS,
+        include_target=False,
+    )
 
 
 def generate_temporal_splits(

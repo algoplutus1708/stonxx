@@ -22,7 +22,11 @@ STATE_FILE: str = "bot_state.json"
 
 # Default shape of the state dict that every consumer can depend on
 _DEFAULT_STATE: dict = {
-    "active_trades": {}
+    "active_trades": {},
+    "pending_orders": [],
+    "paper_cash": 0.0,
+    "last_signal_date": None,
+    "last_submission_date": None,
     # Future keys can be added here without breaking old state files
 }
 

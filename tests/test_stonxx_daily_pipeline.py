@@ -7,6 +7,7 @@ from train_yf_model import (
     FORWARD_HORIZON_DAYS,
     generate_temporal_splits,
     prepare_training_frame,
+    prepare_symbol_inference_frame,
 )
 from yf_historical_fetcher import build_panel_from_histories
 
@@ -110,3 +111,30 @@ def test_generate_temporal_splits_respects_embargo_gap():
         train_pos = unique_dates.get_loc(split.train_end)
         validation_pos = unique_dates.get_loc(split.validation_start)
         assert validation_pos - train_pos == 6
+
+
+def test_prepare_symbol_inference_frame_matches_training_features():
+    histories = {
+        "^NSEI": _make_history(20_000.0, 4.0, periods=90),
+        "RELIANCE.NS": _make_history(2_400.0, 2.0, periods=90),
+        "INFY.NS": _make_history(1_600.0, 1.25, periods=90),
+    }
+    panel = build_panel_from_histories(histories, benchmark_ticker="^NSEI")
+    training_frame = prepare_training_frame(panel, forward_horizon_days=FORWARD_HORIZON_DAYS)
+
+    live_frame = prepare_symbol_inference_frame(
+        histories["RELIANCE.NS"],
+        histories["^NSEI"],
+        ticker="RELIANCE",
+    )
+
+    training_last = (
+        training_frame[training_frame["ticker"] == "RELIANCE"]
+        .sort_values("datetime")
+        .iloc[-1][FEATURE_COLUMNS]
+    )
+    live_last = live_frame.sort_values("datetime").iloc[-1][FEATURE_COLUMNS]
+
+    assert list(live_frame.columns) == ["datetime", "ticker", *FEATURE_COLUMNS]
+    for feature in FEATURE_COLUMNS:
+        assert live_last[feature] == pytest.approx(training_last[feature])

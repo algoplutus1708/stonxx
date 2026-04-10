@@ -8,7 +8,7 @@ Usage:
 
 Prerequisites:
     1. Populate .env.india with DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN.
-    2. Ensure nifty_xgb_model.joblib is present in the project root.
+    2. Ensure stonxx_daily_panel_model.joblib is present in the project root.
     3. Run:  pip install python-dotenv
 """
 
@@ -45,7 +45,7 @@ from lumibot.example_strategies.stonxx_india_bot import stonxx as NiftySwingAlph
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("   STONXX — NiftySwingAlpha Paper Trader")
+    print("   STONXX — Daily Swing Paper Trader")
     print("=" * 60)
 
     # 4a. Data source — DhanData uses Yahoo Finance for historical bars
@@ -63,7 +63,7 @@ if __name__ == "__main__":
     broker = Dhan(
         client_id=DHAN_CLIENT_ID,
         access_token=DHAN_ACCESS_TOKEN,
-        default_product_type=os.getenv("PRODUCT_TYPE", "INTRA"),
+        default_product_type=os.getenv("PRODUCT_TYPE", "CNC"),
         data_source=data_source,
     )
 
@@ -73,7 +73,14 @@ if __name__ == "__main__":
     universe_raw = os.getenv("STRATEGY_UNIVERSE", "")
     universe = [s.strip() for s in universe_raw.split(",") if s.strip()] or None
 
-    strategy_params = {"IS_PAPER_TRADING": True}
+    strategy_params = {
+        "IS_PAPER_TRADING": True,
+        "model_path": "stonxx_daily_panel_model.joblib",
+        "minimum_predicted_return": 0.01,
+        "risk_budget_pct": 0.01,
+        "max_position_pct": 0.10,
+        "max_positions": int(os.getenv("MAX_POSITIONS", "3")),
+    }
     if universe:
         strategy_params["universe"] = universe
         print(f"[stonxx] Trading universe (from env): {universe}")
@@ -89,5 +96,7 @@ if __name__ == "__main__":
     trader = Trader()
     trader.add_strategy(strategy)
 
+    print("[stonxx] Daily model: stonxx_daily_panel_model.joblib")
+    print("[stonxx] Signal generation runs after the close; queued orders execute next session.\n")
     print("[stonxx] Starting paper-trading session. Press Ctrl+C to stop.\n")
     trader.run_all()
