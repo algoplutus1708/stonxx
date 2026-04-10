@@ -11,6 +11,8 @@
 - India trader documentation and examples now describe the daily panel research workflow and the new baseline model artifact names.
 - Daily Indian runner now uses a 15-year Yahoo backtest window and a concentrated two-stock basket (`TITAN.NS`, `APOLLOHOSP.NS`) instead of the earlier 3-stock basket, improving the default daily baseline.
 - The operational daily swing bot now blends the trained XGBoost signal with market/news sentiment in paper/live mode, while backtests use a deterministic market-regime proxy so runs stay reproducible.
+- IndiaAITrader now calls `get_market_sentiment` before decisions, passes structured sentiment snapshots into the agent prompt/context, and hard-blocks BUY orders for symbols whose sentiment is below the configured threshold.
+- IndiaAITrader backtests now use a neutral `0.50` sentiment score instead of live news to avoid look-ahead bias.
 
 ### Fixed
 - `sentiment_engine.py` no longer requires Ollama or `feedparser` to be installed. It now fetches RSS headlines with the standard library and falls back to a deterministic keyword score when local LLM tooling is unavailable, keeping the bot operational in minimal environments.

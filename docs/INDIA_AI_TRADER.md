@@ -91,6 +91,12 @@ concentrated mix.
 The current default basket is deliberately simple: buy once, hold, and let the
 existing Yahoo-adjusted price series drive the result.
 
+IndiaAITrader also exposes a `get_market_sentiment` agent tool. The agent sees a
+structured `current_technical_sentiment_score` per symbol in its runtime
+context, and the strategy hard-blocks BUY orders when a symbol's score is at or
+below the configured threshold. Backtests use a neutral `0.50` score so the
+sentiment layer does not leak future news into historical runs.
+
 Important operating assumptions:
 
 -   Yahoo prices are downloaded with split/dividend adjustment enabled by default.

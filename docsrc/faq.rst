@@ -937,4 +937,4 @@ What is the ``first_iteration`` property?
 What is the ``is_backtesting`` property?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``self.is_backtesting`` is ``True`` when running in backtest mode, ``False`` when live. You can use it to add backtest-specific logging or skip certain live-only operations. If a strategy depends on live-only inputs such as news sentiment or web headlines, replace that input with a deterministic proxy while backtesting so historical runs stay reproducible.
+``self.is_backtesting`` is ``True`` when running in backtest mode, ``False`` when live. You can use it to add backtest-specific logging or skip certain live-only operations. If a strategy depends on live-only inputs such as news sentiment or web headlines, replace that input with a deterministic proxy while backtesting so historical runs stay reproducible. IndiaAITrader follows this pattern by returning a neutral ``0.50`` sentiment score in backtests and only using live/news sentiment when running live or in paper mode.

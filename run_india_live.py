@@ -38,14 +38,17 @@ from lumibot.example_strategies.india_ai_trader import IndiaAITrader
 from lumibot.traders import Trader
 
 # ── Guards ────────────────────────────────────────────────────────────────────
-CLIENT_ID    = os.getenv("DHAN_CLIENT_ID")
+CLIENT_ID = os.getenv("DHAN_CLIENT_ID")
 ACCESS_TOKEN = os.getenv("DHAN_ACCESS_TOKEN")
-GOOGLE_KEY   = os.getenv("GOOGLE_API_KEY")
+GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")
 
 missing = []
-if not CLIENT_ID:    missing.append("DHAN_CLIENT_ID")
-if not ACCESS_TOKEN: missing.append("DHAN_ACCESS_TOKEN")
-if not GOOGLE_KEY:   missing.append("GOOGLE_API_KEY")
+if not CLIENT_ID:
+    missing.append("DHAN_CLIENT_ID")
+if not ACCESS_TOKEN:
+    missing.append("DHAN_ACCESS_TOKEN")
+if not GOOGLE_KEY:
+    missing.append("GOOGLE_API_KEY")
 
 if missing:
     print(f"\n[ERROR] Missing environment variables: {', '.join(missing)}")
@@ -53,24 +56,27 @@ if missing:
     sys.exit(1)
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-RAW_UNIVERSE = os.getenv(
-    "STRATEGY_UNIVERSE",
-    "RELIANCE,INFY,TCS,HDFCBANK,ICICIBANK"
-)
-UNIVERSE     = [s.strip().upper() for s in RAW_UNIVERSE.split(",") if s.strip()]
+RAW_UNIVERSE = os.getenv("STRATEGY_UNIVERSE", "RELIANCE,INFY,TCS,HDFCBANK,ICICIBANK")
+UNIVERSE = [s.strip().upper() for s in RAW_UNIVERSE.split(",") if s.strip()]
 PRODUCT_TYPE = os.getenv("PRODUCT_TYPE", "MIS").upper()
 GOOGLE_MODEL = os.getenv("GOOGLE_MODEL", "gemini-2.0-flash")
-MAX_POSITIONS      = int(os.getenv("MAX_POSITIONS",       "5"))
+MAX_POSITIONS = int(os.getenv("MAX_POSITIONS", "5"))
 RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "1.0"))
+SENTIMENT_MODEL = "llama3.2"
+SENTIMENT_BUY_BLOCK_THRESHOLD = 0.25
+SENTIMENT_TIMEOUT_SECONDS = 8
+SENTIMENT_MAX_HEADLINES = 5
+
 
 # ── Optional Telegram alert ──────────────────────────────────────────────────
 def _telegram_alert(msg: str):
-    token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
     if not token or not chat_id:
         return
     try:
         import urllib.request, urllib.parse, json as _json
+
         payload = _json.dumps({"chat_id": chat_id, "text": msg}).encode()
         req = urllib.request.Request(
             f"https://api.telegram.org/bot{token}/sendMessage",
@@ -81,15 +87,17 @@ def _telegram_alert(msg: str):
     except Exception as exc:
         print(f"[Telegram alert failed] {exc}")
 
+
 # ── Build components ──────────────────────────────────────────────────────────
-print(f"\n{'='*65}")
+print(f"\n{'=' * 65}")
 print("  IndiaAITrader — LIVE NSE Trading")
-print(f"{'='*65}")
+print(f"{'=' * 65}")
 print(f"  Universe  : {', '.join(UNIVERSE)}")
 print(f"  Product   : {PRODUCT_TYPE}")
 print(f"  Model     : {GOOGLE_MODEL}")
+print(f"  Sentiment : {SENTIMENT_MODEL} | buy block <= {SENTIMENT_BUY_BLOCK_THRESHOLD:.2f}")
 print(f"  Positions : max {MAX_POSITIONS}")
-print(f"{'─'*65}")
+print(f"{'─' * 65}")
 print("  Fee model applied by live broker (NSE statutory charges):")
 _buy_fees, _sell_fees = make_india_equity_fees(PRODUCT_TYPE, include_slippage=False)
 for _label, _fee in [
@@ -105,41 +113,43 @@ for _label, _fee in [
         f"  STT={_bd['stt_inr']:.2f}"
         f"  GST={_bd['gst_inr']:.2f}  on ₹{_bd['turnover_inr']:.0f})"
     )
-print(f"{'='*65}\n")
+print(f"{'=' * 65}\n")
 
 # Data source — uses Yahoo Finance for historical + Dhan for live quotes
 data_source = DhanData(
-    client_id             = CLIENT_ID,
-    access_token          = ACCESS_TOKEN,
-    use_yfinance_historical = True,
-    default_exchange      = "NSE",
+    client_id=CLIENT_ID,
+    access_token=ACCESS_TOKEN,
+    use_yfinance_historical=True,
+    default_exchange="NSE",
 )
 
 # Broker — full live execution via Dhan API
 broker = Dhan(
-    client_id            = CLIENT_ID,
-    access_token         = ACCESS_TOKEN,
-    default_product_type = PRODUCT_TYPE,
-    data_source          = data_source,
+    client_id=CLIENT_ID,
+    access_token=ACCESS_TOKEN,
+    default_product_type=PRODUCT_TYPE,
+    data_source=data_source,
 )
 
 # Strategy
 strategy = IndiaAITrader(
-    broker     = broker,
-    parameters = {
-        "universe":           UNIVERSE,
-        "product_type":       PRODUCT_TYPE,
+    broker=broker,
+    parameters={
+        "universe": UNIVERSE,
+        "product_type": PRODUCT_TYPE,
         "risk_per_trade_pct": RISK_PER_TRADE_PCT,
-        "max_positions":      MAX_POSITIONS,
-        "google_model":       GOOGLE_MODEL,
+        "max_positions": MAX_POSITIONS,
+        "google_model": GOOGLE_MODEL,
+        "sentiment_model": SENTIMENT_MODEL,
+        "sentiment_buy_block_threshold": SENTIMENT_BUY_BLOCK_THRESHOLD,
+        "sentiment_timeout_seconds": SENTIMENT_TIMEOUT_SECONDS,
+        "sentiment_max_headlines": SENTIMENT_MAX_HEADLINES,
     },
 )
 
 # ── Start ─────────────────────────────────────────────────────────────────────
 _telegram_alert(
-    f"🚀 IndiaAITrader STARTED\n"
-    f"Universe: {', '.join(UNIVERSE)}\n"
-    f"Product: {PRODUCT_TYPE} | Model: {GOOGLE_MODEL}"
+    f"🚀 IndiaAITrader STARTED\nUniverse: {', '.join(UNIVERSE)}\nProduct: {PRODUCT_TYPE} | Model: {GOOGLE_MODEL}"
 )
 
 trader = Trader()
