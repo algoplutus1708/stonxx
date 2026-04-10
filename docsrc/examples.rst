@@ -74,6 +74,11 @@ By default it now holds an equal-weight basket of ``TITAN.NS`` and
 ``APOLLOHOSP.NS``. Override that basket with
 ``BASKET_SYMBOLS=MARUTI,RELIANCE,BHARTIARTL`` if you want to test a different
 concentrated mix.
+The operational daily swing bot is ``daily_paper_trader.py``. It loads
+``lumibot/example_strategies/stonxx_india_bot.py``, which ranks candidates with
+the daily XGBoost model and then adjusts the signal with market/news sentiment.
+When Ollama is unavailable, the sentiment helper falls back to a deterministic
+keyword score so paper trading and backtesting still work.
 
 Stocks
 ------

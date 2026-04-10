@@ -114,6 +114,11 @@ lumibot/
                            └──────────────┘
 ```
 
+Strategy-specific logic still runs inside the strategy layer after the data
+source has been selected. If a strategy uses live-only inputs such as news
+sentiment or external headlines, it must switch to a deterministic proxy when
+``is_backtesting`` is true so the historical run stays reproducible.
+
 ## Execution Model and Concurrency Boundaries
 
 Single-backtest execution is intentionally **serial**.

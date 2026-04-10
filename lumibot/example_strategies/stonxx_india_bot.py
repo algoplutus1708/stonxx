@@ -8,6 +8,7 @@ orders instead of trading incomplete same-day bars.
 from __future__ import annotations
 
 import csv
+import math
 import os
 from datetime import date, timedelta
 
@@ -17,6 +18,11 @@ import pytz
 
 from lumibot.entities import Asset
 from lumibot.strategies.strategy import Strategy
+
+try:
+    from sentiment_engine import SentimentAnalyzer
+except ImportError:  # pragma: no cover - fallback for package installs that omit the repo root.
+    SentimentAnalyzer = None
 
 try:
     from state_manager import STATE_FILE, load_state, save_state
@@ -55,6 +61,9 @@ DEFAULT_MINIMUM_PREDICTED_RETURN = 0.01
 DEFAULT_RISK_BUDGET_PCT = 0.01
 DEFAULT_MAX_POSITION_PCT = 0.10
 DEFAULT_COOLDOWN_TRADING_DAYS = 5
+DEFAULT_SENTIMENT_MODEL = "llama3.2"
+DEFAULT_SENTIMENT_WEIGHT = 0.35
+DEFAULT_SENTIMENT_THRESHOLD_BONUS = 0.75
 AFTER_CLOSE_CRON = "45 15 * * 1-5"
 NEXT_OPEN_CRON = "16 9 * * 1-5"
 
@@ -95,8 +104,16 @@ def rank_long_candidates(
     max_positions: int,
 ) -> list[dict]:
     """Return the top long-only candidates that clear the minimum return hurdle."""
-    ranked = sorted(signals, key=lambda item: item["predicted_return"], reverse=True)
-    filtered = [item for item in ranked if item["predicted_return"] >= minimum_predicted_return]
+    ranked = sorted(
+        signals,
+        key=lambda item: float(item.get("adjusted_predicted_return", item["predicted_return"])),
+        reverse=True,
+    )
+    filtered = [
+        item
+        for item in ranked
+        if float(item.get("adjusted_predicted_return", item["predicted_return"])) >= minimum_predicted_return
+    ]
     return filtered[:max_positions]
 
 
@@ -116,6 +133,7 @@ class stonxx(Strategy):
         self.universe = [symbol.upper() for symbol in self.parameters.get("universe", DEFAULT_UNIVERSE)]
         self.model_path = self.parameters.get("model_path", DEFAULT_MODEL_PATH)
         self.benchmark_symbol = self.parameters.get("benchmark_symbol", BENCHMARK_TICKER)
+        self._benchmark_asset = Asset(symbol=self.benchmark_symbol, asset_type=Asset.AssetType.INDEX)
         self.state_file = self.parameters.get("state_file") or STATE_FILE
         self.max_positions = int(self.parameters.get("max_positions", DEFAULT_MAX_POSITIONS))
         self.minimum_predicted_return = float(
@@ -124,8 +142,15 @@ class stonxx(Strategy):
         self.risk_budget_pct = float(self.parameters.get("risk_budget_pct", DEFAULT_RISK_BUDGET_PCT))
         self.max_position_pct = float(self.parameters.get("max_position_pct", DEFAULT_MAX_POSITION_PCT))
         self.cooldown_trading_days = int(self.parameters.get("cooldown_trading_days", DEFAULT_COOLDOWN_TRADING_DAYS))
+        self.sentiment_model = self.parameters.get("sentiment_model", DEFAULT_SENTIMENT_MODEL)
+        self.sentiment_weight = float(self.parameters.get("sentiment_weight", DEFAULT_SENTIMENT_WEIGHT))
+        self.sentiment_threshold_bonus = float(
+            self.parameters.get("sentiment_threshold_bonus", DEFAULT_SENTIMENT_THRESHOLD_BONUS)
+        )
         self.IS_PAPER_TRADING = bool(self.parameters.get("IS_PAPER_TRADING", True))
         self.paper_cash_seed = float(self.parameters.get("paper_cash", DEFAULT_PAPER_CASH))
+        self._sentiment_cache: dict[str, float] = {}
+        self.sentiment_engine = SentimentAnalyzer(self.sentiment_model) if SentimentAnalyzer is not None else None
 
         self.state = load_state(self._state_file_path())
         self.state.setdefault("active_trades", {})
@@ -160,6 +185,12 @@ class stonxx(Strategy):
             self.log_message(
                 f"[stonxx] Model file {self.model_path} not found. Run train_yf_model.py first.",
                 color="red",
+            )
+
+        if self.sentiment_engine is None:
+            self.log_message(
+                "[stonxx] Sentiment engine import unavailable; using the benchmark proxy only.",
+                color="yellow",
             )
 
         active = self.state.get("active_trades", {})
@@ -273,6 +304,62 @@ class stonxx(Strategy):
     def _clear_symbol_cooldown(self, symbol: str) -> None:
         self.state.setdefault("symbol_cooldowns", {}).pop(symbol, None)
 
+    def _safe_float(self, value, default: float = 0.0) -> float:
+        try:
+            candidate = float(value)
+        except (TypeError, ValueError):
+            return default
+
+        if math.isnan(candidate) or math.isinf(candidate):
+            return default
+        return candidate
+
+    def _market_proxy_sentiment(self, signal: dict) -> float:
+        benchmark_return_30 = self._safe_float(signal.get("benchmark_return_30"), 0.0)
+        benchmark_alpha = self._safe_float(signal.get("benchmark_alpha"), 0.0)
+        raw_score = benchmark_return_30 + 0.5 * benchmark_alpha
+        return max(-1.0, min(1.0, math.tanh(raw_score / 0.04)))
+
+    def _news_sentiment_score(self, asset_symbol: str) -> float:
+        if self.sentiment_engine is None or self.is_backtesting:
+            return 0.0
+
+        cache_key = f"{self.get_datetime().date().isoformat()}:{asset_symbol.upper()}"
+        cached = self._sentiment_cache.get(cache_key)
+        if cached is not None:
+            return self._safe_float(cached, 0.0)
+
+        try:
+            score = float(self.sentiment_engine.analyze_sentiment(asset=asset_symbol))
+        except Exception as exc:
+            self.log_message(f"[stonxx] Sentiment lookup failed for {asset_symbol}: {exc}", color="yellow")
+            score = 0.0
+
+        self._sentiment_cache[cache_key] = score
+        return score
+
+    def _combined_sentiment_score(self, signal: dict) -> float:
+        proxy_score = self._market_proxy_sentiment(signal)
+        if self.is_backtesting or self.sentiment_engine is None:
+            return proxy_score
+
+        market_news = self._news_sentiment_score(self.benchmark_symbol)
+        symbol_news = self._news_sentiment_score(signal["symbol"])
+        blended_news = (market_news + symbol_news) / 2.0
+        return max(-1.0, min(1.0, proxy_score + (self.sentiment_weight * blended_news)))
+
+    def _apply_sentiment_overlay(self, signal: dict) -> dict:
+        sentiment_score = self._combined_sentiment_score(signal)
+        sentiment_shift = self.sentiment_threshold_bonus * max(self.minimum_predicted_return, 0.005) * sentiment_score
+        adjusted_predicted_return = self._safe_float(signal["predicted_return"], 0.0) + sentiment_shift
+        sentiment_multiplier = max(0.5, 1.0 + (self.sentiment_weight * sentiment_score))
+
+        adjusted_signal = dict(signal)
+        adjusted_signal["sentiment_score"] = sentiment_score
+        adjusted_signal["sentiment_multiplier"] = sentiment_multiplier
+        adjusted_signal["adjusted_predicted_return"] = adjusted_predicted_return
+        return adjusted_signal
+
     def _model_signal_for_symbol(self, symbol: str) -> dict | None:
         if self.model is None:
             return None
@@ -306,6 +393,7 @@ class stonxx(Strategy):
 
         latest = feature_frame[self.features].iloc[[-1]]
         predicted_return = float(self.model.predict(latest)[0])
+        latest_row = feature_frame.iloc[-1]
 
         normalized_stock = normalize_history_frame(stock_bars.df)
         atr_20 = self._compute_atr_20(normalized_stock)
@@ -314,12 +402,16 @@ class stonxx(Strategy):
             return None
 
         current_price = float(normalized_stock["close"].iloc[-1])
-        return {
+        signal = {
             "symbol": symbol,
             "predicted_return": predicted_return,
             "current_price": current_price,
             "atr_20": atr_20,
+            "benchmark_return_30": self._safe_float(latest_row.get("benchmark_return_30"), 0.0),
+            "benchmark_alpha": self._safe_float(latest_row.get("benchmark_alpha"), 0.0),
+            "rsi_5": self._safe_float(latest_row.get("rsi_5"), 0.0),
         }
+        return self._apply_sentiment_overlay(signal)
 
     def _reference_prices_for_holdings(self, holdings: dict[str, dict], signals: list[dict]) -> dict[str, float]:
         prices = {signal["symbol"]: signal["current_price"] for signal in signals}
@@ -381,6 +473,14 @@ class stonxx(Strategy):
                 risk_budget_pct=self.risk_budget_pct,
                 max_position_pct=self.max_position_pct,
             )
+            quantity = int(quantity * self._safe_float(signal.get("sentiment_multiplier"), 1.0))
+            max_shares_allowed = (
+                int((portfolio_value * self.max_position_pct) / signal["current_price"])
+                if signal["current_price"] > 0
+                else 0
+            )
+            max_affordable = int(available_cash / signal["current_price"]) if signal["current_price"] > 0 else 0
+            quantity = max(0, min(quantity, max_shares_allowed, max_affordable))
             if quantity <= 0:
                 self.log_message(
                     f"[stonxx] {symbol} cleared the threshold but size resolved to 0.",
@@ -397,6 +497,8 @@ class stonxx(Strategy):
                     "execution_date": next_trading_day(self.get_datetime().date()).isoformat(),
                     "reference_price": signal["current_price"],
                     "predicted_return": signal["predicted_return"],
+                    "adjusted_predicted_return": signal.get("adjusted_predicted_return"),
+                    "sentiment_score": signal.get("sentiment_score"),
                     "order_note": "LONG_ENTRY",
                 }
             )
@@ -451,9 +553,11 @@ class stonxx(Strategy):
             if signal is None:
                 continue
             signals.append(signal)
+            sentiment_score = signal.get("sentiment_score", 0.0)
             self.log_message(
                 f"[stonxx] {symbol} predicted 5D return={signal['predicted_return']:.4%} "
-                f"| close={signal['current_price']:.2f} | ATR20={signal['atr_20']:.2f}",
+                f"| adjusted={signal['adjusted_predicted_return']:.4%} "
+                f"| sentiment={sentiment_score:+.2f} | close={signal['current_price']:.2f} | ATR20={signal['atr_20']:.2f}",
                 color="blue",
             )
 

@@ -8,7 +8,7 @@
 [![LLM: Gemini + Llama](https://img.shields.io/badge/LLM-Gemini%20%7C%20Llama-purple?style=flat-square)](https://deepmind.google/technologies/gemini/)
 [![Maintainer: swastick](https://img.shields.io/badge/Maintained%20by-swastick-brightgreen?style=flat-square)](#authors)
 
-**stonxx** is a high-conviction, automated trading framework specifically engineered for the **Indian Stock Market (NSE/BSE)**. Created and maintained by **swastick**, it combines state-of-the-art machine learning with dual-layer LLM sentiment analysis to navigate the complexities of Indian market volatility with institutional precision.
+**stonxx** is a high-conviction, automated trading framework specifically engineered for the **Indian Stock Market (NSE/BSE)**. Created and maintained by **swastick**, it combines state-of-the-art machine learning with market/news sentiment scoring to navigate the complexities of Indian market volatility with institutional precision.
 
 ---
 
@@ -18,7 +18,7 @@ Retail trading in the Indian market is often a battle against noise, high slippa
 
 -   **Deep ML Intelligence**: Built on an XGBoost engine trained on 10+ years (2015-2024) of NIFTY 15-minute and Daily historical data.
 -   **Institutional Awareness**: Optimized for ₹1 Crore+ portfolio management with realistic fee/slippage modeling (₹20 flat commission per leg).
--   **Dual-Layer Veto System**: Every ML signal is cross-referenced against global macro sentiment (via **Google Gemini 2.5 Flash**) and local market news (via **Llama 3.2**).
+-   **Model + Sentiment Blend**: Every daily swing signal is ranked by the trained XGBoost model and then nudged by live market/news sentiment. When Ollama is unavailable, the sentiment helper falls back to a deterministic keyword score so the bot stays operational.
 -   **Native India Integration**: First-class support for **Dhan Broker** via LumiBot, with intelligent fallback to Yahoo Finance for high-fidelity backtesting.
 -   **Persistent Memory Bank**: Uses a local state manager to ensure active trades are tracked across bot restarts and crashes.
 
@@ -42,7 +42,7 @@ Retail trading in the Indian market is often a battle against noise, high slippa
 ### 📊 Real-Time Operations
 -   **Live Terminal Dashboard**: A `rich`-powered terminal interface for monitoring signals, active trades, and recent history.
 -   **Paper Trade Alerts**: Automatic Telegram notifications for every order intent, entry, and exit.
--   **Local NLP Pipeline**: Scrapes Indian financial press and analyzes sentiment locally using Llama 3.2 (via Ollama).
+-   **Local NLP Pipeline**: Scrapes Indian financial press and analyzes sentiment locally when Ollama is present, with a built-in keyword fallback when it is not.
 
 ---
 
@@ -59,7 +59,7 @@ Retail trading in the Indian market is often a battle against noise, high slippa
 ├── data/stonxx_daily_panel_yf.parquet  # Daily multi-stock Yahoo panel
 ├── stonxx_daily_panel_model.joblib     # Daily baseline XGBoost artifact
 ├── nifty_xgb_model.joblib       # Intraday legacy ML artifact
-├── sentiment_engine.py          # Dual LLM sentiment analysis logic
+├── sentiment_engine.py          # News sentiment helper with optional Ollama + fallback scoring
 ├── stonxx_dashboard.py          # Live terminal UI (Rich-based)
 ├── run_stonxx_backtest.py       # High-fidelity backtest runner
 └── daily_paper_trader.py        # Live paper trading runner
@@ -71,7 +71,7 @@ Retail trading in the Indian market is often a battle against noise, high slippa
 
 ### 1. Requirements
 -   Python 3.10+
--   Ollama (Required for local Llama 3.2 sentiment)
+-   Ollama (Optional: improves sentiment quality, but the fallback remains operational without it)
 -   DhanHQ API Access
 
 ### 2. Installation
