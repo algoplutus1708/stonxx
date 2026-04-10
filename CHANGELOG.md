@@ -2,6 +2,14 @@
 
 ## 4.4.60 - Unreleased
 
+### Added
+- Split-adjusted daily Yahoo Finance panel builder for a diversified Indian equity universe plus Nifty benchmark (`yf_historical_fetcher.py`), saved as `data/stonxx_daily_panel_yf.parquet`.
+- Leak-aware daily baseline trainer (`train_yf_model.py`) using expanding temporal validation with an embargo gap and a saved XGBoost artifact (`stonxx_daily_panel_model.joblib`).
+- Regression coverage for the new daily panel schema, benchmark merge, feature generation, and embargoed split behavior.
+
+### Changed
+- India trader documentation and examples now describe the daily panel research workflow and the new baseline model artifact names.
+
 ## 4.4.59 - Unreleased
 
 ### Fixed

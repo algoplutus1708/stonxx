@@ -1,122 +1,403 @@
-import pandas as pd
-import numpy as np
+"""Train a leak-aware daily baseline model for the Indian swing-trading panel.
+
+The baseline predicts each stock's 5-trading-day forward return from a
+split-adjusted daily Yahoo Finance panel. Validation is done with expanding
+walk-forward splits plus an embargo gap so train dates always precede
+validation dates globally across the entire stock panel.
+"""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import dataclass
+
 import joblib
-from xgboost import XGBClassifier
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score
+import numpy as np
+import pandas as pd
+from sklearn.metrics import mean_squared_error, r2_score
+from xgboost import XGBRegressor
 
-def calculate_features(df):
-    """
-    Computes required indicators (RSI, MACD, ATR, Lagged Returns)
-    and drops all raw price variables and NaN samples.
-    """
-    df = df.copy()
-    
-    # 1. Construct Target
-    # 1 if NEXT day's close > NEXT day's open, properly shifted.
-    valid_next_mask = df['close'].shift(-1).notna() & df['open'].shift(-1).notna()
-    df['target'] = np.where(df['close'].shift(-1) > df['open'].shift(-1), 1.0, 0.0)
-    df.loc[~valid_next_mask, 'target'] = np.nan
-    
-    # 2. RSI (14-period) using Wilder's EMA weighting
-    delta = df['close'].diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    
-    rs = avg_gain / avg_loss
-    df['rsi_14'] = 100 - (100 / (1 + rs))
-    
-    # 3. MACD, Signal, Histogram
-    ema_12 = df['close'].ewm(span=12, adjust=False).mean()
-    ema_26 = df['close'].ewm(span=26, adjust=False).mean()
-    df['macd'] = ema_12 - ema_26
-    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    df['macd_hist'] = df['macd'] - df['macd_signal']
-    
-    # 4. ATR (14-period) normalized by close price
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift(1)).abs()
-    low_close = (df['low'] - df['close'].shift(1)).abs()
-    
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    
-    df['atr_14_norm'] = atr / df['close']
-    
-    # 5. Lagged Returns
-    daily_returns = df['close'].pct_change()
-    df['return_lag_1'] = daily_returns.shift(1)
-    df['return_lag_2'] = daily_returns.shift(2)
-    df['return_lag_3'] = daily_returns.shift(3)
-    
-    # Drop NaNs
-    df.dropna(inplace=True)
-    df['target'] = df['target'].astype(int)
-    
-    # Crucial: Drop raw prices and unnormalized columns
-    cols_to_drop = ['open', 'high', 'low', 'close', 'volume']
-    df.drop(columns=[col for col in cols_to_drop if col in df.columns], inplace=True)
-    
-    return df
+DEFAULT_PANEL_PATH = "data/stonxx_daily_panel_yf.parquet"
+DEFAULT_MODEL_PATH = "stonxx_daily_panel_model.joblib"
+FORWARD_HORIZON_DAYS = 5
+BENCHMARK_TICKER = "^NSEI"
 
-def main():
-    print("Loading data from data/nifty50_1d_yf.parquet...")
-    df = pd.read_parquet("data/nifty50_1d_yf.parquet")
-    print(f"Loaded DataFrame with shape: {df.shape}")
-    
-    print("Calculating features and target...")
-    df_features = calculate_features(df)
-    
-    print(f"Feature set final shape: {df_features.shape}")
-    print(f"Features: {list(df_features.columns.drop('target'))}")
-    
-    X = df_features.drop(columns=['target'])
-    y = df_features['target']
-    
-    print("\nModel Setup: XGBClassifier")
-    model = XGBClassifier(
-        max_depth=3,
-        n_estimators=200,
-        learning_rate=0.01,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=42, # reproducibility
-        eval_metric='logloss'
+FEATURE_COLUMNS = [
+    "vol_norm_momentum",
+    "rsi_5",
+    "benchmark_alpha",
+    "atr_pct_20",
+    "volume_ratio_20",
+]
+
+XGB_PARAMS = {
+    "objective": "reg:squarederror",
+    "n_estimators": 300,
+    "max_depth": 3,
+    "learning_rate": 0.03,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "min_child_weight": 20,
+    "reg_alpha": 0.5,
+    "reg_lambda": 2.0,
+    "random_state": 42,
+}
+
+
+@dataclass(frozen=True)
+class TemporalSplit:
+    fold: int
+    train_start: pd.Timestamp
+    train_end: pd.Timestamp
+    validation_start: pd.Timestamp
+    validation_end: pd.Timestamp
+    train_mask: np.ndarray
+    validation_mask: np.ndarray
+
+
+def load_price_panel(path: str = DEFAULT_PANEL_PATH) -> pd.DataFrame:
+    """Load the daily stock panel saved by yf_historical_fetcher.py."""
+    frame = pd.read_parquet(path)
+    required = {"datetime", "ticker", "open", "high", "low", "close", "volume", "benchmark_close"}
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"Panel file is missing required columns: {sorted(missing)}")
+
+    frame = frame.copy()
+    frame["datetime"] = pd.to_datetime(frame["datetime"])
+    frame = frame.sort_values(["ticker", "datetime"]).reset_index(drop=True)
+    return frame
+
+
+def compute_rsi(series: pd.Series, length: int) -> pd.Series:
+    """Compute Wilder RSI."""
+    delta = series.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    avg_gain = gain.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.where(avg_loss != 0.0, 100.0)
+    rsi = rsi.where(avg_gain != 0.0, 0.0)
+    return rsi
+
+
+def compute_true_range(group: pd.DataFrame) -> pd.Series:
+    """Compute daily true range."""
+    prev_close = group["close"].shift(1)
+    high_low = group["high"] - group["low"]
+    high_close = (group["high"] - prev_close).abs()
+    low_close = (group["low"] - prev_close).abs()
+    return pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+
+
+def prepare_training_frame(
+    panel: pd.DataFrame,
+    *,
+    forward_horizon_days: int = FORWARD_HORIZON_DAYS,
+) -> pd.DataFrame:
+    """Build the feature matrix and 5-day forward return target."""
+    frame = panel.copy()
+    frame["datetime"] = pd.to_datetime(frame["datetime"])
+    frame = frame.sort_values(["ticker", "datetime"]).reset_index(drop=True)
+
+    benchmark = (
+        frame[["datetime", "benchmark_close"]]
+        .drop_duplicates(subset=["datetime"])
+        .sort_values("datetime")
+        .reset_index(drop=True)
     )
-    
-    print("Validating model with TimeSeriesSplit (n_splits=5)...")
-    tscv = TimeSeriesSplit(n_splits=5)
-    
-    fold = 1
-    accuracies = []
-    
-    for train_idx, test_idx in tscv.split(X):
-        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
-        
-        # Fit model on training slice
-        model.fit(X_train, y_train)
-        
-        # Predict validation slice
-        preds = model.predict(X_test)
-        
-        # Check accuracy
-        acc = accuracy_score(y_test, preds)
-        accuracies.append(acc)
-        print(f"Fold {fold} Accuracy: {acc:.4f}")
-        fold += 1
-        
-    print(f"-> Mean Validation Accuracy: {np.mean(accuracies):.4f}")
-    
-    print("\nTraining final model on complete dataset...")
-    model.fit(X, y)
-    
-    save_path = "nifty_daily_model.joblib"
-    joblib.dump(model, save_path)
-    print(f"Saved completed model to {save_path}")
+    benchmark["benchmark_return_30"] = benchmark["benchmark_close"].pct_change(30)
+    benchmark["benchmark_forward_return_5d"] = (
+        benchmark["benchmark_close"].shift(-forward_horizon_days) / benchmark["benchmark_close"] - 1.0
+    )
+    frame = frame.drop(columns=["benchmark_close"]).merge(benchmark, on="datetime", how="left")
+
+    by_ticker = frame.groupby("ticker", group_keys=False)
+    frame["sma_20"] = by_ticker["close"].transform(lambda s: s.rolling(20).mean())
+    frame["atr_20"] = by_ticker.apply(
+        lambda group: compute_true_range(group).rolling(20).mean()
+    ).reset_index(level=0, drop=True)
+    frame["vol_norm_momentum"] = (frame["close"] - frame["sma_20"]) / frame["atr_20"].replace(0.0, np.nan)
+    frame["rsi_5"] = by_ticker["close"].transform(lambda s: compute_rsi(s, 5))
+    frame["stock_return_30"] = by_ticker["close"].transform(lambda s: s.pct_change(30))
+    frame["benchmark_alpha"] = frame["stock_return_30"] - frame["benchmark_return_30"]
+    frame["atr_pct_20"] = frame["atr_20"] / frame["close"].replace(0.0, np.nan)
+    frame["volume_ratio_20"] = frame["volume"] / by_ticker["volume"].transform(lambda s: s.rolling(20).mean())
+    frame["target_forward_return_5d"] = by_ticker["close"].transform(
+        lambda s: s.shift(-forward_horizon_days) / s - 1.0
+    )
+
+    model_frame = frame[
+        [
+            "datetime",
+            "ticker",
+            *FEATURE_COLUMNS,
+            "target_forward_return_5d",
+            "benchmark_forward_return_5d",
+        ]
+    ].dropna()
+    model_frame = model_frame.sort_values(["datetime", "ticker"]).reset_index(drop=True)
+    return model_frame
+
+
+def generate_temporal_splits(
+    frame: pd.DataFrame,
+    *,
+    n_splits: int = 4,
+    min_train_days: int = 504,
+    validation_window_days: int = 126,
+    embargo_days: int = FORWARD_HORIZON_DAYS,
+) -> list[TemporalSplit]:
+    """Create expanding walk-forward splits with a global-date embargo."""
+    unique_dates = pd.Index(sorted(pd.to_datetime(frame["datetime"]).unique()))
+    min_required = min_train_days + embargo_days + validation_window_days
+    if len(unique_dates) < min_required:
+        raise ValueError(
+            f"Need at least {min_required} unique dates, found {len(unique_dates)}"
+        )
+
+    max_train_end_position = len(unique_dates) - embargo_days - validation_window_days - 1
+    candidate_positions = np.linspace(
+        min_train_days - 1,
+        max_train_end_position,
+        num=n_splits,
+        dtype=int,
+    )
+
+    splits: list[TemporalSplit] = []
+    seen_train_end_positions: set[int] = set()
+    for fold_number, train_end_position in enumerate(candidate_positions, start=1):
+        if train_end_position in seen_train_end_positions:
+            continue
+        seen_train_end_positions.add(train_end_position)
+
+        validation_start_position = train_end_position + embargo_days + 1
+        validation_end_position = validation_start_position + validation_window_days - 1
+        if validation_end_position >= len(unique_dates):
+            continue
+
+        train_start = unique_dates[0]
+        train_end = unique_dates[train_end_position]
+        validation_start = unique_dates[validation_start_position]
+        validation_end = unique_dates[validation_end_position]
+
+        datetimes = pd.to_datetime(frame["datetime"])
+        train_mask = (datetimes >= train_start) & (datetimes <= train_end)
+        validation_mask = (datetimes >= validation_start) & (datetimes <= validation_end)
+        splits.append(
+            TemporalSplit(
+                fold=fold_number,
+                train_start=pd.Timestamp(train_start),
+                train_end=pd.Timestamp(train_end),
+                validation_start=pd.Timestamp(validation_start),
+                validation_end=pd.Timestamp(validation_end),
+                train_mask=train_mask.to_numpy(),
+                validation_mask=validation_mask.to_numpy(),
+            )
+        )
+
+    if not splits:
+        raise ValueError("No valid temporal splits could be created")
+
+    return splits
+
+
+def _make_model() -> XGBRegressor:
+    return XGBRegressor(**XGB_PARAMS)
+
+
+def compute_top_k_excess_return(
+    validation_frame: pd.DataFrame,
+    predictions: np.ndarray,
+    *,
+    top_k: int = 3,
+) -> float:
+    """Measure average excess 5-day return of the top-ranked names per date."""
+    scored = validation_frame[["datetime", "ticker", "target_forward_return_5d", "benchmark_forward_return_5d"]].copy()
+    scored["prediction"] = predictions
+
+    selected_returns = []
+    for _, bucket in scored.groupby("datetime"):
+        candidates = bucket[bucket["prediction"] > 0].sort_values("prediction", ascending=False).head(top_k)
+        if candidates.empty:
+            continue
+        excess = candidates["target_forward_return_5d"] - candidates["benchmark_forward_return_5d"]
+        selected_returns.append(excess.mean())
+
+    if not selected_returns:
+        return float("nan")
+    return float(np.mean(selected_returns))
+
+
+def evaluate_fold(validation_frame: pd.DataFrame, predictions: np.ndarray) -> dict[str, float]:
+    """Compute regression and ranking metrics for one validation fold."""
+    actual = validation_frame["target_forward_return_5d"].to_numpy()
+    pred_sign = predictions > 0
+    actual_sign = actual > 0
+    directional_accuracy = float(np.mean(pred_sign == actual_sign))
+
+    predicted_series = pd.Series(predictions)
+    actual_series = pd.Series(actual)
+    if predicted_series.nunique(dropna=True) <= 1 or actual_series.nunique(dropna=True) <= 1:
+        spearman_ic = float("nan")
+    else:
+        spearman_ic = float(predicted_series.corr(actual_series, method="spearman"))
+    mse = float(mean_squared_error(actual, predictions))
+    rmse = float(np.sqrt(mse))
+    r2 = float(r2_score(actual, predictions))
+
+    return {
+        "mse": mse,
+        "rmse": rmse,
+        "r2": r2,
+        "directional_accuracy": directional_accuracy,
+        "spearman_ic": spearman_ic,
+        "top_3_excess_return": compute_top_k_excess_return(validation_frame, predictions, top_k=3),
+    }
+
+
+def nanmean_or_nan(values: list[float]) -> float:
+    """Return nanmean without emitting warnings when every value is NaN."""
+    array = np.asarray(values, dtype=float)
+    if np.isnan(array).all():
+        return float("nan")
+    return float(np.nanmean(array))
+
+
+def train_baseline_model(
+    *,
+    panel_path: str = DEFAULT_PANEL_PATH,
+    model_path: str = DEFAULT_MODEL_PATH,
+    n_splits: int = 4,
+    min_train_days: int = 504,
+    validation_window_days: int = 126,
+    embargo_days: int = FORWARD_HORIZON_DAYS,
+) -> dict:
+    """Train and persist the daily XGBoost baseline."""
+    panel = load_price_panel(panel_path)
+    frame = prepare_training_frame(panel, forward_horizon_days=FORWARD_HORIZON_DAYS)
+    splits = generate_temporal_splits(
+        frame,
+        n_splits=n_splits,
+        min_train_days=min_train_days,
+        validation_window_days=validation_window_days,
+        embargo_days=embargo_days,
+    )
+
+    print(f"Loaded panel rows: {len(panel):,}")
+    print(f"Training rows after feature prep: {len(frame):,}")
+    print(f"Stocks in panel: {frame['ticker'].nunique()}")
+    print(f"Feature columns: {FEATURE_COLUMNS}")
+
+    fold_results: list[dict] = []
+    for split in splits:
+        train_frame = frame.iloc[split.train_mask]
+        validation_frame = frame.iloc[split.validation_mask]
+
+        model = _make_model()
+        model.fit(train_frame[FEATURE_COLUMNS], train_frame["target_forward_return_5d"])
+        predictions = model.predict(validation_frame[FEATURE_COLUMNS])
+        metrics = evaluate_fold(validation_frame, predictions)
+
+        result = {
+            "fold": split.fold,
+            "train_start": split.train_start.strftime("%Y-%m-%d"),
+            "train_end": split.train_end.strftime("%Y-%m-%d"),
+            "validation_start": split.validation_start.strftime("%Y-%m-%d"),
+            "validation_end": split.validation_end.strftime("%Y-%m-%d"),
+            **metrics,
+        }
+        fold_results.append(result)
+
+        print(
+            f"\nFold {split.fold}: "
+            f"train {result['train_start']} -> {result['train_end']} | "
+            f"validation {result['validation_start']} -> {result['validation_end']}"
+        )
+        print(
+            "  "
+            f"MSE={result['mse']:.6f} | RMSE={result['rmse']:.6f} | "
+            f"R2={result['r2']:.4f} | DirAcc={result['directional_accuracy']:.4f} | "
+            f"IC={result['spearman_ic']:.4f} | Top3Excess={result['top_3_excess_return']:.4f}"
+        )
+
+    final_model = _make_model()
+    final_model.fit(frame[FEATURE_COLUMNS], frame["target_forward_return_5d"])
+    importance = {
+        feature: round(float(score), 6)
+        for feature, score in zip(FEATURE_COLUMNS, final_model.feature_importances_)
+    }
+
+    mean_metrics = {
+        key: round(
+            nanmean_or_nan([result[key] for result in fold_results]),
+            6,
+        )
+        for key in ["mse", "rmse", "r2", "directional_accuracy", "spearman_ic", "top_3_excess_return"]
+    }
+
+    artifact = {
+        "model": final_model,
+        "features": FEATURE_COLUMNS,
+        "meta": {
+            "panel_path": panel_path,
+            "model_type": "XGBRegressor",
+            "benchmark_ticker": BENCHMARK_TICKER,
+            "forward_horizon_days": FORWARD_HORIZON_DAYS,
+            "embargo_days": embargo_days,
+            "validation_window_days": validation_window_days,
+            "n_splits": len(fold_results),
+            "stocks": sorted(frame["ticker"].unique().tolist()),
+            "train_start": frame["datetime"].min().strftime("%Y-%m-%d"),
+            "train_end": frame["datetime"].max().strftime("%Y-%m-%d"),
+            "mean_metrics": mean_metrics,
+            "feature_importance": importance,
+        },
+        "cv_results": fold_results,
+    }
+    joblib.dump(artifact, model_path)
+
+    print("\nSaved baseline artifact:")
+    print(f"  Path: {model_path}")
+    print(f"  Mean metrics: {mean_metrics}")
+    print(f"  Feature importance: {importance}")
+    return artifact
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--panel-path", default=DEFAULT_PANEL_PATH, help="Input panel parquet path.")
+    parser.add_argument("--model-path", default=DEFAULT_MODEL_PATH, help="Output model artifact path.")
+    parser.add_argument("--n-splits", type=int, default=4, help="Number of expanding walk-forward folds.")
+    parser.add_argument("--min-train-days", type=int, default=504, help="Minimum unique training dates before fold 1.")
+    parser.add_argument(
+        "--validation-window-days",
+        type=int,
+        default=126,
+        help="Unique trading dates in each validation window.",
+    )
+    parser.add_argument(
+        "--embargo-days",
+        type=int,
+        default=FORWARD_HORIZON_DAYS,
+        help="Gap between train end and validation start.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    train_baseline_model(
+        panel_path=args.panel_path,
+        model_path=args.model_path,
+        n_splits=args.n_splits,
+        min_train_days=args.min_train_days,
+        validation_window_days=args.validation_window_days,
+        embargo_days=args.embargo_days,
+    )
+
 
 if __name__ == "__main__":
     main()

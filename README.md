@@ -56,7 +56,9 @@ Retail trading in the Indian market is often a battle against noise, high slippa
 │   │   └── state_manager.py     # Memory Bank: persistence for trades
 ├── data/                        # Local CSV datasets (NIFTY 15-min)
 ├── dataset/                     # Processed feature matrices
-├── nifty_xgb_model.joblib       # Trained ML artifact (XGBoost)
+├── data/stonxx_daily_panel_yf.parquet  # Daily multi-stock Yahoo panel
+├── stonxx_daily_panel_model.joblib     # Daily baseline XGBoost artifact
+├── nifty_xgb_model.joblib       # Intraday legacy ML artifact
 ├── sentiment_engine.py          # Dual LLM sentiment analysis logic
 ├── stonxx_dashboard.py          # Live terminal UI (Rich-based)
 ├── run_stonxx_backtest.py       # High-fidelity backtest runner
@@ -108,20 +110,32 @@ Test the strategy on historical data with realistic Indian market fees (Tax, GST
 python run_stonxx_backtest.py
 ```
 
-### 2. Live/Paper Trading
+### 2. Prepare Daily Research Data
+Build the split-adjusted daily Yahoo Finance panel used by the swing baseline:
+```bash
+python yf_historical_fetcher.py
+```
+
+### 3. Train Daily Baseline Model
+Train the leak-aware daily cross-sectional baseline with temporal walk-forward validation:
+```bash
+python train_yf_model.py
+```
+
+### 4. Live/Paper Trading
 Start the bot in paper trading mode. It will scan the market every 15 minutes but execute based on Daily Swing signals:
 ```bash
 python daily_paper_trader.py
 ```
 
-### 3. Monitoring Dashboard
+### 5. Monitoring Dashboard
 In a separate terminal, launch the live dashboard to see real-time probabilities and active positions:
 ```bash
 python stonxx_dashboard.py
 ```
 
-### 4. Model Training
-Refresh the machine learning model using the latest NIFTY data:
+### 6. Refresh Legacy Intraday Model
+If you still need the original NIFTY intraday artifact for comparisons:
 ```bash
 python train_nifty_model.py
 ```

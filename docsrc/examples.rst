@@ -46,6 +46,22 @@ Typical AI agent pattern:
         )
         self.log_message(f"[research] {result.summary}", color="yellow")
 
+Daily Research Pipeline
+-----------------------
+
+Prepare a split-adjusted daily Yahoo Finance panel for cross-sectional stock
+research, then train a walk-forward baseline model:
+
+.. code-block:: bash
+
+    python yf_historical_fetcher.py
+    python train_yf_model.py
+
+The fetcher saves ``data/stonxx_daily_panel_yf.parquet`` and the trainer saves
+``stonxx_daily_panel_model.joblib``. The baseline trainer uses expanding
+temporal validation with an embargo gap so train dates always precede
+validation dates across the entire stock panel.
+
 Stocks
 ------
 

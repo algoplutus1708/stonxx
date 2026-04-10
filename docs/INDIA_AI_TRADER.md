@@ -52,6 +52,33 @@ To test the AI Agent over historical data:
     python run_india_backtest.py
     ```
 
+## Daily Panel Research Workflow
+
+For the swing-trading baseline, use the closed-bar daily Yahoo panel instead of
+intraday broker history. The research loop is:
+
+1.  Download the split-adjusted stock panel plus Nifty benchmark:
+    ```bash
+    python yf_historical_fetcher.py
+    ```
+2.  Train the daily baseline model with expanding walk-forward splits and a
+    5-trading-day embargo:
+    ```bash
+    python train_yf_model.py
+    ```
+
+The fetcher writes `data/stonxx_daily_panel_yf.parquet`. The trainer reads that
+panel, computes long-only ranking features such as normalized momentum, `rsi_5`,
+and benchmark-relative alpha, then saves `stonxx_daily_panel_model.joblib`.
+
+Important operating assumptions:
+
+-   Yahoo prices are downloaded with split/dividend adjustment enabled by default.
+-   The model is trained only on fully closed daily bars. Do not feed unfinished
+    intraday snapshots into this baseline without retraining on matching inputs.
+-   Validation is date-based across the whole stock panel, so every fold obeys
+    `train_end < validation_start`.
+
 ## Live Deployment
 
 Running the agent live requires a Dhan trading account and API credentials.
