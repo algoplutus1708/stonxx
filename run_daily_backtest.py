@@ -26,7 +26,8 @@ from lumibot.entities import Asset
 from lumibot.entities.india_trading_fees import make_india_equity_fees
 from lumibot.example_strategies.india_concentrated_basket import DEFAULT_BASKET_SYMBOLS, IndiaConcentratedBasket
 
-BACKTEST_START = datetime(2024, 12, 20)
+# 15-year window ending on 2025-12-31.
+BACKTEST_START = datetime(2010, 12, 31)
 BACKTEST_END = datetime(2025, 12, 31)
 DEFAULT_BENCHMARK = "^NSEI"
 

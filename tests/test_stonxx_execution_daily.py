@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from types import SimpleNamespace
 
 from lumibot.entities import Asset
@@ -53,6 +54,8 @@ def test_run_daily_backtest_forces_yahoo_datasource(monkeypatch, capsys):
 
     assert os.environ["BACKTESTING_DATA_SOURCE"] == "yahoo"
     assert captured["datasource_class"] is module.YahooDataBacktesting
+    assert captured["kwargs"]["backtesting_start"] == datetime(2010, 12, 31)
+    assert captured["kwargs"]["backtesting_end"] == datetime(2025, 12, 31)
     assert captured["kwargs"]["parameters"]["basket_symbols"] == ["MARUTI.NS", "RELIANCE.NS", "BHARTIARTL.NS"]
     assert captured["kwargs"]["benchmark_asset"].symbol == "^NSEI"
     assert captured["kwargs"]["show_tearsheet"] is False

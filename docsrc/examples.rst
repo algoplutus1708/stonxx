@@ -65,8 +65,9 @@ precede validation dates across the entire stock panel.
 Training is hard-capped at ``2023-12-31``, so 2024+ rows remain strictly out
 of sample before the walk-forward splits are generated.
 For a quick end-to-end sanity check, run ``python run_daily_backtest.py``; it
-forces Yahoo Finance routing and prints a terminal summary with Total Return,
-CAGR, Max Drawdown, and Sharpe after the backtest completes.
+forces Yahoo Finance routing, uses a 15-year history window ending on
+``2025-12-31``, and prints a terminal summary with Total Return, CAGR, Max
+Drawdown, and Sharpe after the backtest completes.
 The runner does not open the blank indicators plot, so the CLI stays focused
 on the headline stats.
 By default it now holds an equal-weight basket of ``MARUTI.NS``,

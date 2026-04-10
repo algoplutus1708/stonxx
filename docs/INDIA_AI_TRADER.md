@@ -74,12 +74,14 @@ before computing long-only ranking features such as normalized momentum,
 `stonxx_daily_panel_model.joblib`.
 Training is hard-capped at `2023-12-31`, so 2024+ rows never enter the
 expanding walk-forward splits or model fit.
-The `python run_daily_backtest.py` entry point now runs a concentrated
-equal-weight basket of `MARUTI.NS`, `RELIANCE.NS`, and `BHARTIARTL.NS`.
-That basket delivered a materially better 2025 backtest than the earlier ML
-picker, so the daily runner prints a concise headline summary after the run
-instead of opening a blank indicators page. The basket can be overridden with
-`BASKET_SYMBOLS=...` if you want to test a different concentrated mix.
+The `python run_daily_backtest.py` entry point now runs a 15-year Yahoo
+backtest over a concentrated equal-weight basket of `MARUTI.NS`,
+`RELIANCE.NS`, and `BHARTIARTL.NS`.
+That basket delivered a materially better 15-year historical backtest than the
+earlier ML picker, so the daily runner prints a concise headline summary after
+the run instead of opening a blank indicators page. The basket can be
+overridden with `BASKET_SYMBOLS=...` if you want to test a different
+concentrated mix.
 The current default basket is deliberately simple: buy once, hold, and let the
 existing Yahoo-adjusted price series drive the result.
 
