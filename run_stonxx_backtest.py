@@ -14,17 +14,18 @@ FEE & SLIPPAGE VERIFICATION (CRITICAL)
 """
 
 import os
+import tempfile
 from datetime import datetime
 
+import pandas as pd
 from dotenv import load_dotenv
 
-load_dotenv(".env.india")
-load_dotenv(".secrets/lumi_secrets.env")
-
-import pandas as pd
 from lumibot.backtesting import PandasDataBacktesting
 from lumibot.entities import Asset, Data, TradingFee, TradingSlippage
 from lumibot.example_strategies.stonxx_india_bot import stonxx
+
+load_dotenv(".env.india")
+load_dotenv(".secrets/lumi_secrets.env")
 
 
 def run_backtest():
@@ -70,28 +71,33 @@ def run_backtest():
         Asset("^NSEI", Asset.AssetType.INDEX): Data(Asset("^NSEI", Asset.AssetType.INDEX), df.copy()),
     }
 
-    stonxx.backtest(
-        PandasDataBacktesting,
-        pandas_data=pandas_data,
-        backtesting_start=backtesting_start,
-        backtesting_end=backtesting_end,
-        # ₹1 crore starting capital — realistic for institutional/HNI
-        budget=10_000_000,
-        # Benchmark: NIFTY 50 index
-        benchmark_asset=Asset("^NSEI", Asset.AssetType.INDEX),
-        # Fee: ₹20 flat per leg
-        buy_trading_fees=[trading_fee],
-        sell_trading_fees=[trading_fee],
-        # Slippage: 0.1% (₹23 absolute at 23,000 Nifty) per fill
-        buy_trading_slippages=[trading_slippage],
-        sell_trading_slippages=[trading_slippage],
-        parameters={"universe": ["NIFTY50"]},
-        name="stonxx",
-        quiet_logs=False,
-        show_plot=True,
-        show_tearsheet=True,
-        save_logfile=True,
-    )
+    with tempfile.TemporaryDirectory(prefix="stonxx_backtest_state_") as state_dir:
+        stonxx.backtest(
+            PandasDataBacktesting,
+            pandas_data=pandas_data,
+            backtesting_start=backtesting_start,
+            backtesting_end=backtesting_end,
+            # ₹1 crore starting capital — realistic for institutional/HNI
+            budget=10_000_000,
+            # Benchmark: NIFTY 50 index
+            benchmark_asset=Asset("^NSEI", Asset.AssetType.INDEX),
+            # Fee: ₹20 flat per leg
+            buy_trading_fees=[trading_fee],
+            sell_trading_fees=[trading_fee],
+            # Slippage: 0.1% (₹23 absolute at 23,000 Nifty) per fill
+            buy_trading_slippages=[trading_slippage],
+            sell_trading_slippages=[trading_slippage],
+            parameters={
+                "universe": ["NIFTY50"],
+                "IS_PAPER_TRADING": False,
+                "state_file": os.path.join(state_dir, "bot_state.json"),
+            },
+            name="stonxx",
+            quiet_logs=False,
+            show_plot=True,
+            show_tearsheet=True,
+            save_logfile=True,
+        )
 
 
 if __name__ == "__main__":

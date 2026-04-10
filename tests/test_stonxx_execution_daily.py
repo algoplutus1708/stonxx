@@ -1,105 +1,113 @@
-from datetime import date
+import os
 from types import SimpleNamespace
 
-import run_daily_backtest
-
-from lumibot.example_strategies.stonxx_india_bot import (
-    compute_order_quantity,
-    next_trading_day,
-    rank_long_candidates,
-    stonxx,
+from lumibot.entities import Asset
+from lumibot.example_strategies.india_concentrated_basket import (
+    DEFAULT_BASKET_SYMBOLS,
+    IndiaConcentratedBasket,
 )
 
 
-def test_compute_order_quantity_respects_risk_and_notional_caps():
-    quantity = compute_order_quantity(
-        portfolio_value=1_000_000.0,
-        current_price=2_000.0,
-        atr_20=20.0,
-        available_cash=1_000_000.0,
-        risk_budget_pct=0.01,
-        max_position_pct=0.10,
-    )
-
-    # Risk budget allows 500 shares, but the 10% notional cap limits us to 50.
-    assert quantity == 50
-
-
-def test_compute_order_quantity_respects_available_cash():
-    quantity = compute_order_quantity(
-        portfolio_value=1_000_000.0,
-        current_price=2_000.0,
-        atr_20=20.0,
-        available_cash=30_000.0,
-        risk_budget_pct=0.01,
-        max_position_pct=0.10,
-    )
-
-    assert quantity == 15
-
-
-def test_rank_long_candidates_filters_negative_and_low_conviction_signals():
-    signals = [
-        {"symbol": "A", "predicted_return": 0.032},
-        {"symbol": "B", "predicted_return": -0.005},
-        {"symbol": "C", "predicted_return": 0.011},
-        {"symbol": "D", "predicted_return": 0.008},
-    ]
-
-    ranked = rank_long_candidates(
-        signals,
-        minimum_predicted_return=0.01,
-        max_positions=2,
-    )
-
-    assert [item["symbol"] for item in ranked] == ["A", "C"]
-
-
-def test_next_trading_day_skips_weekend():
-    assert next_trading_day(date(2026, 4, 10)).isoformat() == "2026-04-13"
-
-
-def test_initialize_binds_timezone_to_asia_kolkata(monkeypatch):
-    strategy = stonxx.__new__(stonxx)
-    strategy.parameters = {}
-    strategy.is_backtesting = False
+def test_initialize_binds_timezone_and_normalizes_symbols(monkeypatch):
+    strategy = IndiaConcentratedBasket.__new__(IndiaConcentratedBasket)
+    strategy.parameters = {"basket_symbols": ["maruti", "RELIANCE.NS", "bhartiartl"]}
     strategy.broker = SimpleNamespace(data_source=SimpleNamespace(tzinfo=None))
     strategy.log_message = lambda *args, **kwargs: None
     strategy.set_market = lambda market: setattr(strategy, "_market", market)
-    strategy.register_cron_callback = lambda *args, **kwargs: None
-    strategy._ensure_paper_trade_file = lambda: None
-
-    monkeypatch.setattr(
-        "lumibot.example_strategies.stonxx_india_bot.load_state",
-        lambda: {
-            "active_trades": {},
-            "pending_orders": [],
-            "paper_cash": 1_000_000.0,
-            "last_signal_date": None,
-            "last_submission_date": None,
-        },
-    )
-    monkeypatch.setattr(
-        "lumibot.example_strategies.stonxx_india_bot.joblib.load",
-        lambda path: (_ for _ in ()).throw(FileNotFoundError()),
-    )
 
     strategy.initialize()
 
     assert strategy._market == "XBOM"
-    assert strategy.timezone == "Asia/Kolkata"
+    assert strategy.broker.data_source.tzinfo.zone == "Asia/Kolkata"
     assert strategy.sleeptime == "1D"
+    assert strategy.basket_symbols == ["MARUTI.NS", "RELIANCE.NS", "BHARTIARTL.NS"]
 
 
-def test_run_daily_backtest_alias_delegates(monkeypatch):
-    called = {"ran": False}
+def test_run_daily_backtest_forces_yahoo_datasource(monkeypatch, capsys):
+    import importlib
 
-    monkeypatch.setattr(
-        run_daily_backtest,
-        "_run_stonxx_backtest",
-        lambda: called.__setitem__("ran", True),
-    )
+    original_data_source = os.environ.get("BACKTESTING_DATA_SOURCE")
+    original_data_sources = os.environ.get("BACKTESTING_DATA_SOURCES")
 
-    run_daily_backtest.run_backtest()
+    monkeypatch.setenv("BASKET_SYMBOLS", "MARUTI,RELIANCE,BHARTIARTL")
 
-    assert called["ran"] is True
+    module = importlib.import_module("run_daily_backtest")
+    captured = {}
+
+    def fake_backtest(datasource_class, **kwargs):
+        captured["datasource_class"] = datasource_class
+        captured["kwargs"] = kwargs
+        return {
+            "india_concentrated_basket_backtest": {
+                "cagr": 0.1234,
+                "total_return": 0.4567,
+                "max_drawdown": {"drawdown": 0.0789},
+                "sharpe": 1.23,
+            }
+        }
+
+    monkeypatch.setattr(module.IndiaConcentratedBasket, "backtest", fake_backtest)
+
+    results = module.run_backtest()
+    output = capsys.readouterr().out
+
+    assert os.environ["BACKTESTING_DATA_SOURCE"] == "yahoo"
+    assert captured["datasource_class"] is module.YahooDataBacktesting
+    assert captured["kwargs"]["parameters"]["basket_symbols"] == ["MARUTI.NS", "RELIANCE.NS", "BHARTIARTL.NS"]
+    assert captured["kwargs"]["benchmark_asset"].symbol == "^NSEI"
+    assert captured["kwargs"]["show_tearsheet"] is False
+    assert captured["kwargs"]["show_indicators"] is False
+    assert "CAGR" in output
+    assert "12.34%" in output
+    assert "Max Drawdown" in output
+    assert results["india_concentrated_basket_backtest"]["cagr"] == 0.1234
+
+    if original_data_source is None:
+        monkeypatch.delenv("BACKTESTING_DATA_SOURCE", raising=False)
+    else:
+        monkeypatch.setenv("BACKTESTING_DATA_SOURCE", original_data_source)
+
+    if original_data_sources is None:
+        monkeypatch.delenv("BACKTESTING_DATA_SOURCES", raising=False)
+    else:
+        monkeypatch.setenv("BACKTESTING_DATA_SOURCES", original_data_sources)
+
+
+def test_basket_strategy_buys_missing_positions(monkeypatch):
+    strategy = IndiaConcentratedBasket.__new__(IndiaConcentratedBasket)
+    strategy.parameters = {"basket_symbols": ["MARUTI.NS", "RELIANCE.NS", "BHARTIARTL.NS"]}
+    strategy.basket_symbols = ["MARUTI.NS", "RELIANCE.NS", "BHARTIARTL.NS"]
+    strategy.get_positions = lambda: []
+    strategy.get_portfolio_value = lambda: 9_000_000.0
+    strategy.get_last_price = lambda asset: {"MARUTI.NS": 16000.0, "RELIANCE.NS": 1550.0, "BHARTIARTL.NS": 2150.0}[asset.symbol]
+
+    submitted_orders = []
+    strategy.submit_order = lambda order: submitted_orders.append(order)
+    strategy.create_order = lambda asset, quantity, side: {"symbol": asset.symbol, "quantity": quantity, "side": side}
+
+    strategy.on_trading_iteration()
+
+    assert [order["symbol"] for order in submitted_orders] == ["MARUTI.NS", "RELIANCE.NS", "BHARTIARTL.NS"]
+    assert all(order["side"] == "buy" for order in submitted_orders)
+
+
+def test_basket_strategy_holds_existing_basket(monkeypatch):
+    strategy = IndiaConcentratedBasket.__new__(IndiaConcentratedBasket)
+    strategy.parameters = {"basket_symbols": list(DEFAULT_BASKET_SYMBOLS)}
+    strategy.basket_symbols = list(DEFAULT_BASKET_SYMBOLS)
+
+    positions = []
+    for symbol in DEFAULT_BASKET_SYMBOLS:
+        positions.append(
+            SimpleNamespace(
+                asset=SimpleNamespace(symbol=symbol, asset_type=Asset.AssetType.STOCK),
+                quantity=100,
+            )
+        )
+    strategy.get_positions = lambda: positions
+    strategy.get_portfolio_value = lambda: 10_000_000.0
+    strategy.get_last_price = lambda asset: 1.0
+    strategy.submit_order = lambda order: (_ for _ in ()).throw(AssertionError("strategy should not rebalance"))
+    strategy.create_order = lambda asset, quantity, side: {"symbol": asset.symbol, "quantity": quantity, "side": side}
+
+    strategy.on_trading_iteration()

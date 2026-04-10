@@ -19,9 +19,9 @@ from lumibot.entities import Asset
 from lumibot.strategies.strategy import Strategy
 
 try:
-    from state_manager import load_state, save_state
+    from state_manager import STATE_FILE, load_state, save_state
 except ImportError:
-    from lumibot.example_strategies.state_manager import load_state, save_state
+    from lumibot.example_strategies.state_manager import STATE_FILE, load_state, save_state
 
 from train_yf_model import (
     BENCHMARK_TICKER,
@@ -54,6 +54,7 @@ DEFAULT_MAX_POSITIONS = 3
 DEFAULT_MINIMUM_PREDICTED_RETURN = 0.01
 DEFAULT_RISK_BUDGET_PCT = 0.01
 DEFAULT_MAX_POSITION_PCT = 0.10
+DEFAULT_COOLDOWN_TRADING_DAYS = 5
 AFTER_CLOSE_CRON = "45 15 * * 1-5"
 NEXT_OPEN_CRON = "16 9 * * 1-5"
 
@@ -102,6 +103,9 @@ def rank_long_candidates(
 class stonxx(Strategy):
     """Daily long-only swing strategy using next-open execution intents."""
 
+    def _state_file_path(self) -> str:
+        return getattr(self, "state_file", STATE_FILE)
+
     def initialize(self):
         self.set_market("XBOM")
         self.broker.data_source.tzinfo = pytz.timezone("Asia/Kolkata")
@@ -112,24 +116,27 @@ class stonxx(Strategy):
         self.universe = [symbol.upper() for symbol in self.parameters.get("universe", DEFAULT_UNIVERSE)]
         self.model_path = self.parameters.get("model_path", DEFAULT_MODEL_PATH)
         self.benchmark_symbol = self.parameters.get("benchmark_symbol", BENCHMARK_TICKER)
+        self.state_file = self.parameters.get("state_file") or STATE_FILE
         self.max_positions = int(self.parameters.get("max_positions", DEFAULT_MAX_POSITIONS))
         self.minimum_predicted_return = float(
             self.parameters.get("minimum_predicted_return", DEFAULT_MINIMUM_PREDICTED_RETURN)
         )
         self.risk_budget_pct = float(self.parameters.get("risk_budget_pct", DEFAULT_RISK_BUDGET_PCT))
         self.max_position_pct = float(self.parameters.get("max_position_pct", DEFAULT_MAX_POSITION_PCT))
+        self.cooldown_trading_days = int(self.parameters.get("cooldown_trading_days", DEFAULT_COOLDOWN_TRADING_DAYS))
         self.IS_PAPER_TRADING = bool(self.parameters.get("IS_PAPER_TRADING", True))
         self.paper_cash_seed = float(self.parameters.get("paper_cash", DEFAULT_PAPER_CASH))
 
-        self.state = load_state()
+        self.state = load_state(self._state_file_path())
         self.state.setdefault("active_trades", {})
         self.state.setdefault("pending_orders", [])
         self.state.setdefault("paper_cash", 0.0)
         self.state.setdefault("last_signal_date", None)
         self.state.setdefault("last_submission_date", None)
+        self.state.setdefault("symbol_cooldowns", {})
         if self.IS_PAPER_TRADING and self.state["paper_cash"] <= 0:
             self.state["paper_cash"] = self.paper_cash_seed
-            save_state(self.state)
+            save_state(self.state, self._state_file_path())
 
         self.model = None
         self.features = list(FEATURE_COLUMNS)
@@ -222,9 +229,6 @@ class stonxx(Strategy):
             writer = csv.writer(file)
             writer.writerow([timestamp, asset_symbol, direction, quantity, round(price, 4), extra_note, ""])
 
-    def _benchmark_asset(self) -> Asset:
-        return Asset(symbol=self.benchmark_symbol, asset_type=Asset.AssetType.INDEX)
-
     def _compute_atr_20(self, stock_history: pd.DataFrame) -> float | None:
         normalized = normalize_history_frame(stock_history)
         atr_series = compute_true_range(normalized).rolling(20).mean()
@@ -233,13 +237,49 @@ class stonxx(Strategy):
             return None
         return float(value)
 
+    def _advance_trading_days(self, trading_date, trading_days: int):
+        candidate = trading_date
+        for _ in range(max(trading_days, 0)):
+            candidate = next_trading_day(candidate)
+        return candidate
+
+    def _cooldown_until_for_symbol(self, symbol: str):
+        symbol_cooldowns = self.state.get("symbol_cooldowns", {})
+        return symbol_cooldowns.get(symbol)
+
+    def _is_symbol_on_cooldown(self, symbol: str) -> bool:
+        if int(getattr(self, "cooldown_trading_days", 0) or 0) <= 0:
+            return False
+
+        cooldown_until = self._cooldown_until_for_symbol(symbol)
+        if not cooldown_until:
+            return False
+
+        today = self.get_datetime().date().isoformat()
+        return today < str(cooldown_until)
+
+    def _mark_symbol_cooldown(self, symbol: str) -> None:
+        cooldown_trading_days = int(getattr(self, "cooldown_trading_days", 0) or 0)
+        if cooldown_trading_days <= 0:
+            return
+
+        cooldown_until = self._advance_trading_days(self.get_datetime().date(), cooldown_trading_days).isoformat()
+        self.state.setdefault("symbol_cooldowns", {})[symbol] = cooldown_until
+        self.log_message(
+            f"[stonxx] {symbol} entered cooldown until {cooldown_until}",
+            color="yellow",
+        )
+
+    def _clear_symbol_cooldown(self, symbol: str) -> None:
+        self.state.setdefault("symbol_cooldowns", {}).pop(symbol, None)
+
     def _model_signal_for_symbol(self, symbol: str) -> dict | None:
         if self.model is None:
             return None
 
         asset = Asset(symbol=symbol, asset_type=Asset.AssetType.STOCK)
         stock_bars = self.get_historical_prices(asset, 80, "day")
-        benchmark_bars = self.get_historical_prices(self._benchmark_asset(), 80, "day")
+        benchmark_bars = self.get_historical_prices(self._benchmark_asset, 80, "day")
 
         if stock_bars is None or benchmark_bars is None:
             self.log_message(f"[stonxx] Missing daily history for {symbol} or benchmark.", color="yellow")
@@ -326,6 +366,12 @@ class stonxx(Strategy):
             symbol = signal["symbol"]
             if symbol in holdings:
                 continue
+            if self._is_symbol_on_cooldown(symbol):
+                self.log_message(
+                    f"[stonxx] Skipping {symbol} due to cooldown until {self._cooldown_until_for_symbol(symbol)}.",
+                    color="yellow",
+                )
+                continue
 
             quantity = compute_order_quantity(
                 portfolio_value=portfolio_value,
@@ -358,10 +404,46 @@ class stonxx(Strategy):
 
         return pending_orders
 
+    def _submit_order_batch(self, orders: list[dict]) -> None:
+        if not orders:
+            return
+
+        ordered_orders = sorted(orders, key=lambda item: 0 if item["side"] == "sell" else 1)
+
+        if self.IS_PAPER_TRADING:
+            for order in ordered_orders:
+                self._paper_execute_order(order)
+            return
+
+        for order in ordered_orders:
+            asset = Asset(symbol=order["symbol"], asset_type=Asset.AssetType.STOCK)
+            lumi_order = self.create_order(
+                asset=asset,
+                quantity=int(order["quantity"]),
+                side=order["side"],
+                order_type="market",
+                time_in_force="day",
+            )
+            self.submit_order(lumi_order)
+            self.log_message(
+                (
+                    f"[stonxx] Submitted next-open market order: "
+                    f"{order['side'].upper()} {order['symbol']} x{order['quantity']}"
+                ),
+                color="green",
+            )
+
     def generate_after_close_plan(self):
         today = self.get_datetime().date().isoformat()
         if self.state.get("last_signal_date") == today:
             return
+
+        # Backtests do not run the live morning cron callback, so flush any
+        # pending next-open orders here before we overwrite the queue with the
+        # next day's signals. This keeps the simulated equity curve from staying
+        # flat when the strategy is run in historical mode.
+        if self.is_backtesting:
+            self.submit_pending_orders()
 
         signals = []
         for symbol in self.universe:
@@ -378,7 +460,13 @@ class stonxx(Strategy):
         pending_orders = self._queue_orders_for_next_open(signals)
         self.state["pending_orders"] = pending_orders
         self.state["last_signal_date"] = today
-        save_state(self.state)
+        save_state(self.state, self._state_file_path())
+
+        if self.is_backtesting and pending_orders:
+            self._submit_order_batch(pending_orders)
+            self.state["pending_orders"] = []
+            self.state["last_submission_date"] = today
+            save_state(self.state, self._state_file_path())
 
         if not pending_orders:
             self.log_message(
@@ -451,40 +539,19 @@ class stonxx(Strategy):
         if not due_orders:
             return
 
-        due_orders = sorted(due_orders, key=lambda item: 0 if item["side"] == "sell" else 1)
-
-        if self.IS_PAPER_TRADING:
-            for order in due_orders:
-                self._paper_execute_order(order)
-        else:
-            for order in due_orders:
-                asset = Asset(symbol=order["symbol"], asset_type=Asset.AssetType.STOCK)
-                lumi_order = self.create_order(
-                    asset=asset,
-                    quantity=int(order["quantity"]),
-                    side=order["side"],
-                    type="market",
-                    time_in_force="day",
-                    tag="NEXT_OPEN",
-                )
-                self.submit_order(lumi_order)
-                self.log_message(
-                    (
-                        f"[stonxx] Submitted next-open market order: "
-                        f"{order['side'].upper()} {order['symbol']} x{order['quantity']}"
-                    ),
-                    color="green",
-                )
+        self._submit_order_batch(due_orders)
 
         remaining = [order for order in self.state.get("pending_orders", []) if order not in due_orders]
         self.state["pending_orders"] = remaining
         self.state["last_submission_date"] = today
-        save_state(self.state)
+        save_state(self.state, self._state_file_path())
 
     def on_trading_iteration(self):
-        # Safety fallback: if the morning cron was missed, submit queued orders
-        # during the first live iteration after the open.
+        # Backtests do not register the live cron callbacks, so reuse the
+        # morning submission path here to keep queued next-open orders from
+        # staying stranded and producing a flat equity curve.
         if self.is_backtesting:
+            self.submit_pending_orders()
             return
 
         now = self.get_datetime()
@@ -500,11 +567,12 @@ class stonxx(Strategy):
         symbol = order.asset.symbol
 
         if order.side == "buy":
+            self._clear_symbol_cooldown(symbol)
             self.state["active_trades"][symbol] = {
                 "fill_price": round(float(price), 4),
                 "quantity": int(quantity),
             }
-            save_state(self.state)
+            save_state(self.state, self._state_file_path())
             self.log_message(
                 f"[stonxx] BUY filled {symbol} qty={quantity} @ {price:.2f}",
                 color="green",
@@ -512,6 +580,16 @@ class stonxx(Strategy):
             return
 
         if order.side == "sell":
+            current_trade = self.state["active_trades"].get(symbol)
+            if current_trade is not None:
+                entry_price = float(current_trade.get("fill_price", 0.0) or 0.0)
+                if entry_price > 0:
+                    realized_return = (float(price) - entry_price) / entry_price
+                    if realized_return <= 0:
+                        self._mark_symbol_cooldown(symbol)
+                    else:
+                        self._clear_symbol_cooldown(symbol)
+
             pos_qty = getattr(position, "quantity", 0) or 0
             if pos_qty <= 0:
                 self.state["active_trades"].pop(symbol, None)
@@ -520,5 +598,5 @@ class stonxx(Strategy):
                     "fill_price": round(float(price), 4),
                     "quantity": int(pos_qty),
                 }
-            save_state(self.state)
+            save_state(self.state, self._state_file_path())
             self.log_message(f"[stonxx] SELL filled {symbol} qty={quantity} @ {price:.2f}", color="magenta")

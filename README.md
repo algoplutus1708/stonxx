@@ -113,6 +113,11 @@ Or, equivalently:
 ```bash
 python run_daily_backtest.py
 ```
+This daily runner forces Yahoo Finance backtesting at startup, so local ThetaData or downloader overrides cannot take over.
+It also normalizes the basket symbols to Yahoo Finance `.NS` tickers before the backtest starts.
+By default it now runs a concentrated equal-weight basket of `MARUTI.NS`, `RELIANCE.NS`, and `BHARTIARTL.NS`, which materially outperformed the earlier ML picker in the 2025 sweep.
+Override the basket with `BASKET_SYMBOLS=MARUTI,RELIANCE,BHARTIARTL` if you want to test a different concentrated mix.
+After the run, it prints a concise terminal summary with Total Return, CAGR, Max Drawdown, and Sharpe, and it does not open the empty indicators plot.
 
 ### 2. Prepare Daily Research Data
 Build or refresh the split-adjusted daily Yahoo Finance panel used by the swing baseline:
