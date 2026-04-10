@@ -70,8 +70,8 @@ forces Yahoo Finance routing, uses a 15-year history window ending on
 Drawdown, and Sharpe after the backtest completes.
 The runner does not open the blank indicators plot, so the CLI stays focused
 on the headline stats.
-By default it now holds an equal-weight basket of ``MARUTI.NS``,
-``RELIANCE.NS``, and ``BHARTIARTL.NS``. Override that basket with
+By default it now holds an equal-weight basket of ``TITAN.NS`` and
+``APOLLOHOSP.NS``. Override that basket with
 ``BASKET_SYMBOLS=MARUTI,RELIANCE,BHARTIARTL`` if you want to test a different
 concentrated mix.
 

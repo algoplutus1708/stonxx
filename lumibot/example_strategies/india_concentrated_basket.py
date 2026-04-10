@@ -2,7 +2,7 @@
 
 The earlier ML picker was too conservative and under-deployed capital. This
 strategy holds a small basket of the strongest large-cap names we found in the
-2025 backtest sweep and simply keeps them on books once purchased.
+15-year backtest sweep and simply keeps them on books once purchased.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import pytz
 from lumibot.entities import Asset
 from lumibot.strategies.strategy import Strategy
 
-DEFAULT_BASKET_SYMBOLS = ["MARUTI.NS", "RELIANCE.NS", "BHARTIARTL.NS"]
+DEFAULT_BASKET_SYMBOLS = ["TITAN.NS", "APOLLOHOSP.NS"]
 DEFAULT_MARKET = "XBOM"
 
 

@@ -75,8 +75,8 @@ before computing long-only ranking features such as normalized momentum,
 Training is hard-capped at `2023-12-31`, so 2024+ rows never enter the
 expanding walk-forward splits or model fit.
 The `python run_daily_backtest.py` entry point now runs a 15-year Yahoo
-backtest over a concentrated equal-weight basket of `MARUTI.NS`,
-`RELIANCE.NS`, and `BHARTIARTL.NS`.
+backtest over a concentrated equal-weight basket of `TITAN.NS` and
+`APOLLOHOSP.NS`.
 That basket delivered a materially better 15-year historical backtest than the
 earlier ML picker, so the daily runner prints a concise headline summary after
 the run instead of opening a blank indicators page. The basket can be

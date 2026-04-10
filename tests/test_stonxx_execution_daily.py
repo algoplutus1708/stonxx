@@ -30,10 +30,13 @@ def test_run_daily_backtest_forces_yahoo_datasource(monkeypatch, capsys):
     original_data_source = os.environ.get("BACKTESTING_DATA_SOURCE")
     original_data_sources = os.environ.get("BACKTESTING_DATA_SOURCES")
 
-    monkeypatch.setenv("BASKET_SYMBOLS", "MARUTI,RELIANCE,BHARTIARTL")
-
     module = importlib.import_module("run_daily_backtest")
     captured = {}
+
+    monkeypatch.delenv("BASKET_SYMBOLS", raising=False)
+    assert module._load_basket_symbols() == list(module.DEFAULT_BASKET_SYMBOLS)
+
+    monkeypatch.setenv("BASKET_SYMBOLS", "MARUTI,RELIANCE,BHARTIARTL")
 
     def fake_backtest(datasource_class, **kwargs):
         captured["datasource_class"] = datasource_class

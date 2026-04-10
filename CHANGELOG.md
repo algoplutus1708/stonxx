@@ -9,6 +9,7 @@
 
 ### Changed
 - India trader documentation and examples now describe the daily panel research workflow and the new baseline model artifact names.
+- Daily Indian runner now uses a 15-year Yahoo backtest window and a concentrated two-stock basket (`TITAN.NS`, `APOLLOHOSP.NS`) instead of the earlier 3-stock basket, improving the default daily baseline.
 
 ## 4.4.59 - Unreleased
 
