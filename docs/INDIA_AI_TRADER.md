@@ -76,10 +76,13 @@ Training is hard-capped at `2023-12-31`, so 2024+ rows never enter the
 expanding walk-forward splits or model fit.
 The operational swing bot lives in `daily_paper_trader.py`, which loads
 `lumibot/example_strategies/stonxx_india_bot.py`. That strategy now combines
-the trained daily model with a sentiment overlay: in paper/live mode it reads
-recent market/news headlines through `sentiment_engine.py`, and in backtests it
-falls back to a deterministic market-regime proxy so historical runs stay
-reproducible.
+the trained daily model with a sentiment overlay and a weekly dual-momentum
+master-universe scanner: it accepts a broad master list from
+`STRATEGY_UNIVERSE`, keeps only names above their 200-day SMA, ranks the
+survivors by 90-day return, and trades the top `dynamic_universe_size`
+symbols (default 40). In paper/live mode it also reads recent market/news headlines through
+`sentiment_engine.py`, and in backtests it falls back to a deterministic
+market-regime proxy so historical runs stay reproducible.
 The `python run_daily_backtest.py` entry point now runs a 15-year Yahoo
 backtest over a concentrated equal-weight basket of `TITAN.NS` and
 `APOLLOHOSP.NS`.
@@ -114,15 +117,23 @@ Running the agent live requires a Dhan trading account and API credentials.
     DHAN_CLIENT_ID=your_id
     DHAN_ACCESS_TOKEN=your_token
     ```
-2.  Modify the target `STRATEGY_UNIVERSE` in the `.env` to select which stocks the agent should scan.
+2.  Populate `STRATEGY_UNIVERSE` with the broad master list you want the
+    weekly scanner to evaluate (for example, a Nifty Midcap 150 membership
+    list). The strategy refreshes the active list every Monday at 08:00 IST
+    and keeps only the strongest momentum names active. Set
+    `dynamic_universe_size` in the strategy parameters if you want a different
+    top-N cutoff.
 3.  Execute the live runner:
     ```bash
     python run_india_live.py
     ```
 
 The `stonxx` strategy binds its cron callbacks to `Asia/Kolkata` in
-`initialize()`, so the after-close and next-open jobs follow IST even if the
-host machine is configured for a different timezone.
+`initialize()`, so the after-close, next-open, and weekly scanner jobs follow
+IST even if the host machine is configured for a different timezone. The
+Dhan/Yahoo live data path now also keeps its delegate clock on IST, so the
+daily after-close job sees the just-closed session bar instead of lagging by an
+extra trading day.
 The sentiment helper does not require Ollama to be installed. When a local LLM
 is available it is used for richer scoring; otherwise the helper uses an RSS +
 keyword fallback so the daily bot keeps running.

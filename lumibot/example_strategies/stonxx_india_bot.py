@@ -7,9 +7,11 @@ orders instead of trading incomplete same-day bars.
 
 from __future__ import annotations
 
+import ast
 import csv
 import math
 import os
+import re
 from datetime import date, timedelta
 
 import joblib
@@ -37,7 +39,7 @@ from train_yf_model import (
     prepare_symbol_inference_frame,
 )
 
-DEFAULT_UNIVERSE = [
+MASTER_UNIVERSE = [
     "RELIANCE",
     "TCS",
     "INFY",
@@ -64,8 +66,10 @@ DEFAULT_COOLDOWN_TRADING_DAYS = 5
 DEFAULT_SENTIMENT_MODEL = "llama3.2"
 DEFAULT_SENTIMENT_WEIGHT = 0.35
 DEFAULT_SENTIMENT_THRESHOLD_BONUS = 0.75
+DEFAULT_DYNAMIC_UNIVERSE_SIZE = 40
 AFTER_CLOSE_CRON = "45 15 * * 1-5"
 NEXT_OPEN_CRON = "16 9 * * 1-5"
+WEEKLY_UNIVERSE_REFRESH_CRON = "0 8 * * 1"
 
 
 def next_trading_day(trading_date: date) -> date:
@@ -123,6 +127,297 @@ class stonxx(Strategy):
     def _state_file_path(self) -> str:
         return getattr(self, "state_file", STATE_FILE)
 
+    def _parameter(self, *names, default=None):
+        parameters = getattr(self, "parameters", None) or {}
+        for name in names:
+            if name in parameters:
+                value = parameters[name]
+                if value is not None:
+                    return value
+        return default
+
+    def _log_message(self, message: str, *, color: str | None = None) -> None:
+        logger = getattr(self, "log_message", None)
+        if callable(logger):
+            try:
+                if color is None:
+                    logger(message)
+                else:
+                    logger(message, color=color)
+                return
+            except TypeError:
+                logger(message)
+                return
+
+        fallback_logger = getattr(self, "logger", None)
+        if fallback_logger is not None and hasattr(fallback_logger, "info"):
+            fallback_logger.info(message)
+            return
+
+        print(message)
+
+    def _coerce_universe(self, universe_source) -> list[str]:
+        if universe_source is None:
+            return []
+
+        if isinstance(universe_source, str):
+            text = universe_source.strip()
+            if not text:
+                return []
+
+            parsed = None
+            try:
+                parsed = ast.literal_eval(text)
+            except (ValueError, SyntaxError):
+                parsed = None
+
+            if isinstance(parsed, (list, tuple, set)):
+                universe_source = list(parsed)
+            else:
+                universe_source = [part for part in re.split(r"[\s,;]+", text) if part.strip()]
+        elif isinstance(universe_source, dict):
+            universe_source = [
+                universe_source.get("symbol") or universe_source.get("ticker") or universe_source.get("name")
+            ]
+        elif hasattr(universe_source, "__iter__"):
+            universe_source = list(universe_source)
+        else:
+            universe_source = [universe_source]
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in universe_source:
+            if isinstance(item, dict):
+                raw_symbol = item.get("symbol") or item.get("ticker") or item.get("name")
+            else:
+                raw_symbol = getattr(item, "symbol", item)
+
+            if raw_symbol is None:
+                continue
+
+            symbol = str(raw_symbol).strip().strip("[](){}'\"")
+            if not symbol or symbol.lower() in {"none", "nan"}:
+                continue
+
+            normalized_symbol = symbol.upper()
+            if normalized_symbol in seen:
+                continue
+
+            seen.add(normalized_symbol)
+            normalized.append(normalized_symbol)
+
+        return normalized
+
+    def _build_stock_asset(self, symbol: str):
+        symbol = str(symbol).strip()
+        if not symbol:
+            return None
+
+        create_asset = getattr(self, "create_asset", None)
+        if callable(create_asset):
+            for kwargs in ({}, {"asset_type": Asset.AssetType.STOCK}, {"type": "stock"}):
+                try:
+                    return create_asset(symbol, **kwargs)
+                except TypeError:
+                    continue
+                except Exception:
+                    continue
+
+        return Asset(symbol=symbol, asset_type=Asset.AssetType.STOCK)
+
+    def _history_by_symbol(self, history_map) -> dict[str, object]:
+        if not isinstance(history_map, dict):
+            return {}
+
+        normalized: dict[str, object] = {}
+        for key, value in history_map.items():
+            key_symbol = getattr(key, "symbol", key)
+            if key_symbol is None:
+                continue
+            normalized[str(key_symbol).upper()] = value
+        return normalized
+
+    def _extract_close_series(self, history) -> pd.Series | None:
+        if history is None:
+            return None
+
+        if hasattr(history, "df"):
+            history = history.df
+        elif hasattr(history, "to_pandas"):
+            history = history.to_pandas()
+
+        if not isinstance(history, pd.DataFrame):
+            try:
+                history = pd.DataFrame(history)
+            except Exception:
+                return None
+
+        if history.empty:
+            return None
+
+        history = history.sort_index()
+        if not history.index.is_unique:
+            history = history[~history.index.duplicated(keep="last")]
+
+        close_column = None
+        for column in history.columns:
+            if str(column).strip().lower() == "close":
+                close_column = column
+                break
+
+        if close_column is None:
+            close_candidates = [column for column in history.columns if "close" in str(column).strip().lower()]
+            if len(close_candidates) == 1:
+                close_column = close_candidates[0]
+
+        if close_column is None and len(history.columns) == 1:
+            close_column = history.columns[0]
+
+        if close_column is None:
+            return None
+
+        closes = pd.to_numeric(history[close_column], errors="coerce").dropna()
+        closes = closes[closes > 0]
+        return closes if not closes.empty else None
+
+    def _load_master_universe(self) -> list[str]:
+        universe_source = self._parameter(
+            "master_universe",
+            "MASTER_UNIVERSE",
+            "universe",
+            "UNIVERSE",
+            default=MASTER_UNIVERSE,
+        )
+        return self._coerce_universe(universe_source)
+
+    def _load_master_universe_histories(self, master_universe: list[str]) -> dict[str, object]:
+        histories_by_symbol: dict[str, object] = {}
+        asset_pairs = []
+
+        for symbol in master_universe:
+            asset = self._build_stock_asset(symbol)
+            if asset is None:
+                continue
+            asset_pairs.append((symbol.upper(), asset))
+
+        if asset_pairs:
+            fetch_many = getattr(self, "get_historical_prices_for_assets", None)
+            if callable(fetch_many):
+                try:
+                    raw_histories = fetch_many(
+                        [asset for _, asset in asset_pairs],
+                        200,
+                        timestep="day",
+                        max_workers=min(16, len(asset_pairs)),
+                    )
+                except Exception as exc:
+                    self._log_message(
+                        f"[stonxx] bulk history fetch failed; falling back to per-symbol scans: {exc}",
+                        color="yellow",
+                    )
+                else:
+                    histories_by_symbol.update(self._history_by_symbol(raw_histories))
+
+        missing_symbols = [symbol for symbol in master_universe if symbol.upper() not in histories_by_symbol]
+        if not missing_symbols:
+            return histories_by_symbol
+
+        fetch_one = getattr(self, "get_historical_prices", None)
+        if not callable(fetch_one):
+            return histories_by_symbol
+
+        for symbol in missing_symbols:
+            asset = self._build_stock_asset(symbol)
+            if asset is None:
+                continue
+
+            try:
+                bars = fetch_one(asset, 200, "day")
+            except Exception as exc:
+                self._log_message(f"[stonxx] history fetch failed for {symbol}: {exc}", color="yellow")
+                continue
+
+            histories_by_symbol[symbol.upper()] = bars
+
+        return histories_by_symbol
+
+    def _schedule_weekly_universe_refresh(self) -> None:
+        register_cron_callback = getattr(self, "register_cron_callback", None)
+        if not callable(register_cron_callback):
+            self._log_message("[stonxx] register_cron_callback unavailable; weekly universe refresh not scheduled")
+            return
+
+        register_cron_callback(WEEKLY_UNIVERSE_REFRESH_CRON, self.refresh_active_universe)
+
+    def refresh_active_universe(self):
+        master_universe = self._load_master_universe()
+        if not master_universe:
+            self._log_message("[stonxx] MASTER_UNIVERSE is empty; keeping the current universe.", color="yellow")
+            return list(getattr(self, "universe", []))
+
+        self.master_universe = list(master_universe)
+        histories_by_symbol = self._load_master_universe_histories(master_universe)
+        if not histories_by_symbol:
+            self._log_message(
+                f"[stonxx] refresh skipped; no usable 200-day history loaded for {len(master_universe)} symbols",
+                color="yellow",
+            )
+            return list(getattr(self, "universe", master_universe))
+
+        ranked_candidates: list[tuple[str, float]] = []
+        scanned_any = False
+
+        for symbol in master_universe:
+            closes = self._extract_close_series(histories_by_symbol.get(symbol.upper()))
+            if closes is None or len(closes) < 200:
+                continue
+
+            scanned_any = True
+            closes = closes.tail(200)
+            current_price = float(closes.iloc[-1])
+            sma_200 = float(closes.mean())
+
+            if current_price < sma_200:
+                continue
+
+            close_90_days_ago = float(closes.iloc[-91])
+            if close_90_days_ago <= 0:
+                continue
+
+            roc_90 = ((current_price / close_90_days_ago) - 1.0) * 100.0
+            ranked_candidates.append((symbol, roc_90))
+
+        if not scanned_any:
+            self._log_message(
+                f"[stonxx] refresh skipped; no symbols reached the 200-bar minimum out of {len(master_universe)}",
+                color="yellow",
+            )
+            return list(getattr(self, "universe", master_universe))
+
+        ranked_candidates.sort(key=lambda item: (-item[1], item[0]))
+
+        try:
+            top_n = int(self._parameter("dynamic_universe_size", default=DEFAULT_DYNAMIC_UNIVERSE_SIZE))
+        except (TypeError, ValueError):
+            top_n = DEFAULT_DYNAMIC_UNIVERSE_SIZE
+        top_n = max(0, top_n)
+
+        self.universe = [symbol for symbol, _ in ranked_candidates[:top_n]]
+
+        if self.universe:
+            preview = ", ".join(f"{symbol} ({roc:.1f}%)" for symbol, roc in ranked_candidates[:top_n])
+            self._log_message(
+                f"[stonxx] refreshed active universe {len(self.universe)}/{len(master_universe)}: {preview}",
+                color="green",
+            )
+        else:
+            self._log_message(
+                f"[stonxx] refreshed active universe 0/{len(master_universe)}: no names passed the momentum filters",
+                color="yellow",
+            )
+
+        return list(self.universe)
+
     def initialize(self):
         self.set_market("XBOM")
         self.broker.data_source.tzinfo = pytz.timezone("Asia/Kolkata")
@@ -130,7 +425,8 @@ class stonxx(Strategy):
         self.minutes_before_closing = 0
         self.minutes_after_closing = 15
 
-        self.universe = [symbol.upper() for symbol in self.parameters.get("universe", DEFAULT_UNIVERSE)]
+        self.master_universe = self._load_master_universe()
+        self.universe = list(self.master_universe)
         self.model_path = self.parameters.get("model_path", DEFAULT_MODEL_PATH)
         self.benchmark_symbol = self.parameters.get("benchmark_symbol", BENCHMARK_TICKER)
         self._benchmark_asset = Asset(symbol=self.benchmark_symbol, asset_type=Asset.AssetType.INDEX)
@@ -171,24 +467,24 @@ class stonxx(Strategy):
                 self.model = artifact["model"]
                 self.features = artifact.get("features", list(FEATURE_COLUMNS))
                 mean_metrics = artifact.get("meta", {}).get("mean_metrics", {})
-                self.log_message(
+                self._log_message(
                     f"[stonxx] Loaded daily model {self.model_path} | mean_metrics={mean_metrics}",
                     color="green",
                 )
             else:
                 self.model = artifact
-                self.log_message(
+                self._log_message(
                     f"[stonxx] Loaded legacy model object from {self.model_path}",
                     color="yellow",
                 )
         except FileNotFoundError:
-            self.log_message(
+            self._log_message(
                 f"[stonxx] Model file {self.model_path} not found. Run train_yf_model.py first.",
                 color="red",
             )
 
         if self.sentiment_engine is None:
-            self.log_message(
+            self._log_message(
                 "[stonxx] Sentiment engine import unavailable; using the benchmark proxy only.",
                 color="yellow",
             )
@@ -198,13 +494,22 @@ class stonxx(Strategy):
             tracked = ", ".join(
                 f"{symbol}@{info.get('fill_price', '?')}x{info.get('quantity', '?')}" for symbol, info in active.items()
             )
-            self.log_message(f"[stonxx] Restored active positions: {tracked}", color="cyan")
+            self._log_message(f"[stonxx] Restored active positions: {tracked}", color="cyan")
         else:
-            self.log_message("[stonxx] No active positions restored.", color="cyan")
+            self._log_message("[stonxx] No active positions restored.", color="cyan")
+
+        try:
+            self.refresh_active_universe()
+        except Exception as exc:
+            self._log_message(
+                f"[stonxx] initial universe refresh failed; keeping master universe fallback: {exc}",
+                color="yellow",
+            )
 
         if not self.is_backtesting:
             self.register_cron_callback(AFTER_CLOSE_CRON, self.generate_after_close_plan)
             self.register_cron_callback(NEXT_OPEN_CRON, self.submit_pending_orders)
+            self._schedule_weekly_universe_refresh()
 
         self.paper_trade_file = "paper_trades.csv"
         self._ensure_paper_trade_file()

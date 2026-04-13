@@ -75,10 +75,16 @@ By default it now holds an equal-weight basket of ``TITAN.NS`` and
 ``BASKET_SYMBOLS=MARUTI,RELIANCE,BHARTIARTL`` if you want to test a different
 concentrated mix.
 The operational daily swing bot is ``daily_paper_trader.py``. It loads
-``lumibot/example_strategies/stonxx_india_bot.py``, which ranks candidates with
-the daily XGBoost model and then adjusts the signal with market/news sentiment.
-When Ollama is unavailable, the sentiment helper falls back to a deterministic
-keyword score so paper trading and backtesting still work.
+``lumibot/example_strategies/stonxx_india_bot.py``, which now treats the
+configured universe as a broad master list, filters names above their 200-day
+SMA, ranks the survivors by 90-day return, and refreshes the active trading
+list every Monday at 08:00 IST before applying the daily XGBoost model and
+market/news sentiment overlay. When Ollama is unavailable, the sentiment
+helper falls back to a deterministic keyword score so paper trading and
+backtesting still work. The active list keeps the top ``dynamic_universe_size``
+names, which defaults to 40. In live mode the Dhan/Yahoo bridge now stays on
+the exchange's ``Asia/Kolkata`` clock, so the 15:45 IST signal run includes the
+just-closed daily bar instead of waiting an extra session.
 
 Stocks
 ------

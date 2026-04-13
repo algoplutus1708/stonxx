@@ -75,10 +75,16 @@ Retail trading in the Indian market is often a battle against noise, high slippa
 -   DhanHQ API Access
 
 ### 2. Installation
+If you are on macOS or any environment with an externally managed system Python, create and activate a virtual environment first.
+
 ```bash
 # Clone the repository
 git clone https://github.com/algoplutus1708/stonxx.git
 cd stonxx
+
+# Create and activate the project virtualenv
+python3 -m venv .venv
+source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt

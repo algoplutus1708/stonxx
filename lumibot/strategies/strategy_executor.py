@@ -107,6 +107,15 @@ class StrategyExecutor(Thread):
             else self.strategy.on_trading_iteration
         )
 
+    def _coerce_log_datetime(self, dt_value: datetime) -> datetime:
+        target_tz = getattr(self.strategy, "pytz", None) or LUMIBOT_DEFAULT_PYTZ
+        if dt_value.tzinfo is None:
+            localize = getattr(target_tz, "localize", None)
+            if callable(localize):
+                return localize(dt_value)
+            return dt_value.replace(tzinfo=target_tz)
+        return dt_value.astimezone(target_tz)
+
     def _is_continuous_market(self, market_name):
         """
         Determine if a market trades continuously (24/7 or near-24/7) by checking its trading schedule.
@@ -1033,10 +1042,7 @@ class StrategyExecutor(Thread):
         log_iteration_heartbeat = self._log_iteration_heartbeat
         if log_iteration_heartbeat:
             # Optimization: avoid tz conversions/strftime unless we are actually logging.
-            if start_dt.tzinfo is None:
-                start_dt_tz = start_dt.replace(tzinfo=LUMIBOT_DEFAULT_PYTZ)
-            else:
-                start_dt_tz = start_dt.astimezone(LUMIBOT_DEFAULT_PYTZ)
+            start_dt_tz = self._coerce_log_datetime(start_dt)
             start_str = start_dt_tz.strftime("%Y-%m-%d %I:%M:%S %p %Z")
             self.strategy.log_message(
                 f"Bot is running. Executing the on_trading_iteration lifecycle method at {start_str}",
@@ -1072,10 +1078,7 @@ class StrategyExecutor(Thread):
             next_run_time = self.get_next_ap_scheduler_run_time()
             if next_run_time is not None and log_iteration_heartbeat:
                 # Format the date to be used in the log message.
-                if end_dt.tzinfo is None:
-                    end_dt_tz = end_dt.replace(tzinfo=LUMIBOT_DEFAULT_PYTZ)
-                else:
-                    end_dt_tz = end_dt.astimezone(LUMIBOT_DEFAULT_PYTZ)
+                end_dt_tz = self._coerce_log_datetime(end_dt)
                 end_str = end_dt_tz.strftime("%Y-%m-%d %I:%M:%S %p %Z")
                 dt_str = next_run_time.strftime("%Y-%m-%d %I:%M:%S %p %Z")
                 self.strategy.log_message(
@@ -1083,10 +1086,7 @@ class StrategyExecutor(Thread):
                 )
 
             elif log_iteration_heartbeat:
-                if end_dt.tzinfo is None:
-                    end_dt_tz = end_dt.replace(tzinfo=LUMIBOT_DEFAULT_PYTZ)
-                else:
-                    end_dt_tz = end_dt.astimezone(LUMIBOT_DEFAULT_PYTZ)
+                end_dt_tz = self._coerce_log_datetime(end_dt)
                 end_str = end_dt_tz.strftime("%Y-%m-%d %I:%M:%S %p %Z")
                 self.strategy.log_message(f"Trading iteration ended at {end_str}", color="blue")
         except Exception as e:

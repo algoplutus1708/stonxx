@@ -264,10 +264,7 @@ class YahooData(DataSourceBacktesting):
         current_dt = self.to_default_timezone(self._datetime)
 
         if timestep == "day":
-            # For daily data, we want bars up to and including the current backtest day.
-            # Filter data strictly *before* the start of the *next* day.
-            dt = self._datetime.replace(hour=23, minute=59, second=59, microsecond=999999)
-            end_filter = dt - timedelta(days=1)
+            end_filter = self._daily_history_end_filter(current_dt)
         else:
             # For intraday, filter up to the current datetime
             end_filter = current_dt
@@ -308,6 +305,27 @@ class YahooData(DataSourceBacktesting):
             )
 
         return result
+
+    def _daily_history_end_filter(self, current_dt):
+        session_start = current_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        tz_name = (
+            getattr(getattr(current_dt, "tzinfo", None), "zone", None)
+            or getattr(getattr(current_dt, "tzinfo", None), "key", None)
+            or getattr(getattr(self, "tzinfo", None), "zone", None)
+            or getattr(getattr(self, "tzinfo", None), "key", None)
+        )
+
+        # Indian daily strategies generate signals after the 15:30 IST close and
+        # need the just-finished bar. Before the close, keep the current session
+        # excluded so unfinished Yahoo daily bars do not leak into the model.
+        if tz_name == "Asia/Kolkata":
+            market_close = current_dt.replace(hour=15, minute=30, second=0, microsecond=0)
+            if current_dt >= market_close:
+                return session_start + timedelta(days=1)
+            return session_start
+
+        dt = current_dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return dt - timedelta(days=1)
 
     def _pull_source_bars(
         self, assets, length, timestep=MIN_TIMESTEP, timeshift=None, quote=None, include_after_hours=False

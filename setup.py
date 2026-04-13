@@ -31,10 +31,8 @@ class BuildWithThetaJar(_build_py):
         dest = Path(self.build_lib) / "lumibot" / "resources" / "ThetaTerminal.jar"
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
-        print(
-            f"[build] Bundled ThetaTerminal.jar -> {dest} "
-            f"(size={dest.stat().st_size} bytes)"
-        )
+        print(f"[build] Bundled ThetaTerminal.jar -> {dest} (size={dest.stat().st_size} bytes)")
+
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -68,6 +66,7 @@ setuptools.setup(
         "pandas_market_calendars>=5.1.0",
         "pandas-ta-classic>=0.3.14b0",
         "plotly>=5.18.0",
+        "rich>=13.7.1",
         "sqlalchemy",
         "bcrypt",
         "pytest",
@@ -110,7 +109,8 @@ setuptools.setup(
     package_data={
         "lumibot": [
             "resources/conf.yaml",
-        ] + (["resources/ThetaTerminal.jar"] if theta_jar_path.exists() else []),
+        ]
+        + (["resources/ThetaTerminal.jar"] if theta_jar_path.exists() else []),
     },
     extras_require={
         # Optional dependencies to enable ThetaData support

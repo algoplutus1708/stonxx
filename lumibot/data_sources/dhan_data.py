@@ -45,6 +45,7 @@ from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
+import pytz
 
 try:
     from dhanhq import dhanhq as DhanAPI
@@ -58,6 +59,7 @@ from lumibot.tools import YahooHelper
 from lumibot.tools.lumibot_logger import get_logger
 
 logger = get_logger(__name__)
+_IST = pytz.timezone("Asia/Kolkata")
 
 
 # ---------------------------------------------------------------------------
@@ -225,14 +227,20 @@ class DhanData(DataSourceBacktesting):
         datetime_end: Optional[datetime] = None,
         **kwargs,
     ):
+        tzinfo = kwargs.pop("tzinfo", _IST) or _IST
+
         if datetime_start is None:
-            datetime_start = datetime.now() - timedelta(days=365)
+            datetime_start = datetime.now(tzinfo) - timedelta(days=365)
         if datetime_end is None:
-            datetime_end = datetime.now()
+            datetime_end = datetime.now(tzinfo)
+
+        datetime_start = self._coerce_timezone(datetime_start, tzinfo)
+        datetime_end = self._coerce_timezone(datetime_end, tzinfo)
 
         super().__init__(
             datetime_start=datetime_start,
             datetime_end=datetime_end,
+            tzinfo=tzinfo,
             **kwargs,
         )
 
@@ -274,10 +282,41 @@ class DhanData(DataSourceBacktesting):
             self._yahoo = YahooData(
                 datetime_start=datetime_start,
                 datetime_end=datetime_end,
+                tzinfo=tzinfo,
                 **kwargs,
             )
         else:
             self._yahoo = None
+
+        self._sync_yahoo_context()
+
+    @staticmethod
+    def _coerce_timezone(dt_value: Optional[datetime], tzinfo) -> Optional[datetime]:
+        if dt_value is None:
+            return None
+
+        if dt_value.tzinfo is None or dt_value.tzinfo.utcoffset(dt_value) is None:
+            localize = getattr(tzinfo, "localize", None)
+            if callable(localize):
+                return localize(dt_value)
+            return dt_value.replace(tzinfo=tzinfo)
+
+        return dt_value.astimezone(tzinfo)
+
+    def _sync_yahoo_context(self) -> None:
+        if self._yahoo is None:
+            return
+
+        tzinfo = getattr(self, "tzinfo", None) or _IST
+        self._yahoo.tzinfo = tzinfo
+
+        for attr in ("datetime_start", "datetime_end"):
+            value = getattr(self, attr, None)
+            if value is not None:
+                setattr(self._yahoo, attr, self._coerce_timezone(value, tzinfo))
+
+        current_dt = self._datetime
+        self._yahoo._datetime = self._coerce_timezone(current_dt, tzinfo)
 
     # ------------------------------------------------------------------
     # Time override for Live Trading
@@ -374,6 +413,7 @@ class DhanData(DataSourceBacktesting):
         last_exc: Optional[Exception] = None
         for attempt in range(1, self.yf_retry_attempts + 1):
             try:
+                self._sync_yahoo_context()
                 bars = self._yahoo.get_historical_prices(
                     yahoo_asset,
                     length,
@@ -689,6 +729,7 @@ class DhanData(DataSourceBacktesting):
 
         # Delegate to Yahoo's low-level puller (returns raw DataFrame)
         try:
+            self._sync_yahoo_context()
             raw = self._yahoo._pull_source_symbol_bars(
                 yahoo_asset,
                 length,

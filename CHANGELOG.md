@@ -6,16 +6,20 @@
 - Split-adjusted daily Yahoo Finance panel builder for a diversified Indian equity universe plus Nifty benchmark (`yf_historical_fetcher.py`), saved as `data/stonxx_daily_panel_yf.parquet`.
 - Leak-aware daily baseline trainer (`train_yf_model.py`) using expanding temporal validation with an embargo gap and a saved XGBoost artifact (`stonxx_daily_panel_model.joblib`).
 - Regression coverage for the new daily panel schema, benchmark merge, feature generation, and embargoed split behavior.
+- Weekly dual-momentum master-universe scanner for `stonxx_india_bot.py`: broad master list -> 200-day SMA absolute momentum filter -> 90-day relative momentum ranking -> top `dynamic_universe_size` active universe, refreshed every Monday at 08:00 IST.
 
 ### Changed
 - India trader documentation and examples now describe the daily panel research workflow and the new baseline model artifact names.
 - Daily Indian runner now uses a 15-year Yahoo backtest window and a concentrated two-stock basket (`TITAN.NS`, `APOLLOHOSP.NS`) instead of the earlier 3-stock basket, improving the default daily baseline.
 - The operational daily swing bot now blends the trained XGBoost signal with market/news sentiment in paper/live mode, while backtests use a deterministic market-regime proxy so runs stay reproducible.
+- `stonxx_india_bot.py` now bootstraps the active universe safely at startup and treats the configured universe as the master list for the weekly scanner.
 - IndiaAITrader now calls `get_market_sentiment` before decisions, passes structured sentiment snapshots into the agent prompt/context, and hard-blocks BUY orders for symbols whose sentiment is below the configured threshold.
 - IndiaAITrader backtests now use a neutral `0.50` sentiment score instead of live news to avoid look-ahead bias.
 
 ### Fixed
 - `sentiment_engine.py` no longer requires Ollama or `feedparser` to be installed. It now fetches RSS headlines with the standard library and falls back to a deterministic keyword score when local LLM tooling is unavailable, keeping the bot operational in minimal environments.
+- `rich` is now declared in both `requirements.txt` and `setup.py`, so `stonxx_dashboard.py` imports cleanly in fresh installs and editable environments.
+- Dhan-backed India paper/live runners now keep the Yahoo history delegate on the live IST clock, format iteration logs in the strategy timezone instead of `LMT`, and include the just-closed daily bar after the 15:30 IST cash-session close.
 
 ## 4.4.59 - Unreleased
 

@@ -11,6 +11,7 @@ polars>=1.32.3
 pandas_market_calendars>=5.1.0
 pandas-ta-classic>=0.3.14b0
 plotly>=5.18.0
+rich>=13.7.1
 sqlalchemy
 bcrypt
 pytest
